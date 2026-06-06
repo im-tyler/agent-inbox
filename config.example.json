@@ -1,0 +1,9 @@
+{
+  "claude": { "permission_mode": "default" },
+  "opencode": { "model": "opencode/deepseek-v4-flash-free", "skip_permissions": false },
+  "projects": [
+    { "name": "demo", "tool": "mock", "dir": "/tmp" },
+    { "name": "tebian", "tool": "claude", "dir": "/Users/tyler/Documents/Code Projects/Tebian/tebian-os" },
+    { "name": "neutron", "tool": "opencode", "dir": "/Users/tyler/Documents/Code Projects/Neutron" }
+  ]
+}
