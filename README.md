@@ -1,5 +1,7 @@
 # agent-inbox
 
+![License: MIT](https://img.shields.io/badge/license-MIT-blue) ![Go](https://img.shields.io/badge/Go-single_binary-00ADD8) ![Status](https://img.shields.io/badge/status-alpha-orange)
+
 A federated supervisor for CLI coding agents. One terminal that holds N
 independent projects — each backed by its own long-lived **Claude Code** or
 **OpenCode** session — and surfaces them through a single inbox: see who's
