@@ -1,3 +1,18 @@
 /agent-inbox
 /state.json
 /config.json
+
+# --- agent/local context: never publish ---
+.claude/
+.opencode/
+AGENTS.md
+SESSION_NOTES.md
+HANDOFF*.md
+CONTINUATION_PROMPT.md
+*_NEXT_SESSION.md
+_internal/
+# --- secrets ---
+.env
+.env.*
+!.env.example
+*.local
