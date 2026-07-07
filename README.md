@@ -23,8 +23,9 @@ Working name. Phase 1 = Claude + OpenCode.
 | Mock driver | done, exercised |
 | Claude adapter | **done, live-verified** (send / resume / session persistence) |
 | OpenCode adapter | **done, live-verified** (new session + resume + export-based reply, free model) |
-| Inbox REPL (ls/send/view/attach) | done, background sends + restart persistence verified |
-| State persistence | done |
+| Inbox state model + background sends | done, restart persistence verified |
+| TUI dashboard (Bubble Tea) | done — single-screen view, live updates, inline send |
+| Legacy REPL | done, available via `--repl` flag |
 | Stop-hook bridge + live notify | **done, live-verified** (hand-run session reported into inbox via real transcript) |
 
 ### OpenCode notes
@@ -41,10 +42,11 @@ Working name. Phase 1 = Claude + OpenCode.
 ## Architecture
 
 ```
-main.go                 REPL + wiring
+main.go                 entry: dispatches to TUI (default), legacy REPL (--repl), or hook
 internal/config         config.json (projects + per-tool settings)
 internal/inbox          project state, mutex-guarded; background Send; persistence
 internal/driver         Driver interface + adapters (mock, claude, opencode)
+internal/tui            Bubble Tea dashboard (model/view/update, styles, run)
 ```
 
 The only vendor-specific code lives in `internal/driver/*.go`. Each adapter
@@ -77,6 +79,10 @@ cp config.example.json ~/.agent-inbox/config.json   # then edit projects
 ./agent-inbox
 ```
 
+The default UI is a **Bubble Tea TUI dashboard** showing all federated projects
+on one screen with live status updates. Pass `--repl` for the legacy
+line-oriented REPL.
+
 Config:
 
 ```json
@@ -88,6 +94,27 @@ Config:
     { "name": "neutron", "tool": "opencode", "dir": "/path/to/neutron" }
   ]
 }
+```
+
+### TUI keybindings
+
+| Key | Action |
+|---|---|
+| `j` / `k` or `↑` / `↓` | navigate project list |
+| `1` – `9` | select project by index |
+| `s` | send a message to the selected project (inline prompt) |
+| `v` or `Enter` | view the project's last message in full |
+| `a` | show the attach command (interactive `exec` attach in v0.2) |
+| `r` | refresh the toast line |
+| `?` | toggle keybindings help |
+| `q` or `Ctrl+C` | quit |
+
+While in send mode: `Enter` dispatches, `Esc` cancels.
+
+### Legacy REPL
+
+```sh
+./agent-inbox --repl
 ```
 
 Commands: `ls`, `send <n> <msg>`, `view <n>`, `attach <n>`, `quit`.
@@ -126,5 +153,6 @@ project to `waiting`, and prints a live `[notify]`.
 - **OpenCode Stop-equivalent** — the hook bridge is Claude-only so far; OpenCode
   has no Stop hook, so hand-run OpenCode sessions don't yet self-report.
 - **Codex adapter** — third driver once the two-vendor abstraction settles.
-- **Bubble Tea TUI** — upgrade from the stdlib REPL once the model is right.
+- **Streaming mode** — replace turn-returns-when-done with live working/blocked/waiting classification.
+- **Multi-host** — projects on different machines via Tailscale.
 - **OpenCode `serve` adapter** — persistent server instead of per-send exec.

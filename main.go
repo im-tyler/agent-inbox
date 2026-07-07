@@ -15,6 +15,7 @@ import (
 	"agentinbox/internal/config"
 	"agentinbox/internal/driver"
 	"agentinbox/internal/inbox"
+	"agentinbox/internal/tui"
 )
 
 func dataDir() string {
@@ -34,6 +35,7 @@ func main() {
 	dd := dataDir()
 	cfgPath := flag.String("config", filepath.Join(dd, "config.json"), "path to config.json")
 	statePath := flag.String("state", filepath.Join(dd, "state.json"), "path to state.json")
+	replMode := flag.Bool("repl", false, "use the legacy line-oriented REPL instead of the TUI dashboard")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
@@ -55,7 +57,16 @@ func main() {
 	inbox.LoadState(*statePath, projects)
 
 	in := inbox.New(projects, drivers, *statePath)
-	repl(in, filepath.Join(dd, "events"))
+	eventsDir := filepath.Join(dd, "events")
+
+	if *replMode {
+		repl(in, eventsDir)
+		return
+	}
+	if err := tui.Run(in, eventsDir); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-inbox: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // runHook is invoked as a Claude Stop hook. It reads the hook payload from
