@@ -54,7 +54,7 @@ func TestRenderRowContainsFields(t *testing.T) {
 		Status:      driver.StatusWaiting,
 		LastMessage: "I need help with the foo",
 	}
-	row := renderRow(1, p, false)
+	row := renderRow(1, p, false, 80)
 	for _, want := range []string{"[1]", "my-project", "claude", "waiting", "I need help"} {
 		if !strings.Contains(row, want) {
 			t.Errorf("renderRow output missing %q; got %q", want, row)
@@ -64,7 +64,7 @@ func TestRenderRowContainsFields(t *testing.T) {
 
 func TestRenderRowSelectedDoesNotPanic(t *testing.T) {
 	p := inbox.Project{Name: "x", Tool: "mock", Status: driver.StatusIdle}
-	row := renderRow(2, p, true)
+	row := renderRow(2, p, true, 80)
 	if row == "" {
 		t.Fatal("selected renderRow returned empty string")
 	}

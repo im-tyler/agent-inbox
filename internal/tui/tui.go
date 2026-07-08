@@ -366,36 +366,35 @@ func (m Model) viewList() string {
 
 	var b strings.Builder
 
-	header := headerStyle.Render(fmt.Sprintf(
-		"agent-inbox  %d projects  %d waiting",
-		len(snap), waiting,
-	))
-	b.WriteString(header)
-	b.WriteByte('\n')
-	b.WriteByte('\n')
+	// Header line with counts.
+	header := fmt.Sprintf("%d projects  %d waiting", len(snap), waiting)
+	b.WriteString(headerStyle.Render(header))
+	b.WriteString("\n\n")
 
 	if len(snap) == 0 {
-		b.WriteString(mutedStyle.Render("  no projects configured — edit config.json"))
-		b.WriteByte('\n')
+		b.WriteString(mutedStyle.Render("no projects configured — press n to add one"))
+		b.WriteString("\n")
 	} else {
+		// Content width for adaptive truncation (frame border + padding).
+		contentW := m.width - 4
+		if contentW < 30 {
+			contentW = 30
+		}
 		for i, p := range snap {
-			row := renderRow(i+1, p, m.selected == i+1)
+			row := renderRow(i+1, p, m.selected == i+1, contentW)
 			b.WriteString(row)
-			b.WriteByte('\n')
+			b.WriteString("\n")
 		}
 	}
 
 	if m.toast != "" && time.Since(m.toastAt) < 6*time.Second {
-		b.WriteByte('\n')
-		b.WriteString(wrapToast(m.toast, m.width))
-		b.WriteByte('\n')
+		b.WriteString("\n")
+		b.WriteString(wrapToast(m.toast, m.width-4))
+		b.WriteString("\n")
 	}
 
-	b.WriteString("\n\n")
-	b.WriteString(m.footer())
-	b.WriteByte('\n')
-
-	return b.String()
+	footer := m.footer()
+	return renderFrame(m.width, m.height, "agent-inbox", b.String(), footer)
 }
 
 func (m Model) viewDetail() string {
@@ -408,12 +407,6 @@ func (m Model) viewDetail() string {
 
 	var b strings.Builder
 
-	// Header: project name + tool.
-	b.WriteString(headerStyle.Render(fmt.Sprintf("%s  (%s)", p.Name, p.Tool)))
-	b.WriteString(statusStyle(p.Status, "  ["+string(p.Status)+"]"))
-	b.WriteByte('\n')
-	b.WriteByte('\n')
-
 	// Metadata block.
 	rows := [][2]string{
 		{"dir", p.Dir},
@@ -424,19 +417,17 @@ func (m Model) viewDetail() string {
 	for _, r := range rows {
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("  %-10s", r[0])))
 		b.WriteString(r[1])
-		b.WriteByte('\n')
+		b.WriteString("\n")
 	}
 
 	// History (most-recent-last; visually reads top→bottom like a chat).
-	b.WriteByte('\n')
+	b.WriteString("\n")
 	if len(p.History) == 0 {
-		b.WriteString(mutedStyle.Render("  (no messages yet — press 's' to send one)"))
-		b.WriteByte('\n')
+		b.WriteString(mutedStyle.Render("  (no messages yet — press s to send one)"))
+		b.WriteString("\n")
 	} else {
 		b.WriteString(workingStyle.Render("  history:"))
-		b.WriteByte('\n')
-		// Show the most recent ~8 turns to fit a typical viewport. Future
-		// enhancement: scrollable viewport. For now we trim from the front.
+		b.WriteString("\n")
 		start := 0
 		const show = 8
 		if len(p.History) > show {
@@ -461,17 +452,15 @@ func (m Model) viewDetail() string {
 			}
 			ts := msg.Timestamp.Format(time.Kitchen)
 			b.WriteString(style.Render(fmt.Sprintf("  [%s %s]", label, ts)))
-			b.WriteByte('\n')
+			b.WriteString("\n")
 			b.WriteString(indent(msg.Content, "    "))
-			b.WriteByte('\n')
+			b.WriteString("\n")
 		}
 	}
 
-	b.WriteString("\n\n")
-	b.WriteString(mutedStyle.Render("  esc back  s send  a attach  q quit"))
-	b.WriteByte('\n')
-
-	return b.String()
+	title := fmt.Sprintf("%s  (%s)  [%s]", p.Name, p.Tool, string(p.Status))
+	footer := mutedStyle.Render("esc back  s send  a attach  q quit")
+	return renderFrame(m.width, m.height, title, b.String(), footer)
 }
 
 // footer renders the bottom-of-screen prompt area: send input or keybindings.
@@ -494,30 +483,42 @@ func (m Model) footer() string {
 	return mutedStyle.Render(footerText)
 }
 
-func renderRow(idx int, p inbox.Project, selected bool) string {
+func renderRow(idx int, p inbox.Project, selected bool, contentW int) string {
 	idxStr := fmt.Sprintf("[%d]", idx)
-	statusStr := string(p.Status)
 	ageStr := ageHuman(time.Since(p.UpdatedAt))
 	msgStr := p.LastMessage
 	if msgStr == "" && p.LastErr != "" {
 		msgStr = "error: " + p.LastErr
 	}
 
-	// If the driver is streaming and we have live activity, surface it
-	// in the status column instead of just "working".
-	if p.Status == driver.StatusWorking && p.Activity != "" {
-		statusStr = "working:" + p.Activity
+	// Use a badge for the status column.
+	badge := statusBadge(p.Status, p.Activity)
+
+	// Fixed columns: "[N] " = 4, name = 21, tool = 11, age = 7, badge ~14, spaces ~6 = ~63
+	// Message gets the rest.
+	fixedW := 4 + 21 + 11 + 7 + 14 + 6
+	msgW := contentW - fixedW
+	if msgW < 10 {
+		msgW = 10
+	}
+	msgStr = truncateOneLine(msgStr, msgW)
+
+	// Build the row with proper spacing.
+	nameStr := p.Name
+	if len(nameStr) > 20 {
+		nameStr = nameStr[:19] + "…"
+	}
+	toolStr := p.Tool
+	if len(toolStr) > 10 {
+		toolStr = toolStr[:9] + "…"
 	}
 
-	msgStr = truncateOneLine(msgStr, 60)
-
-	statusStyled := statusStyle(p.Status, statusStr)
 	row := fmt.Sprintf(
 		"%s %-20s %-10s %6s  %s",
-		idxStr, p.Name, p.Tool, ageStr, statusStyled,
+		idxStr, nameStr, toolStr, ageStr, badge,
 	)
 	if msgStr != "" {
-		row += mutedStyle.Render("  " + msgStr)
+		row += "  " + mutedStyle.Render(msgStr)
 	}
 	if selected {
 		row = selectedStyle.Render(row)

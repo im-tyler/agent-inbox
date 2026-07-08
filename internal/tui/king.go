@@ -30,22 +30,11 @@ func (m *Model) renderKing() string {
 
 	var b strings.Builder
 
-	// Header.
-	statusStr := string(king.Status)
-	if king.Activity != "" {
-		statusStr += ":" + king.Activity
-	}
-	b.WriteString(headerStyle.Render(fmt.Sprintf(
-		"king: %s (%s)  [%s]",
-		king.Name, king.Tool, statusStr,
-	)))
-	b.WriteString("\n\n")
-
-	// Connected projects sidebar.
-	b.WriteString(workingStyle.Render("  connected:"))
+	// Connected projects.
+	b.WriteString(workingStyle.Render("connected:"))
 	b.WriteString("\n")
 	if len(m.connected) == 0 {
-		b.WriteString(mutedStyle.Render("    (none — press + to add)"))
+		b.WriteString(mutedStyle.Render("  (none — press + to add)"))
 		b.WriteString("\n")
 	} else {
 		connSet := make(map[string]bool, len(m.connected))
@@ -56,25 +45,22 @@ func (m *Model) renderKing() string {
 			if !connSet[p.Name] {
 				continue
 			}
-			pStatus := string(p.Status)
-			if p.Activity != "" {
-				pStatus += ":" + p.Activity
-			}
+			badge := statusBadge(p.Status, p.Activity)
 			msg := truncateOneLine(p.LastMessage, 50)
 			if msg == "" && p.LastErr != "" {
 				msg = "err: " + truncateOneLine(p.LastErr, 40)
 			}
-			b.WriteString(fmt.Sprintf("    %-16s %-8s %-14s %s\n",
-				p.Name, p.Tool, statusStyle(p.Status, pStatus), mutedStyle.Render(msg)))
+			b.WriteString(fmt.Sprintf("  %-16s %-8s %s %s\n",
+				p.Name, p.Tool, badge, mutedStyle.Render(msg)))
 		}
 	}
 
-	// Conversation (last few turns).
+	// Conversation.
 	b.WriteString("\n")
-	b.WriteString(workingStyle.Render("  conversation:"))
+	b.WriteString(workingStyle.Render("conversation:"))
 	b.WriteString("\n")
 	if len(king.History) == 0 {
-		b.WriteString(mutedStyle.Render("    (no messages yet — press s to send)"))
+		b.WriteString(mutedStyle.Render("  (no messages — press s to send)"))
 		b.WriteString("\n")
 	} else {
 		start := 0
@@ -104,21 +90,25 @@ func (m *Model) renderKing() string {
 		}
 	}
 
-	// Send input or footer.
-	b.WriteString("\n\n")
-	if m.kingSendMode {
-		b.WriteString(fmt.Sprintf("  send to king: %s\n", m.kingInput.View()))
-		b.WriteString(mutedStyle.Render("  enter to send  esc to cancel"))
-	} else if m.kingAddMode {
-		b.WriteString(m.renderKingAddPicker(snap))
-	} else if m.kingRemoveMode {
-		b.WriteString(m.renderKingRemovePicker())
-	} else {
-		b.WriteString(mutedStyle.Render("  s send  + add connected  - remove  esc back  q quit"))
+	// Title and footer.
+	statusStr := string(king.Status)
+	if king.Activity != "" {
+		statusStr += ":" + king.Activity
 	}
-	b.WriteString("\n")
+	title := fmt.Sprintf("king: %s (%s)  [%s]", king.Name, king.Tool, statusStr)
 
-	return b.String()
+	var footer string
+	if m.kingSendMode {
+		footer = fmt.Sprintf("send to king: %s\nenter to send  esc to cancel", m.kingInput.View())
+	} else if m.kingAddMode {
+		footer = m.renderKingAddPicker(snap)
+	} else if m.kingRemoveMode {
+		footer = m.renderKingRemovePicker()
+	} else {
+		footer = mutedStyle.Render("s send  + add  - remove  x cancel  esc back  q quit")
+	}
+
+	return renderFrame(m.width, m.height, title, b.String(), footer)
 }
 
 func (m *Model) renderKingAddPicker(snap []inbox.Project) string {
