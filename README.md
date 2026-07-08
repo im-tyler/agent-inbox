@@ -80,16 +80,24 @@ to streaming mode.
 
 ## Run
 
+### From a release binary
+
+Download the latest archive from [releases](https://github.com/im-tyler/agent-inbox/releases) for your platform (darwin/linux × amd64/arm64), extract, and put `agent-inbox` on your `$PATH`.
+
+### Build from source
+
 ```sh
+go install github.com/im-tyler/agent-inbox@latest
+# or
+git clone https://github.com/im-tyler/agent-inbox.git
+cd agent-inbox
 go build -o agent-inbox .
-cp config.example.json ~/.agent-inbox/config.json   # then edit projects
-./agent-inbox
 ```
 
 For a release-tagged build (embeds the version string):
 
 ```sh
-go build -ldflags "-X main.version=v0.2.0" -o agent-inbox .
+go build -ldflags "-X main.version=v0.1.0" -o agent-inbox .
 ./agent-inbox version
 ```
 
