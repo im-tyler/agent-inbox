@@ -127,6 +127,9 @@ func (m *Model) handleNpFolderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		dir := strings.TrimSpace(m.np.folder.Value())
+		// Strip surrounding quotes — macOS Finder's "Copy as Pathname"
+		// wraps paths in single quotes: '/Users/.../folder'
+		dir = strings.Trim(dir, "'\"")
 		if dir == "" {
 			m.np.errMsg = "folder is required"
 			return m, nil
