@@ -263,9 +263,18 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 			p.Status = driver.StatusWorking
 			p.Activity = "typing"
 			p.StreamingText += ev.Content
+			// Skip save — StreamingText and Activity are transient (json:"-").
+			// The TUI reads from in-memory state via Snapshot(), not from disk.
+			p.UpdatedAt = time.Now()
+			in.mu.Unlock()
+			continue
 		case driver.StreamToolCall:
 			p.Status = driver.StatusWorking
 			p.Activity = ev.Activity
+			// Skip save — Activity is transient.
+			p.UpdatedAt = time.Now()
+			in.mu.Unlock()
+			continue
 		case driver.StreamDone:
 			p.Status = driver.StatusWaiting
 			p.Activity = ""

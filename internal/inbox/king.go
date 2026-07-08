@@ -55,6 +55,13 @@ func (in *Inbox) kingDispatchWatcher(kingIdx int) {
 			return
 		}
 		if p.Status != driver.StatusWorking {
+			// Only dispatch if the turn completed normally (waiting/error).
+			// If status is Idle, the king was cancelled — don't dispatch
+			// stale directives from the previous LastMessage.
+			if p.Status == driver.StatusIdle {
+				in.mu.Unlock()
+				return
+			}
 			response := p.LastMessage
 			in.mu.Unlock()
 
