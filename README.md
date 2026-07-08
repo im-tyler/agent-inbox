@@ -25,9 +25,13 @@ Working name. Phase 1 = Claude + OpenCode.
 | OpenCode adapter | **done, live-verified** (new session + resume + export-based reply, free model) |
 | Codex adapter | done, CLI-surface-verified against `codex exec --help`; pending live-run |
 | Inbox state model + background sends | done, restart persistence verified |
-| TUI dashboard (Bubble Tea) | done — single-screen view, live updates, inline send |
+| StreamingDriver interface (live activity) | done — Claude adapter streams; UI shows `working:Bash` / `working:typing` |
+| Per-project message history (last 100 turns) | done |
+| TUI dashboard (Bubble Tea) | done — list view, detail view with history, interactive attach |
 | Legacy REPL | done, available via `--repl` flag |
-| Stop-hook bridge + live notify | **done, live-verified** (hand-run session reported into inbox via real transcript) |
+| Stop-hook bridge + live notify | **done, live-verified** (Claude only — OpenCode has no Stop hook; Codex hook system exists but not wired) |
+| CI + goreleaser + GitHub releases | done |
+| Tagged v0.1.0 | done — https://github.com/im-tyler/agent-inbox/releases/tag/v0.1.0 |
 
 ### OpenCode notes
 - Default model is a **free, no-key** model (`opencode/deepseek-v4-flash-free`),
@@ -175,8 +179,12 @@ project to `waiting`, and prints a live `[notify]`.
 - **Permission policy** — the decision that determines whether this reduces load
   or just relocates it. Currently passes through each tool's own mode.
 - **`sharpen`** — optional LLM rewrite of a rough reply before sending.
-- **OpenCode Stop-equivalent** — the hook bridge is Claude-only so far; OpenCode
-  has no Stop hook, so hand-run OpenCode sessions don't yet self-report.
-- **Streaming mode** — replace turn-returns-when-done with live working/blocked/waiting classification.
+- **OpenCode Stop-equivalent** — OpenCode's CLI has no Stop hook, so hand-run
+  OpenCode sessions don't self-report. No path to fix without upstream CLI
+  support.
+- **Codex Stop-equivalent** — Codex has a hooks system (config-file-driven,
+  not CLI-subcommand-driven) but the bridge into agent-inbox isn't wired yet.
+- **OpenCode/Codex streaming** — they don't implement StreamingDriver because
+  their CLIs don't expose useful streaming events (OpenCode's `--format json`
+  is empty on success; Codex's JSONL is parsed only for session-id recovery).
 - **Multi-host** — projects on different machines via Tailscale.
-- **OpenCode `serve` adapter** — persistent server instead of per-send exec.
