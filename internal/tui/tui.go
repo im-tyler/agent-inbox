@@ -51,6 +51,10 @@ type Model struct {
 	kingRemoveMode bool           // when true, showing remove-connected picker
 	kingInput      textinput.Model // shared input for king send/add/remove
 
+	// Detail view scroll: number of lines from the top of the body.
+	// Set to a large number when entering detail view to pin to bottom.
+	detailScroll int
+
 	toast   string
 	toastAt time.Time
 
@@ -201,6 +205,7 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		snap := m.inbox.Snapshot()
 		if m.selected >= 1 && m.selected <= len(snap) {
 			m.view = viewDetail
+			m.detailScroll = 999999 // pin to bottom — clamped in viewDetail
 		}
 
 	case "x":
@@ -230,12 +235,32 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Send mode takes priority.
+	if m.sendMode {
+		return m.handleSendKey(msg)
+	}
+
 	switch msg.String() {
-	case "esc", "q", "back":
+	case "esc", "q":
 		m.view = viewList
+		m.detailScroll = 0
+
+	case "s":
+		// Send a follow-up from the detail view.
+		snap := m.inbox.Snapshot()
+		if m.selected < 1 || m.selected > len(snap) {
+			return m, nil
+		}
+		if snap[m.selected-1].Status == driver.StatusWorking {
+			m.toast = "already working — press x to cancel first"
+			m.toastAt = time.Now()
+			return m, nil
+		}
+		m.sendMode = true
+		m.sendInput.Focus()
+		return m, textinput.Blink
 
 	case "a":
-		// Attach from detail view too.
 		args, dir, err := m.inbox.AttachArgs(m.selected)
 		if err != nil {
 			m.toast = err.Error()
@@ -244,7 +269,26 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.attachRequest = &attachArgs{Argv: args, Dir: dir}
 		return m, tea.Quit
+
+	case "j", "down":
+		m.detailScroll++
+	case "k", "up":
+		if m.detailScroll > 0 {
+			m.detailScroll--
+		}
+	case "pgdown", " ":
+		m.detailScroll += 10
+	case "pgup":
+		m.detailScroll -= 10
+		if m.detailScroll < 0 {
+			m.detailScroll = 0
+		}
+	case "g":
+		m.detailScroll = 0
+	case "G":
+		m.detailScroll = 999999 // clamp in viewDetail
 	}
+
 	return m, nil
 }
 
@@ -357,36 +401,17 @@ func (m Model) viewDetail() string {
 
 	var b strings.Builder
 
-	// Metadata block.
-	rows := [][2]string{
-		{"dir", p.Dir},
-		{"session", shortSession(p.SessionID)},
-		{"updated", fmt.Sprintf("%s (%s ago)", p.UpdatedAt.Format(time.RFC3339), ageHuman(time.Since(p.UpdatedAt)))},
-		{"turns", fmt.Sprintf("%d", len(p.History))},
-	}
-	for _, r := range rows {
-		b.WriteString(mutedStyle.Render(fmt.Sprintf("  %-10s", r[0])))
-		b.WriteString(r[1])
-		b.WriteString("\n")
-	}
+	// Metadata block (compact, 2 lines).
+	b.WriteString(mutedStyle.Render(fmt.Sprintf("dir: %s   session: %s   turns: %d",
+		shortPath(p.Dir), shortSession(p.SessionID), len(p.History))))
+	b.WriteString("\n\n")
 
-	// History (most-recent-last; visually reads top→bottom like a chat).
-	b.WriteString("\n")
+	// Full history (not truncated — scrollable).
 	if len(p.History) == 0 {
-		b.WriteString(mutedStyle.Render("  (no messages yet — press s to send one)"))
+		b.WriteString(mutedStyle.Render("(no messages yet)"))
 		b.WriteString("\n")
 	} else {
-		b.WriteString(workingStyle.Render("  history:"))
-		b.WriteString("\n")
-		start := 0
-		const show = 8
-		if len(p.History) > show {
-			start = len(p.History) - show
-			b.WriteString(mutedStyle.Render(
-				fmt.Sprintf("    …(%d earlier turns not shown)…\n", start),
-			))
-		}
-		for _, msg := range p.History[start:] {
+		for _, msg := range p.History {
 			label := msg.Role
 			style := mutedStyle
 			switch msg.Role {
@@ -401,16 +426,75 @@ func (m Model) viewDetail() string {
 				style = errorStyle
 			}
 			ts := msg.Timestamp.Format(time.Kitchen)
-			b.WriteString(style.Render(fmt.Sprintf("  [%s %s]", label, ts)))
+			b.WriteString(style.Render(fmt.Sprintf("[%s %s]", label, ts)))
 			b.WriteString("\n")
-			b.WriteString(indent(msg.Content, "    "))
-			b.WriteString("\n")
+			b.WriteString(indent(msg.Content, "  "))
+			b.WriteString("\n\n")
 		}
 	}
 
-	title := fmt.Sprintf("%s  (%s)  [%s]", p.Name, p.Tool, string(p.Status))
-	footer := mutedStyle.Render("s send  a attach  esc back  q quit")
-	return renderFrame(m.width, m.height, title, b.String(), footer)
+	// Live streaming text (if currently working).
+	if p.Status == driver.StatusWorking && p.StreamingText != "" {
+		b.WriteString(workingStyle.Render("─ currently generating ─"))
+		b.WriteString("\n")
+		b.WriteString(indent(p.StreamingText, "  "))
+		b.WriteString("\n")
+	} else if p.Status == driver.StatusWorking {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("(working: %s...)", p.Activity)))
+		b.WriteString("\n")
+	}
+
+	// Build full body and apply scroll.
+	body := b.String()
+	bodyLines := strings.Split(body, "\n")
+
+	// Available height for body inside the frame.
+	availH := m.height - 6 // frame(2) + title(1) + blank(1) + sep(1) + footer(1)
+	if availH < 3 {
+		availH = 3
+	}
+
+	// Clamp scroll.
+	maxScroll := len(bodyLines) - availH
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.detailScroll > maxScroll {
+		m.detailScroll = maxScroll
+	}
+	if m.detailScroll < 0 {
+		m.detailScroll = 0
+	}
+
+	// Slice the visible window.
+	start := m.detailScroll
+	end := start + availH
+	if end > len(bodyLines) {
+		end = len(bodyLines)
+	}
+	visible := strings.Join(bodyLines[start:end], "\n")
+
+	// Scroll indicator if there's more content.
+	scrollInfo := ""
+	if maxScroll > 0 {
+		scrollInfo = fmt.Sprintf("  (%d-%d of %d lines)", start+1, end, len(bodyLines))
+	}
+
+	title := fmt.Sprintf("%s  (%s)  %s%s", p.Name, p.Tool, statusBadge(p.Status, p.Activity), scrollInfo)
+	var footer string
+	if m.sendMode {
+		footer = fmt.Sprintf("send: %s  (enter to send, esc to cancel)", m.sendInput.View())
+	} else {
+		footer = mutedStyle.Render("j/k scroll  s send  a attach  esc back  q quit")
+	}
+	return renderFrame(m.width, m.height, title, visible, footer)
+}
+
+func shortPath(dir string) string {
+	if len(dir) > 40 {
+		return "…" + dir[len(dir)-38:]
+	}
+	return dir
 }
 
 // footer renders the bottom-of-screen prompt area: send input or keybindings.

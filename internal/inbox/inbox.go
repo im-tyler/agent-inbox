@@ -28,6 +28,13 @@ type Project struct {
 	// e.g. "typing", "Bash", "Edit". Transient — not persisted; reset on
 	// restart. Populated only when the driver implements StreamingDriver.
 	Activity string `json:"-"`
+
+	// StreamingText holds the in-progress assistant text during a streaming
+	// turn. Updated on each StreamText event; cleared on StreamDone (the
+	// final text goes to LastMessage + History). Transient — not persisted.
+	// The TUI shows this in the detail view so the user can watch the
+	// response arrive in real time instead of staring at a blank screen.
+	StreamingText string `json:"-"`
 }
 
 // Message is a single turn in a project's conversation history.
@@ -248,10 +255,12 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 			if p.Activity == "" {
 				p.Activity = "starting"
 			}
+			p.StreamingText = ""
 		case driver.StreamText:
 			p.Status = driver.StatusWorking
 			p.Activity = "typing"
 			finalText += ev.Content
+			p.StreamingText += ev.Content
 		case driver.StreamToolCall:
 			p.Status = driver.StatusWorking
 			p.Activity = ev.Activity
@@ -259,6 +268,7 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 			finalText = ev.Content
 			p.Status = driver.StatusWaiting
 			p.Activity = ""
+			p.StreamingText = ""
 			p.LastErr = ""
 			p.LastMessage = finalText
 			p.appendHistory(Message{Role: "assistant", Content: finalText, Timestamp: time.Now()})
@@ -266,6 +276,7 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 			finalErr = ev.Err
 			p.Status = driver.StatusError
 			p.Activity = ""
+			p.StreamingText = ""
 			msg := "turn failed"
 			if ev.Err != nil {
 				msg = ev.Err.Error()
