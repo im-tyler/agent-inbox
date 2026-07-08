@@ -1,6 +1,6 @@
 # agent-inbox
 
-![License: MIT](https://img.shields.io/badge/license-MIT-blue) ![Go](https://img.shields.io/badge/Go-single_binary-00ADD8) ![Status](https://img.shields.io/badge/status-alpha-orange)
+![CI](https://img.shields.io/github/actions/workflow/status/im-tyler/agent-inbox/ci.yml?branch=main) ![License: MIT](https://img.shields.io/badge/license-MIT-blue) ![Go](https://img.shields.io/badge/Go-single_binary-00ADD8) ![Status](https://img.shields.io/badge/status-alpha-orange)
 
 A federated supervisor for CLI coding agents. One terminal that holds N
 independent projects — each backed by its own long-lived **Claude Code** or
@@ -77,6 +77,13 @@ to streaming mode.
 go build -o agent-inbox .
 cp config.example.json ~/.agent-inbox/config.json   # then edit projects
 ./agent-inbox
+```
+
+For a release-tagged build (embeds the version string):
+
+```sh
+go build -ldflags "-X main.version=v0.2.0" -o agent-inbox .
+./agent-inbox version
 ```
 
 The default UI is a **Bubble Tea TUI dashboard** showing all federated projects

@@ -27,9 +27,15 @@ func dataDir() string {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "hook" {
-		runHook()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "hook":
+			runHook()
+			return
+		case "version", "-version", "--version":
+			printVersion()
+			return
+		}
 	}
 
 	dd := dataDir()
