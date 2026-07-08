@@ -46,7 +46,6 @@ func (m *Model) handleActionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "n":
-		m.view = viewList
 		m.view = viewNewProject
 		cwd, _ := os.Getwd()
 		m.np = newProjectModelInitial(cwd)

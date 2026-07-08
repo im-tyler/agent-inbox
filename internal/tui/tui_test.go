@@ -70,18 +70,7 @@ func TestRenderRowSelectedDoesNotPanic(t *testing.T) {
 	}
 }
 
-func TestStatusStyleAllKnownStatuses(t *testing.T) {
-	// Just verify no panic across the status enum.
-	for _, s := range []driver.Status{
-		driver.StatusIdle,
-		driver.StatusWorking,
-		driver.StatusWaiting,
-		driver.StatusError,
-		driver.Status("unknown"),
-	} {
-		_ = statusStyle(s, string(s))
-	}
-}
+// (statusStyle test removed — function was dead code, now deleted.)
 
 func TestHelpTextMentionsKeys(t *testing.T) {
 	h := helpText()

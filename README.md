@@ -127,27 +127,55 @@ Config:
 
 ### TUI keybindings
 
+**Dashboard** (default view):
+
 | Key | Action |
 |---|---|
 | `j` / `k` or `↑` / `↓` | navigate project list |
 | `1` – `9` | select project by index |
-| `n` | add a new project (folder + agent picker modal) |
 | `s` | send a message to the selected project (inline prompt) |
-| `v` or `Enter` | open detail view (full message, metadata, session id, errors) |
-| `a` | attach interactively — exits TUI, hands terminal to the agent, re-launches TUI when the agent exits |
-| `x` | cancel the selected project's in-flight send (kills the underlying subprocess) |
-| `t` | change the selected project's tool (claude / opencode / codex / mock); clears session id |
-| `d` | delete the selected project (with confirmation) |
-| `K` | enter king mode for the selected project (supervisor panel) |
-| `r` | refresh the toast line |
-| `?` | toggle keybindings help |
+| `v` or `Enter` | open detail view (full message, metadata, session id, live streaming text) |
+| `x` | cancel in-flight send, or dismiss a waiting/error notification |
+| `:` | open the more-actions menu |
 | `q` or `Ctrl+C` | quit |
 
-While in send mode: `Enter` dispatches, `Esc` cancels.
-While in detail view: `Esc` returns to the list.
-While in new-project modal: `Enter` advances steps, `Esc` cancels.
+**More actions** (press `:`):
+
+| Key | Action |
+|---|---|
+| `n` | add a new project (folder + agent picker modal) |
+| `d` | delete the selected project (with confirmation) |
+| `t` | change the selected project's tool |
+| `a` | attach interactively — exits TUI, hands terminal to the agent, re-launches TUI |
+| `K` | enter king mode for the selected project (supervisor panel) |
+| `?` | toggle keybindings help |
+| `Esc` | close the actions menu |
+
+**Detail view** (press `v`):
+
+| Key | Action |
+|---|---|
+| `j` / `k` or `↑` / `↓` | scroll through history |
+| `PgDn` / `PgUp` | jump 10 lines |
+| `g` / `G` | jump to top / bottom |
+| `s` | send a follow-up message |
+| `a` | attach to the live session |
+| `Esc` | back to dashboard |
+| `q` | quit |
+
+**King mode** (press `:` then `K`):
+
+| Key | Action |
+|---|---|
+| `s` | send to king (fleet state is auto-injected into the prompt) |
+| `+` | add a project to the connected set |
+| `-` | remove a project from the connected set |
+| `x` | cancel the king's in-flight send |
+| `Esc` | back to dashboard |
+| `q` | quit |
+
+While in send mode: `Enter` dispatches, `Esc` cancels. On error, the input text is preserved so you can edit and retry.
 While in delete-confirm: `y` confirms, any other key cancels.
-While in tool-picker: `1`–`4` highlights, `Enter` confirms, `Esc` cancels.
 While in king mode: `s` sends to king, `+` adds connected project, `-` removes, `x` cancels king's send, `Esc` returns to list.
 
 ## King mode

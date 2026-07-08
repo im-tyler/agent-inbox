@@ -109,8 +109,9 @@ func renderFrame(width, height int, title, body, footer string) string {
 		bodyLines = append(bodyLines, "")
 	}
 
-	// Apply width to each line. lipgloss.Width handles ANSI codes correctly.
-	bodyContent := strings.Join(bodyLines, "\n")
+	// Apply width to body content so long lines don't overflow the frame.
+	// lipgloss.Width handles ANSI codes correctly (truncates visual width).
+	bodyContent := lipgloss.NewStyle().Width(contentW).Render(strings.Join(bodyLines, "\n"))
 
 	// Title line — styled + padded to content width.
 	titleStyled := lipgloss.NewStyle().Width(contentW).Bold(true).Render(title)
@@ -135,7 +136,4 @@ func renderFrame(width, height int, title, body, footer string) string {
 	return frameStyle.Render(content)
 }
 
-// separator returns a thin horizontal line of the given width.
-func separator(width int) string {
-	return separatorStyle.Render(strings.Repeat("─", width))
-}
+// (separator helper removed — was dead code; renderFrame renders separators inline.)

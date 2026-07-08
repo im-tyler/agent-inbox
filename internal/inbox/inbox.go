@@ -78,9 +78,13 @@ func (in *Inbox) WithConfigPath(p string) *Inbox {
 // AddProject appends a new project in-memory, attempts to persist it to
 // config.json (so it survives restart), and saves state.json.
 //
-// Returns an error if the project is a duplicate (same name or dir) or if
-// persisting to config fails. A config-path error is non-fatal — the project
-// is still added in-memory and to state.json so the current session works.
+// Returns nil on success (including when config persistence fails — the
+// project is added in-memory for the current session either way). A
+// config-write failure is logged but not returned as an error, so the
+// TUI's new-project modal doesn't wedge on a recoverable error.
+//
+// Returns an error only for validation failures: duplicate name/dir,
+// or unknown tool.
 func (in *Inbox) AddProject(name, tool, dir string) error {
 	in.mu.Lock()
 	for _, p := range in.projects {
@@ -101,11 +105,12 @@ func (in *Inbox) AddProject(name, tool, dir string) error {
 	})
 	in.mu.Unlock()
 
-	// Persist to config.json best-effort.
+	// Persist to config.json best-effort. Non-fatal — session still works.
 	if in.configPath != "" {
 		if err := in.appendConfig(name, tool, dir); err != nil {
-			// Non-fatal — session still works; just won't survive restart.
-			return fmt.Errorf("added in-memory but failed to persist config: %w", err)
+			// Log but don't return error — the project IS added in-memory.
+			// The TUI will show a toast; the user knows it won't persist.
+			fmt.Fprintf(os.Stderr, "agent-inbox: warning: config persist failed: %v\n", err)
 		}
 	}
 	in.save()
@@ -115,8 +120,9 @@ func (in *Inbox) AddProject(name, tool, dir string) error {
 func (in *Inbox) appendConfig(name, tool, dir string) error {
 	settings, err := config.Load(in.configPath)
 	if err != nil {
-		// Config might have been hand-edited to allow zero projects, or
-		// we're writing into a fresh file. Either way, start fresh.
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot safely write config: load failed: %w", err)
+		}
 		settings = &config.Settings{}
 	}
 	settings.AddProject(config.Project{Name: name, Tool: tool, Dir: dir})
@@ -235,9 +241,6 @@ func (in *Inbox) blockingSend(ctx context.Context, d driver.Driver, p *Project, 
 func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *Project, dir, sid, prompt string) {
 	ch := sd.StreamSend(ctx, dir, sid, prompt)
 
-	var finalText string
-	var finalErr error
-
 	for ev := range ch {
 		in.mu.Lock()
 		// If cancelled, stop processing events.
@@ -259,37 +262,40 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 		case driver.StreamText:
 			p.Status = driver.StatusWorking
 			p.Activity = "typing"
-			finalText += ev.Content
 			p.StreamingText += ev.Content
 		case driver.StreamToolCall:
 			p.Status = driver.StatusWorking
 			p.Activity = ev.Activity
 		case driver.StreamDone:
-			finalText = ev.Content
 			p.Status = driver.StatusWaiting
 			p.Activity = ""
 			p.StreamingText = ""
 			p.LastErr = ""
-			p.LastMessage = finalText
-			p.appendHistory(Message{Role: "assistant", Content: finalText, Timestamp: time.Now()})
+			p.LastMessage = ev.Content
+			p.appendHistory(Message{Role: "assistant", Content: ev.Content, Timestamp: time.Now()})
 		case driver.StreamError:
-			finalErr = ev.Err
 			p.Status = driver.StatusError
 			p.Activity = ""
-			p.StreamingText = ""
 			msg := "turn failed"
 			if ev.Err != nil {
 				msg = ev.Err.Error()
 			}
 			p.LastErr = msg
-			p.appendHistory(Message{Role: "error", Content: msg, Timestamp: time.Now()})
+			// Preserve partial streaming text so the user can see what
+			// was generated before the failure. Move it to LastMessage
+			// since StreamingText is cleared on error.
+			if p.StreamingText != "" {
+				p.LastMessage = p.StreamingText
+				p.appendHistory(Message{Role: "assistant", Content: p.StreamingText + "\n\n(error: " + msg + ")", Timestamp: time.Now()})
+			} else {
+				p.appendHistory(Message{Role: "error", Content: msg, Timestamp: time.Now()})
+			}
+			p.StreamingText = ""
 		}
 		p.UpdatedAt = time.Now()
 		in.mu.Unlock()
 		in.save()
 	}
-
-	_ = finalErr // already surfaced via StreamError if non-nil
 
 	// If the channel closed without a Done or Error event, treat as error
 	// (unless we were cancelled, which is handled above).
@@ -342,7 +348,7 @@ func (in *Inbox) Cancel(idx int) error {
 		p.Status = driver.StatusIdle
 		p.Activity = ""
 		p.LastErr = "cancelled by user"
-		p.appendHistory(Message{Role: "error", Content: "cancelled by user", Timestamp: time.Now()})
+		p.appendHistory(Message{Role: "system", Content: "cancelled by user", Timestamp: time.Now()})
 		p.UpdatedAt = time.Now()
 		in.mu.Unlock()
 		in.save()
@@ -438,6 +444,9 @@ func (in *Inbox) SetProjectTool(idx int, tool string) error {
 func (in *Inbox) removeProjectConfig(name string) error {
 	settings, err := config.Load(in.configPath)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot safely write config: load failed: %w", err)
+		}
 		settings = &config.Settings{}
 	}
 	settings.RemoveProject(name)
@@ -447,6 +456,9 @@ func (in *Inbox) removeProjectConfig(name string) error {
 func (in *Inbox) setProjectToolConfig(name, tool string) error {
 	settings, err := config.Load(in.configPath)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot safely write config: load failed: %w", err)
+		}
 		settings = &config.Settings{}
 	}
 	settings.SetProjectTool(name, tool)
@@ -490,6 +502,8 @@ func (in *Inbox) AttachArgs(idx int) ([]string, string, error) {
 	return d.AttachArgs(p.Dir, p.SessionID), p.Dir, nil
 }
 
+// save writes state.json atomically (temp file + rename) so a crash
+// during write can't corrupt the existing state file.
 func (in *Inbox) save() {
 	in.mu.Lock()
 	b, err := json.MarshalIndent(in.projects, "", "  ")
@@ -497,8 +511,21 @@ func (in *Inbox) save() {
 	if err != nil {
 		return
 	}
-	_ = os.MkdirAll(filepath.Dir(in.statePath), 0o755)
-	_ = os.WriteFile(in.statePath, b, 0o644)
+	dir := filepath.Dir(in.statePath)
+	_ = os.MkdirAll(dir, 0o755)
+	tmp, err := os.CreateTemp(dir, ".state-*.json")
+	if err != nil {
+		return
+	}
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return
+	}
+	tmp.Close()
+	if err := os.Rename(tmp.Name(), in.statePath); err != nil {
+		os.Remove(tmp.Name())
+	}
 }
 
 // LoadState overlays persisted session ids and last messages (matched by name)

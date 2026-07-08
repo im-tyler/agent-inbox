@@ -352,4 +352,4 @@ func (m *Model) handleKingRemoveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// (Removed the bad type alias — we import inbox.Project directly.)
+// (End of king.go)

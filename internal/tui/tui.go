@@ -205,7 +205,10 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		snap := m.inbox.Snapshot()
 		if m.selected >= 1 && m.selected <= len(snap) {
 			m.view = viewDetail
-			m.detailScroll = 999999 // pin to bottom — clamped in viewDetail
+			// Pin to bottom: compute the actual max scroll instead of
+			// using a sentinel value that viewDetail (value receiver)
+			// can't persist.
+			m.detailScroll = m.detailMaxScroll()
 		}
 
 	case "x":
@@ -241,9 +244,12 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case "esc", "q":
+	case "esc":
 		m.view = viewList
 		m.detailScroll = 0
+
+	case "q":
+		return m, tea.Quit
 
 	case "s":
 		// Send a follow-up from the detail view.
@@ -272,12 +278,14 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "j", "down":
 		m.detailScroll++
+		m.clampDetailScroll()
 	case "k", "up":
 		if m.detailScroll > 0 {
 			m.detailScroll--
 		}
 	case "pgdown", " ":
 		m.detailScroll += 10
+		m.clampDetailScroll()
 	case "pgup":
 		m.detailScroll -= 10
 		if m.detailScroll < 0 {
@@ -286,7 +294,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		m.detailScroll = 0
 	case "G":
-		m.detailScroll = 999999 // clamp in viewDetail
+		m.detailScroll = m.detailMaxScroll()
 	}
 
 	return m, nil
@@ -302,19 +310,22 @@ func (m Model) handleSendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		idx := m.selected
+		err := m.inbox.Send(idx, text)
+		if err != nil {
+			// Keep the input text and stay in send mode so the user
+			// can edit and retry without retyping.
+			m.toast = err.Error()
+			m.toastAt = time.Now()
+			return m, nil
+		}
+		// Success — clear and exit send mode.
 		m.sendMode = false
 		m.sendInput.Blur()
 		m.sendInput.Reset()
-		err := m.inbox.Send(idx, text)
-		if err != nil {
-			m.toast = err.Error()
+		snap := m.inbox.Snapshot()
+		if idx >= 1 && idx <= len(snap) {
+			m.toast = "sent to " + snap[idx-1].Name
 			m.toastAt = time.Now()
-		} else {
-			snap := m.inbox.Snapshot()
-			if idx >= 1 && idx <= len(snap) {
-				m.toast = "sent to " + snap[idx-1].Name
-				m.toastAt = time.Now()
-			}
 		}
 		return m, nil
 
@@ -424,6 +435,9 @@ func (m Model) viewDetail() string {
 			case "error":
 				label = "error"
 				style = errorStyle
+			case "system":
+				label = "system"
+				style = mutedStyle
 			}
 			ts := msg.Timestamp.Format(time.Kitchen)
 			b.WriteString(style.Render(fmt.Sprintf("[%s %s]", label, ts)))
@@ -449,25 +463,27 @@ func (m Model) viewDetail() string {
 	bodyLines := strings.Split(body, "\n")
 
 	// Available height for body inside the frame.
-	availH := m.height - 6 // frame(2) + title(1) + blank(1) + sep(1) + footer(1)
+	availH := m.height - 6
 	if availH < 3 {
 		availH = 3
 	}
 
-	// Clamp scroll.
+	// Scroll is clamped in handleDetailKey (which can persist via return).
+	// Here we just apply the current offset.
 	maxScroll := len(bodyLines) - availH
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
-	if m.detailScroll > maxScroll {
-		m.detailScroll = maxScroll
+	scroll := m.detailScroll
+	if scroll > maxScroll {
+		scroll = maxScroll
 	}
-	if m.detailScroll < 0 {
-		m.detailScroll = 0
+	if scroll < 0 {
+		scroll = 0
 	}
 
 	// Slice the visible window.
-	start := m.detailScroll
+	start := scroll
 	end := start + availH
 	if end > len(bodyLines) {
 		end = len(bodyLines)
@@ -495,6 +511,51 @@ func shortPath(dir string) string {
 		return "…" + dir[len(dir)-38:]
 	}
 	return dir
+}
+
+// detailBodyLineCount estimates how many lines the detail-view body will
+// occupy for the currently-selected project. Used by detailMaxScroll and
+// clampDetailScroll to bound the scroll offset.
+func (m Model) detailBodyLineCount() int {
+	snap := m.inbox.Snapshot()
+	if m.selected < 1 || m.selected > len(snap) {
+		return 0
+	}
+	p := snap[m.selected-1]
+	lines := 2 // metadata (1 line) + blank
+	for _, msg := range p.History {
+		lines += 2 // header + blank
+		lines += strings.Count(msg.Content, "\n") + 1
+	}
+	if p.Status == driver.StatusWorking && p.StreamingText != "" {
+		lines += 2 + strings.Count(p.StreamingText, "\n")
+	} else if p.Status == driver.StatusWorking {
+		lines += 1
+	}
+	return lines
+}
+
+func (m Model) detailMaxScroll() int {
+	availH := m.height - 6
+	if availH < 1 {
+		availH = 1
+	}
+	bodyLines := m.detailBodyLineCount()
+	max := bodyLines - availH
+	if max < 0 {
+		return 0
+	}
+	return max
+}
+
+func (m *Model) clampDetailScroll() {
+	max := m.detailMaxScroll()
+	if m.detailScroll > max {
+		m.detailScroll = max
+	}
+	if m.detailScroll < 0 {
+		m.detailScroll = 0
+	}
 }
 
 // footer renders the bottom-of-screen prompt area: send input or keybindings.
@@ -558,20 +619,6 @@ func renderRow(idx int, p inbox.Project, selected bool, contentW int) string {
 		row = selectedStyle.Render(row)
 	}
 	return row
-}
-
-func statusStyle(s driver.Status, text string) string {
-	switch s {
-	case driver.StatusIdle:
-		return mutedStyle.Render(text)
-	case driver.StatusWorking:
-		return workingStyle.Render(text)
-	case driver.StatusWaiting:
-		return waitingStyle.Render(text)
-	case driver.StatusError:
-		return errorStyle.Render(text)
-	}
-	return text
 }
 
 func ageHuman(d time.Duration) string {
@@ -668,9 +715,4 @@ func helpText() string {
 
 const footerText = "s send  v view  x cancel  : more  q quit"
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
+// (max is the Go 1.21+ builtin — no local definition needed.)
