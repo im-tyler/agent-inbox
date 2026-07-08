@@ -291,13 +291,20 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 	}
 }
 
-// Cancel kills the in-flight send for project idx (1-based). Returns an
-// error if the project isn't currently working.
+// Cancel handles the user's "I'm done with this state" intent, with
+// behavior that depends on what the project is currently doing:
 //
-// Cancellation is cooperative: the underlying subprocess receives a
-// SIGTERM (via exec.CommandContext) and the goroutine exits. Status is
-// immediately set to Idle so the UI reflects the cancellation before the
-// subprocess has fully terminated.
+//   - Working: kills the in-flight subprocess via the stored cancel func,
+//     sets status to Idle, logs "cancelled by user" to history so the
+//     gap between user prompt and (no) assistant reply is explained.
+//
+//   - Waiting or Error: no subprocess to kill — the agent already
+//     finished. Just resets status to Idle. This is the "dismiss
+//     notification" path: the user has seen the output and wants the
+//     indicator cleared. No history entry (the conversation is
+//     preserved as-is in the detail view).
+//
+//   - Idle: returns an error so the TUI can surface "already idle".
 func (in *Inbox) Cancel(idx int) error {
 	in.mu.Lock()
 	p, err := in.project(idx)
@@ -305,22 +312,51 @@ func (in *Inbox) Cancel(idx int) error {
 		in.mu.Unlock()
 		return err
 	}
-	cancel, ok := in.cancels[p.Name]
-	if !ok {
-		in.mu.Unlock()
-		return fmt.Errorf("%s is not currently working", p.Name)
-	}
-	delete(in.cancels, p.Name)
-	p.Status = driver.StatusIdle
-	p.Activity = ""
-	p.LastErr = "cancelled by user"
-	p.appendHistory(Message{Role: "error", Content: "cancelled by user", Timestamp: time.Now()})
-	p.UpdatedAt = time.Now()
-	in.mu.Unlock()
-	in.save()
 
-	cancel() // signal the subprocess to die; goroutine will no-op on return
-	return nil
+	switch p.Status {
+	case driver.StatusWorking:
+		// Kill the in-flight subprocess.
+		cancel, ok := in.cancels[p.Name]
+		if !ok {
+			// Defensive: status says working but no cancel func. Treat as
+			// a stuck state and reset to idle without killing anything.
+			p.Status = driver.StatusIdle
+			p.Activity = ""
+			p.LastErr = "stuck (no cancel func); reset to idle"
+			in.mu.Unlock()
+			in.save()
+			return nil
+		}
+		delete(in.cancels, p.Name)
+		p.Status = driver.StatusIdle
+		p.Activity = ""
+		p.LastErr = "cancelled by user"
+		p.appendHistory(Message{Role: "error", Content: "cancelled by user", Timestamp: time.Now()})
+		p.UpdatedAt = time.Now()
+		in.mu.Unlock()
+		in.save()
+
+		cancel() // signal the subprocess to die; goroutine will no-op on return
+		return nil
+
+	case driver.StatusWaiting, driver.StatusError:
+		// Dismiss the notification — agent already finished, just reset status.
+		previous := p.Status
+		p.Status = driver.StatusIdle
+		p.Activity = ""
+		// Don't clear LastErr/LastMessage — the detail view should still
+		// show what happened. Just the "waiting" / "error" indicator clears.
+		p.UpdatedAt = time.Now()
+		in.mu.Unlock()
+		in.save()
+		_ = previous
+		return nil
+
+	default:
+		// Already idle.
+		in.mu.Unlock()
+		return fmt.Errorf("%s is already idle", p.Name)
+	}
 }
 
 // RemoveProject deletes project idx (1-based) from the in-memory list,
