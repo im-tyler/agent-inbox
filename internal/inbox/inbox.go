@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"agentinbox/internal/config"
 	"agentinbox/internal/driver"
 )
 
@@ -39,14 +40,71 @@ type Message struct {
 // Inbox holds the federated set of project sessions and orchestrates sends.
 // All state access is guarded by mu; sends run in background goroutines.
 type Inbox struct {
-	mu        sync.Mutex
-	projects  []*Project
-	drivers   map[string]driver.Driver
-	statePath string
+	mu         sync.Mutex
+	projects   []*Project
+	drivers    map[string]driver.Driver
+	statePath  string
+	configPath string // empty = AddProject can't persist to config
 }
 
 func New(projects []*Project, drivers map[string]driver.Driver, statePath string) *Inbox {
 	return &Inbox{projects: projects, drivers: drivers, statePath: statePath}
+}
+
+// WithConfigPath enables runtime project addition via AddProject; the path
+// is rewritten on each AddProject call so new projects persist alongside
+// the original configuration.
+func (in *Inbox) WithConfigPath(p string) *Inbox {
+	in.configPath = p
+	return in
+}
+
+// AddProject appends a new project in-memory, attempts to persist it to
+// config.json (so it survives restart), and saves state.json.
+//
+// Returns an error if the project is a duplicate (same name or dir) or if
+// persisting to config fails. A config-path error is non-fatal — the project
+// is still added in-memory and to state.json so the current session works.
+func (in *Inbox) AddProject(name, tool, dir string) error {
+	in.mu.Lock()
+	for _, p := range in.projects {
+		if p.Name == name || p.Dir == dir {
+			in.mu.Unlock()
+			return fmt.Errorf("duplicate project (name=%q or dir=%q already exists)", name, dir)
+		}
+	}
+	if _, ok := in.drivers[tool]; !ok {
+		in.mu.Unlock()
+		return fmt.Errorf("unknown tool %q (no driver registered)", tool)
+	}
+	in.projects = append(in.projects, &Project{
+		Name:   name,
+		Tool:   tool,
+		Dir:    dir,
+		Status: driver.StatusIdle,
+	})
+	in.mu.Unlock()
+
+	// Persist to config.json best-effort.
+	if in.configPath != "" {
+		if err := in.appendConfig(name, tool, dir); err != nil {
+			// Non-fatal — session still works; just won't survive restart.
+			return fmt.Errorf("added in-memory but failed to persist config: %w", err)
+		}
+	}
+	in.save()
+	return nil
+}
+
+func (in *Inbox) appendConfig(name, tool, dir string) error {
+	settings, err := config.Load(in.configPath)
+	if err != nil {
+		// Config might have been hand-edited to allow zero projects, or
+		// we're writing into a fresh file. Either way, start fresh.
+		settings = &config.Settings{}
+	}
+	settings.AddProject(config.Project{Name: name, Tool: tool, Dir: dir})
+	return config.Save(in.configPath, settings)
 }
 
 // Snapshot returns a copy of the current project states for display.

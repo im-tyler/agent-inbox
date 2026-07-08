@@ -7,6 +7,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ type viewMode int
 const (
 	viewList viewMode = iota
 	viewDetail
+	viewNewProject
 )
 
 // Model is the Bubble Tea model for the agent-inbox dashboard.
@@ -35,6 +37,7 @@ type Model struct {
 	sendMode  bool // when true, sendInput is active for the selected project
 	helpMode  bool // when true, keybindings overlay is shown
 	sendInput textinput.Model
+	np        newProjectModel // populated when view == viewNewProject
 
 	toast   string
 	toastAt time.Time
@@ -126,6 +129,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleListKey(msg)
 	case viewDetail:
 		return m.handleDetailKey(msg)
+	case viewNewProject:
+		return m.handleNewProjectKey(msg)
 	}
 	return m, nil
 }
@@ -192,6 +197,14 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.toast = "refreshed"
 		m.toastAt = time.Now()
+
+	case "n":
+		// Open the new-project modal.
+		m.view = viewNewProject
+		cwd, _ := os.Getwd()
+		m.np = newProjectModelInitial(cwd)
+		m.np.folder.Focus()
+		return m, textinput.Blink
 	}
 
 	return m, nil
@@ -263,6 +276,8 @@ func (m Model) View() string {
 	switch m.view {
 	case viewDetail:
 		return m.viewDetail()
+	case viewNewProject:
+		return m.renderNewProject()
 	default:
 		return m.viewList()
 	}
@@ -527,7 +542,7 @@ func helpText() string {
 	return strings.Join(lines, "\n")
 }
 
-const footerText = "j/k move  s send  v detail  a attach  ? help  q quit"
+const footerText = "j/k move  s send  v detail  a attach  n new  ? help  q quit"
 
 func max(a, b int) int {
 	if a > b {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 type Settings struct {
@@ -15,9 +16,9 @@ type Settings struct {
 		SkipPermissions bool   `json:"skip_permissions"`
 	} `json:"opencode"`
 	Codex struct {
-		Model         string `json:"model"`          // e.g. "gpt-5", "o3"; empty = Codex default
-		Sandbox       string `json:"sandbox"`        // "read-only" | "workspace-write" | "danger-full-access"
-		SkipApprovals bool   `json:"skip_approvals"` // maps to --dangerously-bypass-approvals-and-sandbox
+		Model         string `json:"model"`
+		Sandbox       string `json:"sandbox"`
+		SkipApprovals bool   `json:"skip_approvals"`
 	} `json:"codex"`
 	Projects []Project `json:"projects"`
 }
@@ -42,3 +43,47 @@ func Load(path string) (*Settings, error) {
 	}
 	return &s, nil
 }
+
+// Save writes the settings back to path atomically (write to temp + rename).
+// Used by the TUI when adding a project at runtime so new projects persist
+// across restarts alongside the originally-configured ones.
+func Save(path string, s *Settings) error {
+	b, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".config-*.json")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return fmt.Errorf("write temp: %w", err)
+	}
+	tmp.Close()
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+// AddProject appends a project to s.Projects if (name, dir) isn't already
+// present. Returns true if added, false if a duplicate was skipped.
+func (s *Settings) AddProject(p Project) bool {
+	for _, existing := range s.Projects {
+		if existing.Name == p.Name || existing.Dir == p.Dir {
+			return false
+		}
+	}
+	s.Projects = append(s.Projects, p)
+	return true
+}
+
+// KnownTools is the canonical list of driver names the UI can offer.
+var KnownTools = []string{"claude", "opencode", "codex", "mock"}

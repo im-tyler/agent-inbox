@@ -63,7 +63,7 @@ func main() {
 	}
 	inbox.LoadState(*statePath, projects)
 
-	in := inbox.New(projects, drivers, *statePath)
+	in := inbox.New(projects, drivers, *statePath).WithConfigPath(*cfgPath)
 	eventsDir := filepath.Join(dd, "events")
 
 	if *replMode {

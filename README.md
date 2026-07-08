@@ -107,7 +107,8 @@ go build -ldflags "-X main.version=v0.1.0" -o agent-inbox .
 
 The default UI is a **Bubble Tea TUI dashboard** showing all federated projects
 on one screen with live status updates. Pass `--repl` for the legacy
-line-oriented REPL.
+line-oriented REPL. Projects can be added at runtime via `n` — no JSON editing
+required (config.json is rewritten on add).
 
 Config:
 
@@ -130,6 +131,7 @@ Config:
 |---|---|
 | `j` / `k` or `↑` / `↓` | navigate project list |
 | `1` – `9` | select project by index |
+| `n` | add a new project (folder + agent picker modal) |
 | `s` | send a message to the selected project (inline prompt) |
 | `v` or `Enter` | open detail view (full message, metadata, session id, errors) |
 | `a` | attach interactively — exits TUI, hands terminal to the agent, re-launches TUI when the agent exits |
@@ -139,6 +141,7 @@ Config:
 
 While in send mode: `Enter` dispatches, `Esc` cancels.
 While in detail view: `Esc` returns to the list.
+While in new-project modal: `Enter` advances to the next step (folder → agent → name → add), `Esc` cancels.
 
 ### Legacy REPL
 
