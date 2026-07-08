@@ -26,19 +26,18 @@ type KingDirective struct {
 // This is the Layer 1 king: state-injected prompts, directive-based dispatch,
 // no persistent event loop. The king sees fresh state on every turn.
 func (in *Inbox) KingSend(kingIdx int, prompt string, connectedNames []string) error {
-	// Build the full prompt with state context injected.
+	// Build the full prompt with state context injected — this goes to
+	// the driver but NOT to history.
 	stateCtx := in.formatKingState(connectedNames)
-	fullPrompt := prompt + "\n\n---\n\n" + stateCtx
+	driverPrompt := prompt + "\n\n---\n\n" + stateCtx
 
-	// Send to the king via the normal path. This spawns a goroutine.
-	if err := in.Send(kingIdx, fullPrompt); err != nil {
+	// sendRaw stores the clean user prompt in history, sends the injected
+	// version to the driver.
+	if err := in.sendRaw(kingIdx, prompt, driverPrompt); err != nil {
 		return err
 	}
 
-	// Spawn a watcher that waits for the king to finish, then parses
-	// the response for directives and dispatches them.
 	go in.kingDispatchWatcher(kingIdx)
-
 	return nil
 }
 

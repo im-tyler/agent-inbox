@@ -160,7 +160,16 @@ func (in *Inbox) project(idx int) (*Project, error) {
 }
 
 // Send dispatches a prompt to project idx (1-based) in the background.
+// The prompt is stored verbatim in history AND sent to the driver.
 func (in *Inbox) Send(idx int, prompt string) error {
+	return in.sendRaw(idx, prompt, prompt)
+}
+
+// sendRaw is the internal send implementation. displayText is what appears
+// in history; driverText is what's sent to the CLI. For normal sends they're
+// identical. For king sends, displayText is the user's original message and
+// driverText includes the injected fleet state context.
+func (in *Inbox) sendRaw(idx int, displayText, driverText string) error {
 	in.mu.Lock()
 	p, err := in.project(idx)
 	if err != nil {
@@ -178,9 +187,9 @@ func (in *Inbox) Send(idx int, prompt string) error {
 	}
 	p.Status = driver.StatusWorking
 	p.UpdatedAt = time.Now()
-	// Append the user turn to history immediately so it's persisted even
-	// if the agent crashes mid-turn.
-	p.appendHistory(Message{Role: "user", Content: prompt, Timestamp: time.Now()})
+	// Append the DISPLAY text (user's original message) to history —
+	// NOT the driverText which may include injected state context.
+	p.appendHistory(Message{Role: "user", Content: displayText, Timestamp: time.Now()})
 	dir, sid := p.Dir, p.SessionID
 	// Cancellable context so Cancel() can kill the underlying subprocess.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -189,14 +198,12 @@ func (in *Inbox) Send(idx int, prompt string) error {
 	in.save()
 
 	go func() {
-		// If the driver streams, use the streaming path so the UI can show
-		// live activity (tool name, typing). Otherwise fall back to blocking Send.
+		// Send the DRIVER text (may include injected state) to the CLI.
 		if sd, ok := d.(driver.StreamingDriver); ok {
-			in.streamSend(ctx, sd, p, dir, sid, prompt)
+			in.streamSend(ctx, sd, p, dir, sid, driverText)
 		} else {
-			in.blockingSend(ctx, d, p, dir, sid, prompt)
+			in.blockingSend(ctx, d, p, dir, sid, driverText)
 		}
-		// Clear the cancel func regardless of path.
 		in.mu.Lock()
 		delete(in.cancels, p.Name)
 		in.mu.Unlock()

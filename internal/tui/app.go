@@ -97,10 +97,12 @@ func (m Model) renderSidebar(snap []inbox.Project, width int) string {
 	b.WriteString(headerStyle.Render("fleet"))
 	b.WriteString("\n\n")
 
+	fleetCount := 0
 	for i, p := range snap {
 		if i+1 == m.kingProjectIdx {
-			continue // skip the king itself
+			continue
 		}
+		fleetCount++
 		badge := statusBadge(p.Status, p.Activity)
 		name := p.Name
 		if len(name) > 14 {
@@ -116,9 +118,16 @@ func (m Model) renderSidebar(snap []inbox.Project, width int) string {
 		b.WriteString("\n")
 	}
 
+	if fleetCount == 0 {
+		b.WriteString(mutedStyle.Render("(no projects — press :"))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render(" then n to add one)"))
+		b.WriteString("\n")
+	}
+
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(fmt.Sprintf("%d projects  %d waiting  %d working",
-		len(snap)-1, waiting, working)))
+		fleetCount, waiting, working)))
 
 	return lipgloss.NewStyle().Width(width).Padding(0, 1).Render(b.String())
 }
@@ -287,7 +296,7 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clampMainScroll()
 		return m, nil
 
-	case "pgdown", " ":
+	case "pgdown":
 		m.mainScroll += 10
 		if m.mainScroll >= m.mainMaxScroll() {
 			m.mainAutoScroll = true
