@@ -327,7 +327,7 @@ func (m Model) viewDetail() string {
 		{"dir", p.Dir},
 		{"session", shortSession(p.SessionID)},
 		{"updated", fmt.Sprintf("%s (%s ago)", p.UpdatedAt.Format(time.RFC3339), ageHuman(time.Since(p.UpdatedAt)))},
-		{"status", string(p.Status)},
+		{"turns", fmt.Sprintf("%d", len(p.History))},
 	}
 	for _, r := range rows {
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("  %-10s", r[0])))
@@ -335,25 +335,44 @@ func (m Model) viewDetail() string {
 		b.WriteByte('\n')
 	}
 
-	// Error (if any).
-	if p.LastErr != "" {
-		b.WriteByte('\n')
-		b.WriteString(errorStyle.Render("  error:"))
-		b.WriteByte('\n')
-		b.WriteString(indent(p.LastErr, "    "))
-		b.WriteByte('\n')
-	}
-
-	// Last message.
+	// History (most-recent-last; visually reads top→bottom like a chat).
 	b.WriteByte('\n')
-	if p.LastMessage == "" {
+	if len(p.History) == 0 {
 		b.WriteString(mutedStyle.Render("  (no messages yet — press 's' to send one)"))
 		b.WriteByte('\n')
 	} else {
-		b.WriteString(workingStyle.Render("  last message:"))
+		b.WriteString(workingStyle.Render("  history:"))
 		b.WriteByte('\n')
-		b.WriteString(indent(p.LastMessage, "    "))
-		b.WriteByte('\n')
+		// Show the most recent ~8 turns to fit a typical viewport. Future
+		// enhancement: scrollable viewport. For now we trim from the front.
+		start := 0
+		const show = 8
+		if len(p.History) > show {
+			start = len(p.History) - show
+			b.WriteString(mutedStyle.Render(
+				fmt.Sprintf("    …(%d earlier turns not shown)…\n", start),
+			))
+		}
+		for _, msg := range p.History[start:] {
+			label := msg.Role
+			style := mutedStyle
+			switch msg.Role {
+			case "user":
+				label = "you"
+				style = workingStyle
+			case "assistant":
+				label = p.Tool
+				style = waitingStyle
+			case "error":
+				label = "error"
+				style = errorStyle
+			}
+			ts := msg.Timestamp.Format(time.Kitchen)
+			b.WriteString(style.Render(fmt.Sprintf("  [%s %s]", label, ts)))
+			b.WriteByte('\n')
+			b.WriteString(indent(msg.Content, "    "))
+			b.WriteByte('\n')
+		}
 	}
 
 	b.WriteString("\n\n")

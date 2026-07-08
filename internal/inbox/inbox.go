@@ -21,6 +21,14 @@ type Project struct {
 	LastMessage string        `json:"last_message"`
 	LastErr     string        `json:"last_err"`
 	UpdatedAt   time.Time     `json:"updated_at"`
+	History     []Message     `json:"history,omitempty"`
+}
+
+// Message is a single turn in a project's conversation history.
+type Message struct {
+	Role      string    `json:"role"` // "user", "assistant", or "error"
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // Inbox holds the federated set of project sessions and orchestrates sends.
@@ -85,6 +93,9 @@ func (in *Inbox) Send(idx int, prompt string) error {
 	}
 	p.Status = driver.StatusWorking
 	p.UpdatedAt = time.Now()
+	// Append the user turn to history immediately so it's persisted even
+	// if the agent crashes mid-turn.
+	p.appendHistory(Message{Role: "user", Content: prompt, Timestamp: time.Now()})
 	dir, sid := p.Dir, p.SessionID
 	in.mu.Unlock()
 	in.save()
@@ -98,15 +109,25 @@ func (in *Inbox) Send(idx int, prompt string) error {
 		p.Status = res.Status
 		if res.Err != nil {
 			p.LastErr = res.Err.Error()
+			p.appendHistory(Message{Role: "error", Content: res.Err.Error(), Timestamp: time.Now()})
 		} else {
 			p.LastErr = ""
 			p.LastMessage = res.Final
+			p.appendHistory(Message{Role: "assistant", Content: res.Final, Timestamp: time.Now()})
 		}
 		p.UpdatedAt = time.Now()
 		in.mu.Unlock()
 		in.save()
 	}()
 	return nil
+}
+
+// appendHistory trims to the last 100 messages to bound state.json growth.
+func (p *Project) appendHistory(m Message) {
+	p.History = append(p.History, m)
+	if len(p.History) > 100 {
+		p.History = p.History[len(p.History)-100:]
+	}
 }
 
 // Detail returns a project copy by 1-based index.
@@ -174,6 +195,7 @@ func LoadState(path string, projects []*Project) {
 		p.LastMessage = s.LastMessage
 		p.LastErr = s.LastErr
 		p.UpdatedAt = s.UpdatedAt
+		p.History = s.History
 		if p.Status == driver.StatusWorking {
 			p.Status = driver.StatusIdle // a send can't survive a restart
 		}
