@@ -13,7 +13,8 @@ import (
 )
 
 // renderMain draws the split-pane king-first layout:
-// sidebar (fleet status, left) + conversation (king history, right) + input.
+// sidebar (fleet status, left) + conversation (king history, right)
+// + fixed input bar at the bottom (always visible).
 func (m Model) renderMain() string {
 	snap := m.inbox.Snapshot()
 
@@ -27,7 +28,7 @@ func (m Model) renderMain() string {
 	}
 
 	// Conversation gets the rest.
-	convW := m.width - sidebarW - 4 // borders + padding
+	convW := m.width - sidebarW - 4
 	if convW < 20 {
 		convW = 20
 	}
@@ -35,6 +36,7 @@ func (m Model) renderMain() string {
 	sidebar := m.renderSidebar(snap, sidebarW)
 	conv := m.renderConversation(snap, convW)
 
+	// Body = sidebar + conversation side by side.
 	content := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, " ", conv)
 
 	// Toast line (transient notifications).
@@ -42,8 +44,40 @@ func (m Model) renderMain() string {
 		content += "\n" + wrapToast(m.toast, m.width-4)
 	}
 
-	footer := mutedStyle.Render("enter send  esc clear  ↑↓ scroll  : more  ctrl+c quit")
-	return renderFrame(m.width, m.height, "agent-inbox", content, footer)
+	// Input bar — fixed at the bottom, full width, visually distinct.
+	// This goes in the "footer" position of renderFrame so it's always
+	// visible regardless of conversation scroll position.
+	inputBar := m.renderInputBar()
+
+	return renderFrame(m.width, m.height, "agent-inbox", content, inputBar)
+}
+
+// renderInputBar draws the always-visible input box with a distinct border.
+func (m Model) renderInputBar() string {
+	// Determine king status for the label.
+	snap := m.inbox.Snapshot()
+	statusLabel := ""
+	if m.kingProjectIdx >= 1 && m.kingProjectIdx <= len(snap) {
+		king := snap[m.kingProjectIdx-1]
+		if king.Status == driver.StatusWorking {
+			statusLabel = mutedStyle.Render(fmt.Sprintf(" (king is %s...)", king.Activity))
+		}
+	}
+
+	// The input box itself — rounded border, blue accent, padded.
+	inputContent := m.mainInput.View()
+	inputBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("39")). // blue accent
+		Padding(0, 1).
+		Width(m.width - 6).
+		Render(inputContent)
+
+	// Below the input box: keybindings hint.
+	hint := mutedStyle.Render("enter send  esc clear  ↑↓ scroll  : more  ctrl+c quit")
+
+	// Stack: input box + hint.
+	return lipgloss.JoinVertical(lipgloss.Left, inputBox, hint) + statusLabel
 }
 
 func (m Model) renderSidebar(snap []inbox.Project, width int) string {
@@ -104,16 +138,17 @@ func (m Model) renderConversation(snap []inbox.Project, width int) string {
 	// Render king history as a conversation.
 	lines := renderConversationMessages(king, width)
 
-	// Apply scroll.
-	availH := m.height - 7 // frame + title + input + footer + padding
+	// Available height for the conversation body.
+	// Subtract: frame(2) + title(1) + separator(1) + footer(1) + input bar(3) + padding(2)
+	availH := m.height - 10
 	if availH < 3 {
 		availH = 3
 	}
 
 	if len(lines) > availH {
-		max := len(lines) - availH
-		if m.mainScroll > max {
-			m.mainScroll = max
+		maxScroll := len(lines) - availH
+		if m.mainScroll > maxScroll {
+			m.mainScroll = maxScroll
 		}
 		if m.mainScroll < 0 {
 			m.mainScroll = 0
@@ -141,10 +176,7 @@ func (m Model) renderConversation(snap []inbox.Project, width int) string {
 		b.WriteString("\n")
 	}
 
-	// Input at the bottom.
-	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("> %s", m.mainInput.View()))
-
+	// Input is NO LONGER here — it's rendered as a fixed bar in the footer.
 	return lipgloss.NewStyle().Width(width).Padding(0, 1).Render(b.String())
 }
 
