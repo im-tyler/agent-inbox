@@ -25,6 +25,8 @@ const (
 	viewList viewMode = iota
 	viewDetail
 	viewNewProject
+	viewDeleteConfirm
+	viewToolPicker
 )
 
 // Model is the Bubble Tea model for the agent-inbox dashboard.
@@ -38,6 +40,7 @@ type Model struct {
 	helpMode  bool // when true, keybindings overlay is shown
 	sendInput textinput.Model
 	np        newProjectModel // populated when view == viewNewProject
+	pendingTool string        // populated when view == viewToolPicker
 
 	toast   string
 	toastAt time.Time
@@ -131,6 +134,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDetailKey(msg)
 	case viewNewProject:
 		return m.handleNewProjectKey(msg)
+	case viewDeleteConfirm:
+		return m.handleDeleteConfirmKey(msg)
+	case viewToolPicker:
+		return m.handleToolPickerKey(msg)
 	}
 	return m, nil
 }
@@ -205,6 +212,46 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.np = newProjectModelInitial(cwd)
 		m.np.folder.Focus()
 		return m, textinput.Blink
+
+	case "x":
+		// Cancel the in-flight send for the selected project.
+		if err := m.inbox.Cancel(m.selected); err != nil {
+			m.toast = err.Error()
+		} else {
+			snap := m.inbox.Snapshot()
+			if m.selected >= 1 && m.selected <= len(snap) {
+				m.toast = "cancelled " + snap[m.selected-1].Name
+			} else {
+				m.toast = "cancelled"
+			}
+		}
+		m.toastAt = time.Now()
+
+	case "d":
+		// Delete the selected project (with confirmation).
+		snap := m.inbox.Snapshot()
+		if m.selected < 1 || m.selected > len(snap) {
+			return m, nil
+		}
+		if snap[m.selected-1].Status == driver.StatusWorking {
+			m.toast = "cancel the in-flight send before deleting (press x)"
+			m.toastAt = time.Now()
+			return m, nil
+		}
+		m.view = viewDeleteConfirm
+
+	case "t":
+		// Change the tool of the selected project.
+		snap := m.inbox.Snapshot()
+		if m.selected < 1 || m.selected > len(snap) {
+			return m, nil
+		}
+		if snap[m.selected-1].Status == driver.StatusWorking {
+			m.toast = "cancel the in-flight send before changing tool (press x)"
+			m.toastAt = time.Now()
+			return m, nil
+		}
+		m.view = viewToolPicker
 	}
 
 	return m, nil
@@ -278,6 +325,10 @@ func (m Model) View() string {
 		return m.viewDetail()
 	case viewNewProject:
 		return m.renderNewProject()
+	case viewDeleteConfirm:
+		return m.renderDeleteConfirm()
+	case viewToolPicker:
+		return m.renderToolPicker()
 	default:
 		return m.viewList()
 	}
@@ -532,9 +583,13 @@ func helpText() string {
 		"  keybindings:",
 		"    j/k or ↑↓     navigate",
 		"    1-9           select by index",
+		"    n             new project (folder + agent picker)",
 		"    s             send message to selected",
 		"    v or enter    open detail view (full message + metadata)",
 		"    a             attach to live session (interactive)",
+		"    x             cancel in-flight send",
+		"    t             change tool for selected project",
+		"    d             delete selected project",
 		"    r             refresh toast",
 		"    ?             toggle this help",
 		"    q or ctrl+c   quit",
@@ -542,7 +597,7 @@ func helpText() string {
 	return strings.Join(lines, "\n")
 }
 
-const footerText = "j/k move  s send  v detail  a attach  n new  ? help  q quit"
+const footerText = "j/k move  s send  v detail  a attach  n new  x cancel  t tool  d delete  ? help  q quit"
 
 func max(a, b int) int {
 	if a > b {

@@ -85,5 +85,29 @@ func (s *Settings) AddProject(p Project) bool {
 	return true
 }
 
+// RemoveProject removes the project with the given name. Returns true if
+// found and removed, false if no project matched.
+func (s *Settings) RemoveProject(name string) bool {
+	for i, existing := range s.Projects {
+		if existing.Name == name {
+			s.Projects = append(s.Projects[:i], s.Projects[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// SetProjectTool updates the Tool field of the project with the given name.
+// Returns true if found and updated, false if no project matched.
+func (s *Settings) SetProjectTool(name, tool string) bool {
+	for i := range s.Projects {
+		if s.Projects[i].Name == name {
+			s.Projects[i].Tool = tool
+			return true
+		}
+	}
+	return false
+}
+
 // KnownTools is the canonical list of driver names the UI can offer.
 var KnownTools = []string{"claude", "opencode", "codex", "mock"}

@@ -135,13 +135,18 @@ Config:
 | `s` | send a message to the selected project (inline prompt) |
 | `v` or `Enter` | open detail view (full message, metadata, session id, errors) |
 | `a` | attach interactively — exits TUI, hands terminal to the agent, re-launches TUI when the agent exits |
+| `x` | cancel the selected project's in-flight send (kills the underlying subprocess) |
+| `t` | change the selected project's tool (claude / opencode / codex / mock); clears session id |
+| `d` | delete the selected project (with confirmation) |
 | `r` | refresh the toast line |
 | `?` | toggle keybindings help |
 | `q` or `Ctrl+C` | quit |
 
 While in send mode: `Enter` dispatches, `Esc` cancels.
 While in detail view: `Esc` returns to the list.
-While in new-project modal: `Enter` advances to the next step (folder → agent → name → add), `Esc` cancels.
+While in new-project modal: `Enter` advances steps, `Esc` cancels.
+While in delete-confirm: `y` confirms, any other key cancels.
+While in tool-picker: `1`–`4` highlights, `Enter` confirms, `Esc` cancels.
 
 ### Legacy REPL
 
