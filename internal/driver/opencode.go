@@ -61,8 +61,9 @@ func (o *OpenCode) Send(ctx context.Context, dir, sessionID, prompt string) Resu
 
 	cmd := exec.CommandContext(ctx, "opencode", args...)
 	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return Result{SessionID: sessionID, Status: StatusError, Err: fmt.Errorf("opencode run: %v: %s", err, strings.TrimSpace(string(out)))}
+	runOut, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		return Result{SessionID: sessionID, Status: StatusError, Err: fmt.Errorf("opencode run: %v: %s", runErr, strings.TrimSpace(string(runOut)))}
 	}
 
 	if newSession {
@@ -75,6 +76,13 @@ func (o *OpenCode) Send(ctx context.Context, dir, sessionID, prompt string) Resu
 
 	text, errMsg, err := exportLastAssistant(ctx, sessionID)
 	if err != nil {
+		// Export failed — session may be stale or format changed.
+		// Fall back to whatever the run produced so the user sees
+		// SOMETHING instead of a cryptic JSON parse error.
+		runText := strings.TrimSpace(string(runOut))
+		if runText != "" {
+			return Result{SessionID: sessionID, Final: runText, Status: StatusWaiting}
+		}
 		return Result{SessionID: sessionID, Status: StatusError, Err: err}
 	}
 	if errMsg != "" && text == "" {
@@ -129,8 +137,14 @@ func exportLastAssistant(ctx context.Context, sessionID string) (text, errMsg st
 	if e != nil {
 		return "", "", wrapExec(e)
 	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return "", "", fmt.Errorf("opencode export returned no data (session %q may not exist)", sessionID)
+	}
 	if i := bytes.IndexByte(out, '{'); i > 0 { // strip "Exporting session: ..." prefix
 		out = out[i:]
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return "", "", fmt.Errorf("opencode export returned no JSON for session %q", sessionID)
 	}
 	var ex ocExport
 	if e := json.Unmarshal(out, &ex); e != nil {
