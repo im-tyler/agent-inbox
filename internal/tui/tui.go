@@ -7,7 +7,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -28,6 +27,7 @@ const (
 	viewDeleteConfirm
 	viewToolPicker
 	viewKing
+	viewActions
 )
 
 // Model is the Bubble Tea model for the agent-inbox dashboard.
@@ -149,6 +149,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleToolPickerKey(msg)
 	case viewKing:
 		return m.handleKingKey(msg)
+	case viewActions:
+		return m.handleActionsKey(msg)
 	}
 	return m, nil
 }
@@ -201,81 +203,27 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.view = viewDetail
 		}
 
-	case "a":
-		// Interactive attach: request the argv from inbox, then exit.
-		args, dir, err := m.inbox.AttachArgs(m.selected)
-		if err != nil {
-			m.toast = err.Error()
-			m.toastAt = time.Now()
-			return m, nil
-		}
-		m.attachRequest = &attachArgs{Argv: args, Dir: dir}
-		return m, tea.Quit
-
-	case "r":
-		m.toast = "refreshed"
-		m.toastAt = time.Now()
-
-	case "n":
-		// Open the new-project modal.
-		m.view = viewNewProject
-		cwd, _ := os.Getwd()
-		m.np = newProjectModelInitial(cwd)
-		m.np.folder.Focus()
-		return m, textinput.Blink
-
 	case "x":
-		// Cancel the in-flight send for the selected project.
+		// Cancel the in-flight send or dismiss a waiting/error state.
 		if err := m.inbox.Cancel(m.selected); err != nil {
 			m.toast = err.Error()
 		} else {
 			snap := m.inbox.Snapshot()
 			if m.selected >= 1 && m.selected <= len(snap) {
-				m.toast = "cancelled " + snap[m.selected-1].Name
+				m.toast = "dismissed " + snap[m.selected-1].Name
 			} else {
-				m.toast = "cancelled"
+				m.toast = "dismissed"
 			}
 		}
 		m.toastAt = time.Now()
 
-	case "d":
-		// Delete the selected project (with confirmation).
-		snap := m.inbox.Snapshot()
-		if m.selected < 1 || m.selected > len(snap) {
-			return m, nil
-		}
-		if snap[m.selected-1].Status == driver.StatusWorking {
-			m.toast = "cancel the in-flight send before deleting (press x)"
-			m.toastAt = time.Now()
-			return m, nil
-		}
-		m.view = viewDeleteConfirm
+	case ":":
+		// Open the actions menu.
+		m.view = viewActions
 
-	case "t":
-		// Change the tool of the selected project.
-		snap := m.inbox.Snapshot()
-		if m.selected < 1 || m.selected > len(snap) {
-			return m, nil
-		}
-		if snap[m.selected-1].Status == driver.StatusWorking {
-			m.toast = "cancel the in-flight send before changing tool (press x)"
-			m.toastAt = time.Now()
-			return m, nil
-		}
-		m.view = viewToolPicker
-
-	case "K":
-		// Enter king mode for the selected project.
-		snap := m.inbox.Snapshot()
-		if m.selected < 1 || m.selected > len(snap) {
-			return m, nil
-		}
-		m.kingIdx = m.selected
-		m.kingInput = textinput.New()
-		m.kingInput.CharLimit = 0
-		m.kingInput.Width = 60
-		m.kingInput.Placeholder = "message"
-		m.view = viewKing
+	case "r":
+		m.toast = "refreshed"
+		m.toastAt = time.Now()
 	}
 
 	return m, nil
@@ -355,6 +303,8 @@ func (m Model) View() string {
 		return m.renderToolPicker()
 	case viewKing:
 		return m.renderKing()
+	case viewActions:
+		return m.renderActions()
 	default:
 		return m.viewList()
 	}
@@ -459,7 +409,7 @@ func (m Model) viewDetail() string {
 	}
 
 	title := fmt.Sprintf("%s  (%s)  [%s]", p.Name, p.Tool, string(p.Status))
-	footer := mutedStyle.Render("esc back  s send  a attach  q quit")
+	footer := mutedStyle.Render("s send  a attach  esc back  q quit")
 	return renderFrame(m.width, m.height, title, b.String(), footer)
 }
 
@@ -607,25 +557,32 @@ func wrapToast(s string, width int) string {
 
 func helpText() string {
 	lines := []string{
-		"  keybindings:",
+		"  daily:",
 		"    j/k or ↑↓     navigate",
 		"    1-9           select by index",
-		"    n             new project (folder + agent picker)",
-		"    s             send message to selected",
-		"    v or enter    open detail view (full message + metadata)",
-		"    a             attach to live session (interactive)",
-		"    x             cancel in-flight send",
-		"    t             change tool for selected project",
-		"    d             delete selected project",
-		"    K             enter king mode for selected project",
-		"    r             refresh toast",
-		"    ?             toggle this help",
-		"    q or ctrl+c   quit",
+		"    s             send message",
+		"    v or enter    view detail",
+		"    x             cancel / dismiss",
+		"    :             more actions",
+		"    q             quit",
+		"",
+		"  more actions (press :):",
+		"    n             new project",
+		"    d             delete project",
+		"    t             change tool",
+		"    a             attach to session",
+		"    K             king mode (supervisor)",
+		"    ?             this help",
+		"",
+		"  in detail view:",
+		"    s             send",
+		"    a             attach",
+		"    esc           back",
 	}
 	return strings.Join(lines, "\n")
 }
 
-const footerText = "j/k move  s send  v detail  a attach  n new  x cancel  t tool  d delete  K king  ? help  q quit"
+const footerText = "s send  v view  x cancel  : more  q quit"
 
 func max(a, b int) int {
 	if a > b {
