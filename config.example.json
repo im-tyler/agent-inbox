@@ -1,9 +1,11 @@
 {
-  "claude": { "permission_mode": "default" },
+  "claude":   { "permission_mode": "default" },
   "opencode": { "model": "opencode/deepseek-v4-flash-free", "skip_permissions": false },
+  "codex":    { "model": "", "sandbox": "workspace-write", "skip_approvals": false },
   "projects": [
     { "name": "demo", "tool": "mock", "dir": "/tmp" },
     { "name": "tebian", "tool": "claude", "dir": "/Users/tyler/Documents/Code Projects/Tebian/tebian-os" },
-    { "name": "neutron", "tool": "opencode", "dir": "/Users/tyler/Documents/Code Projects/Neutron" }
+    { "name": "neutron", "tool": "opencode", "dir": "/Users/tyler/Documents/Code Projects/Neutron" },
+    { "name": "maccel", "tool": "codex", "dir": "/Users/tyler/Documents/Code Projects/Sides/Public/maccel" }
   ]
 }

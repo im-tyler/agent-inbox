@@ -23,6 +23,7 @@ Working name. Phase 1 = Claude + OpenCode.
 | Mock driver | done, exercised |
 | Claude adapter | **done, live-verified** (send / resume / session persistence) |
 | OpenCode adapter | **done, live-verified** (new session + resume + export-based reply, free model) |
+| Codex adapter | done, CLI-surface-verified against `codex exec --help`; pending live-run |
 | Inbox state model + background sends | done, restart persistence verified |
 | TUI dashboard (Bubble Tea) | done — single-screen view, live updates, inline send |
 | Legacy REPL | done, available via `--repl` flag |
@@ -63,13 +64,19 @@ sidestepping the fuzzy "blocked vs done vs working" classification until we move
 to streaming mode.
 
 ### Verified CLI surfaces
-- **Claude 2.1.167:** `claude -p --output-format json --session-id <uuid>` /
-  `-r <id>` / `--permission-mode`. Result JSON carries
-  `result`, `session_id`, `is_error`, `permission_denials`.
-- **OpenCode 1.15.11:** `opencode run --format json --session <id>`
-  (NDJSON events `{type, timestamp, sessionID, ...}`),
-  `--dangerously-skip-permissions`; `opencode serve` exists for a future
-  persistent-server adapter.
+- **Claude 2.1.167:** `claude -p --output-format json` returns a single result
+  object with `result`, `session_id`, `is_error`, `permission_denials`.
+- **OpenCode 1.15.11:** `opencode run --format json` is **empty on success**, so
+  the adapter ignores run output and reads the reply via `opencode export <id>`.
+  A new session's id is recovered by set-difference of `session list` around
+  the run (serialized). `opencode serve` exists for a future persistent-server
+  adapter.
+- **Codex CLI** (`codex exec --help` surface-verified): `codex exec --json
+  --output-last-message <file>` streams JSONL events and writes the final
+  assistant message to the given file. Resume: `codex exec resume <session-id>
+  <prompt>`. Interactive attach: `codex resume <session-id>`. Sandbox modes:
+  `read-only` / `workspace-write` / `danger-full-access` (or
+  `--dangerously-bypass-approvals-and-sandbox` for full autonomy).
 
 ## Run
 
@@ -96,9 +103,11 @@ Config:
 {
   "claude":   { "permission_mode": "default" },
   "opencode": { "skip_permissions": false },
+  "codex":    { "sandbox": "workspace-write" },
   "projects": [
     { "name": "tebian",  "tool": "claude",   "dir": "/path/to/tebian" },
-    { "name": "neutron", "tool": "opencode", "dir": "/path/to/neutron" }
+    { "name": "neutron", "tool": "opencode", "dir": "/path/to/neutron" },
+    { "name": "maccel",  "tool": "codex",    "dir": "/path/to/maccel" }
   ]
 }
 ```
@@ -159,7 +168,6 @@ project to `waiting`, and prints a live `[notify]`.
 - **`sharpen`** — optional LLM rewrite of a rough reply before sending.
 - **OpenCode Stop-equivalent** — the hook bridge is Claude-only so far; OpenCode
   has no Stop hook, so hand-run OpenCode sessions don't yet self-report.
-- **Codex adapter** — third driver once the two-vendor abstraction settles.
 - **Streaming mode** — replace turn-returns-when-done with live working/blocked/waiting classification.
 - **Multi-host** — projects on different machines via Tailscale.
 - **OpenCode `serve` adapter** — persistent server instead of per-send exec.

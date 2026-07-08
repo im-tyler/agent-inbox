@@ -14,12 +14,17 @@ type Settings struct {
 		Model           string `json:"model"`
 		SkipPermissions bool   `json:"skip_permissions"`
 	} `json:"opencode"`
+	Codex struct {
+		Model         string `json:"model"`          // e.g. "gpt-5", "o3"; empty = Codex default
+		Sandbox       string `json:"sandbox"`        // "read-only" | "workspace-write" | "danger-full-access"
+		SkipApprovals bool   `json:"skip_approvals"` // maps to --dangerously-bypass-approvals-and-sandbox
+	} `json:"codex"`
 	Projects []Project `json:"projects"`
 }
 
 type Project struct {
 	Name string `json:"name"`
-	Tool string `json:"tool"` // "claude" | "opencode" | "mock"
+	Tool string `json:"tool"` // "claude" | "opencode" | "codex" | "mock"
 	Dir  string `json:"dir"`
 }
 

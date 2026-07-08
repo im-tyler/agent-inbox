@@ -54,6 +54,7 @@ func main() {
 		"mock":     driver.Mock{},
 		"claude":   driver.Claude{PermissionMode: cfg.Claude.PermissionMode},
 		"opencode": driver.NewOpenCode(cfg.OpenCode.Model, cfg.OpenCode.SkipPermissions),
+		"codex":    driver.Codex{Model: cfg.Codex.Model, Sandbox: cfg.Codex.Sandbox, SkipApprovals: cfg.Codex.SkipApprovals},
 	}
 
 	projects := make([]*inbox.Project, len(cfg.Projects))
