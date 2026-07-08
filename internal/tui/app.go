@@ -147,9 +147,14 @@ func (m Model) renderConversation(snap []inbox.Project, width int) string {
 	// Build ALL conversation lines (history + streaming text).
 	lines := renderConversationMessages(king, width)
 	if king.Status == driver.StatusWorking && king.StreamingText != "" {
-		lines = append(lines, workingStyle.Render("─ generating ─"))
+		maxW := width - 2
+		if maxW < 10 {
+			maxW = 10
+		}
+		trunc := lipgloss.NewStyle().MaxWidth(maxW)
+		lines = append(lines, trunc.Render(workingStyle.Render("─ generating ─")))
 		for _, ln := range strings.Split(king.StreamingText, "\n") {
-			lines = append(lines, ln)
+			lines = append(lines, trunc.Render(ln))
 		}
 		lines = append(lines, "")
 	}
@@ -187,7 +192,16 @@ func (m Model) renderConversation(snap []inbox.Project, width int) string {
 // The bottom-relative scroll approach doesn't require line-count estimation.
 
 // renderConversationMessages turns a project's History into display lines.
+// Each line is truncated to maxW so that 1 slice entry = 1 visual terminal
+// row. Without this, long lines wrap and the scroll count doesn't match
+// what the terminal actually shows, causing the bottom to be clipped.
 func renderConversationMessages(p inbox.Project, width int) []string {
+	maxW := width - 2
+	if maxW < 10 {
+		maxW = 10
+	}
+	trunc := lipgloss.NewStyle().MaxWidth(maxW)
+
 	var lines []string
 	for _, msg := range p.History {
 		label := msg.Role
@@ -207,10 +221,9 @@ func renderConversationMessages(p inbox.Project, width int) []string {
 			style = mutedStyle
 		}
 		ts := msg.Timestamp.Format(time.Kitchen)
-		lines = append(lines, style.Render(fmt.Sprintf("[%s %s]", label, ts)))
-		// Word-wrap content to width.
+		lines = append(lines, trunc.Render(style.Render(fmt.Sprintf("[%s %s]", label, ts))))
 		for _, ln := range strings.Split(msg.Content, "\n") {
-			lines = append(lines, ln)
+			lines = append(lines, trunc.Render(ln))
 		}
 		lines = append(lines, "")
 	}
