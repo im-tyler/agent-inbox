@@ -12,13 +12,30 @@ import (
 	"agentinbox/internal/inbox"
 )
 
-// renderMain draws the split-pane king-first layout:
-// sidebar (fleet status, left) + conversation (king history, right)
-// + fixed input bar at the bottom (always visible).
+// renderMain draws the split-pane king-first layout WITHOUT renderFrame.
+// Every component is padded to exact line counts so there's no clipping
+// or estimation. This is more verbose than renderFrame but deterministic.
 func (m Model) renderMain() string {
 	snap := m.inbox.Snapshot()
 
-	// Sidebar width: ~25% of terminal, clamped.
+	// Layout heights (exact):
+	//   top border      = 1
+	//   title           = 1
+	//   blank           = 1
+	//   body            = bodyH (sidebar + conversation)
+	//   blank           = 1
+	//   input top       = 1
+	//   input text      = 1
+	//   input bottom    = 1
+	//   hint            = 1
+	//   bottom border   = 1
+	//   total non-body  = 9
+	bodyH := m.height - 9
+	if bodyH < 3 {
+		bodyH = 3
+	}
+
+	// Sidebar width.
 	sidebarW := m.width / 4
 	if sidebarW < 22 {
 		sidebarW = 22
@@ -26,58 +43,205 @@ func (m Model) renderMain() string {
 	if sidebarW > 40 {
 		sidebarW = 40
 	}
-
-	// Conversation gets the rest.
 	convW := m.width - sidebarW - 4
 	if convW < 20 {
 		convW = 20
 	}
 
-	sidebar := m.renderSidebar(snap, sidebarW)
-	conv := m.renderConversation(snap, convW)
+	// Build conversation lines.
+	convLines := m.buildConversationLines(snap, convW)
 
-	// Body = conversation (left) + sidebar (right), side by side.
-	content := lipgloss.JoinHorizontal(lipgloss.Top, conv, " ", sidebar)
+	// Slice to show the last bodyH lines (bottom-relative scroll).
+	scrollUp := m.mainScrollFromBottom
+	if scrollUp < 0 {
+		scrollUp = 0
+	}
+	endIdx := len(convLines) - scrollUp
+	if endIdx > len(convLines) {
+		endIdx = len(convLines)
+	}
+	if endIdx < 0 {
+		endIdx = 0
+	}
+	startIdx := endIdx - bodyH
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	visibleConv := convLines[startIdx:endIdx]
 
-	// Toast line (transient notifications).
-	if m.toast != "" && time.Since(m.toastAt) < 6*time.Second {
-		content += "\n" + wrapToast(m.toast, m.width-4)
+	// Pad conversation to exactly bodyH lines.
+	for len(visibleConv) < bodyH {
+		visibleConv = append(visibleConv, "")
 	}
 
-	// Input bar — fixed at the bottom, full width, visually distinct.
-	// This goes in the "footer" position of renderFrame so it's always
-	// visible regardless of conversation scroll position.
-	inputBar := m.renderInputBar()
+	// Build sidebar lines, padded to exactly bodyH.
+	sidebarLines := m.buildSidebarLines(snap, sidebarW)
+	for len(sidebarLines) < bodyH {
+		sidebarLines = append(sidebarLines, "")
+	}
+	if len(sidebarLines) > bodyH {
+		sidebarLines = sidebarLines[:bodyH]
+	}
 
-	return renderFrame(m.width, m.height, "agent-inbox", content, inputBar)
+	// Join side by side, line by line.
+	var body strings.Builder
+	for i := 0; i < bodyH; i++ {
+		convLine := ""
+		if i < len(visibleConv) {
+			convLine = visibleConv[i]
+		}
+		sidebarLine := ""
+		if i < len(sidebarLines) {
+			sidebarLine = sidebarLines[i]
+		}
+		body.WriteString(padToWidth(convLine, convW))
+		body.WriteString("  ")
+		body.WriteString(padToWidth(sidebarLine, sidebarW))
+		body.WriteString("\n")
+	}
+	bodyStr := strings.TrimSuffix(body.String(), "\n")
+
+	// Build input bar.
+	inputText := m.mainInput.View()
+	inputLine := fmt.Sprintf("  %s", inputText)
+
+	// Build hint.
+	hint := mutedStyle.Render("  enter send  esc clear  ↑↓ scroll  : more  ctrl+c quit")
+
+	// Assemble the full frame with box-drawing characters.
+	var b strings.Builder
+	innerW := m.width - 2
+	b.WriteString("╭" + strings.Repeat("─", innerW) + "╮\n")
+	b.WriteString("│ " + titleStyle.Render("agent-inbox") + padRight("", innerW-12) + " │\n")
+	b.WriteString("│" + strings.Repeat(" ", innerW+2) + "│\n")
+	for _, ln := range strings.Split(bodyStr, "\n") {
+		b.WriteString("│ " + padToWidth(ln, innerW) + " │\n")
+	}
+	b.WriteString("│" + strings.Repeat(" ", innerW+2) + "│\n")
+	b.WriteString("│ " + padToWidth(inputLine, innerW) + " │\n")
+	b.WriteString("│ " + padToWidth(hint, innerW) + " │\n")
+	b.WriteString("╰" + strings.Repeat("─", innerW) + "╯")
+	return b.String()
 }
 
-// renderInputBar draws the always-visible input box with a distinct border.
-func (m Model) renderInputBar() string {
-	// Determine king status for the label.
-	snap := m.inbox.Snapshot()
-	statusLabel := ""
-	if m.kingProjectIdx >= 1 && m.kingProjectIdx <= len(snap) {
-		king := snap[m.kingProjectIdx-1]
-		if king.Status == driver.StatusWorking {
-			statusLabel = mutedStyle.Render(fmt.Sprintf(" (king is %s...)", king.Activity))
+// buildConversationLines returns all conversation lines for the king project.
+func (m Model) buildConversationLines(snap []inbox.Project, width int) []string {
+	if m.kingProjectIdx < 1 || m.kingProjectIdx > len(snap) {
+		return []string{"(no king project)"}
+	}
+	king := snap[m.kingProjectIdx-1]
+	maxW := width - 2
+	if maxW < 10 {
+		maxW = 10
+	}
+	trunc := lipgloss.NewStyle().MaxWidth(maxW)
+
+	var lines []string
+	lines = append(lines, trunc.Render(headerStyle.Render(fmt.Sprintf("king (%s) %s",
+		king.Tool, statusBadge(king.Status, king.Activity)))))
+	lines = append(lines, "")
+
+	for _, msg := range king.History {
+		label := msg.Role
+		style := mutedStyle
+		switch msg.Role {
+		case "user":
+			label = "you"
+			style = workingStyle
+		case "assistant":
+			label = king.Tool
+			style = waitingStyle
+		case "error":
+			label = "error"
+			style = errorStyle
+		case "system":
+			label = "system"
+			style = mutedStyle
+		}
+		ts := msg.Timestamp.Format(time.Kitchen)
+		lines = append(lines, trunc.Render(style.Render(fmt.Sprintf("[%s %s]", label, ts))))
+		for _, ln := range strings.Split(msg.Content, "\n") {
+			lines = append(lines, trunc.Render(ln))
+		}
+		lines = append(lines, "")
+	}
+
+	// Streaming text.
+	if king.Status == driver.StatusWorking && king.StreamingText != "" {
+		lines = append(lines, trunc.Render(workingStyle.Render("─ generating ─")))
+		for _, ln := range strings.Split(king.StreamingText, "\n") {
+			lines = append(lines, trunc.Render(ln))
 		}
 	}
 
-	// The input box itself — rounded border, blue accent, padded.
-	inputContent := m.mainInput.View()
-	inputBox := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("39")). // blue accent
-		Padding(0, 1).
-		Width(m.width - 6).
-		Render(inputContent)
+	return lines
+}
 
-	// Below the input box: keybindings hint.
-	hint := mutedStyle.Render("enter send  esc clear  ↑↓ scroll  : more  ctrl+c quit")
+// buildSidebarLines returns the fleet sidebar as a slice of lines.
+func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
+	maxW := width - 2
+	if maxW < 10 {
+		maxW = 10
+	}
+	trunc := lipgloss.NewStyle().MaxWidth(maxW)
 
-	// Stack: input box + hint.
-	return lipgloss.JoinVertical(lipgloss.Left, inputBox, hint) + statusLabel
+	var lines []string
+	lines = append(lines, trunc.Render(headerStyle.Render("fleet")))
+	lines = append(lines, "")
+
+	waiting, working, fleetCount := 0, 0, 0
+	for _, p := range snap {
+		switch p.Status {
+		case driver.StatusWaiting, driver.StatusError:
+			waiting++
+		case driver.StatusWorking:
+			working++
+		}
+	}
+
+	for i, p := range snap {
+		if i+1 == m.kingProjectIdx {
+			continue
+		}
+		fleetCount++
+		badge := statusBadge(p.Status, p.Activity)
+		name := p.Name
+		if len(name) > 14 {
+			name = name[:13] + "…"
+		}
+		lines = append(lines, trunc.Render(fmt.Sprintf("%d %-14s %s", i+1, name, badge)))
+		msg := truncateOneLine(p.LastMessage, maxW-4)
+		if msg != "" {
+			lines = append(lines, trunc.Render(mutedStyle.Render("  "+msg)))
+		}
+	}
+
+	if fleetCount == 0 {
+		lines = append(lines, trunc.Render(mutedStyle.Render("(no projects —")))
+		lines = append(lines, trunc.Render(mutedStyle.Render(" press : then n)")))
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, trunc.Render(mutedStyle.Render(fmt.Sprintf("%d projects  %d waiting", fleetCount, waiting))))
+	lines = append(lines, trunc.Render(mutedStyle.Render(fmt.Sprintf("%d working", working))))
+	return lines
+}
+
+// padToWidth ensures a string occupies exactly w visual columns by padding
+// with spaces or truncating. Strips trailing newlines first.
+func padToWidth(s string, w int) string {
+	s = strings.TrimRight(s, "\n\r")
+	// Use lipgloss to handle ANSI codes correctly.
+	return lipgloss.NewStyle().Width(w).Render(s)
+}
+
+// padRight pads s with spaces to width w.
+func padRight(s string, w int) string {
+	vis := lipgloss.Width(s)
+	if vis >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-vis)
 }
 
 func (m Model) renderSidebar(snap []inbox.Project, width int) string {
