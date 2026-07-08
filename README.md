@@ -138,6 +138,7 @@ Config:
 | `x` | cancel the selected project's in-flight send (kills the underlying subprocess) |
 | `t` | change the selected project's tool (claude / opencode / codex / mock); clears session id |
 | `d` | delete the selected project (with confirmation) |
+| `K` | enter king mode for the selected project (supervisor panel) |
 | `r` | refresh the toast line |
 | `?` | toggle keybindings help |
 | `q` or `Ctrl+C` | quit |
@@ -147,6 +148,35 @@ While in detail view: `Esc` returns to the list.
 While in new-project modal: `Enter` advances steps, `Esc` cancels.
 While in delete-confirm: `y` confirms, any other key cancels.
 While in tool-picker: `1`–`4` highlights, `Enter` confirms, `Esc` cancels.
+While in king mode: `s` sends to king, `+` adds connected project, `-` removes, `x` cancels king's send, `Esc` returns to list.
+
+## King mode
+
+Press `K` on any project to enter **king mode** — a supervisor panel where one agent (the "king") coordinates other projects.
+
+The king is just a regular project (Claude, Codex, or OpenCode). What makes it a king is:
+
+1. **State injection**: when you send a message to the king, agent-inbox prepends the current status and last message of each connected project to the prompt. The king sees the fleet's state without you typing it.
+2. **Directive dispatch**: the king's response is parsed for `[send to PROJECT: message]` lines. Each directive is automatically dispatched to the target project via normal `Send`.
+
+```
+┌─ king: supervisor (claude) ──────────────────┐
+│                                               │
+│ connected:                                    │
+│   maccel    codex    waiting   wrote 3 tests  │
+│   haven     claude   working:typing           │
+│                                               │
+│ conversation:                                 │
+│   [you 2:30pm] make sure maccel's tests pass │
+│   [claude 2:31pm] maccel is waiting with 3   │
+│     tests. I'll start tebian on docs.         │
+│     [send to tebian: draft security tile docs]│
+│                                               │
+│ s send  + add  - remove  x cancel  esc back  │
+└───────────────────────────────────────────────┘
+```
+
+The king doesn't auto-act — it only dispatches when you send it a message. For autonomous event-driven supervision (king acts when projects finish on their own), see the v0.2 roadmap.
 
 ### Legacy REPL
 

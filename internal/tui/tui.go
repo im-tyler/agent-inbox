@@ -27,6 +27,7 @@ const (
 	viewNewProject
 	viewDeleteConfirm
 	viewToolPicker
+	viewKing
 )
 
 // Model is the Bubble Tea model for the agent-inbox dashboard.
@@ -41,6 +42,14 @@ type Model struct {
 	sendInput textinput.Model
 	np        newProjectModel // populated when view == viewNewProject
 	pendingTool string        // populated when view == viewToolPicker
+
+	// King mode state.
+	kingIdx        int            // 1-based index of the project acting as king
+	connected      []string       // names of connected projects
+	kingSendMode   bool           // when true, kingInput is active
+	kingAddMode    bool           // when true, showing add-connected picker
+	kingRemoveMode bool           // when true, showing remove-connected picker
+	kingInput      textinput.Model // shared input for king send/add/remove
 
 	toast   string
 	toastAt time.Time
@@ -138,6 +147,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDeleteConfirmKey(msg)
 	case viewToolPicker:
 		return m.handleToolPickerKey(msg)
+	case viewKing:
+		return m.handleKingKey(msg)
 	}
 	return m, nil
 }
@@ -252,6 +263,19 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.view = viewToolPicker
+
+	case "K":
+		// Enter king mode for the selected project.
+		snap := m.inbox.Snapshot()
+		if m.selected < 1 || m.selected > len(snap) {
+			return m, nil
+		}
+		m.kingIdx = m.selected
+		m.kingInput = textinput.New()
+		m.kingInput.CharLimit = 0
+		m.kingInput.Width = 60
+		m.kingInput.Placeholder = "message"
+		m.view = viewKing
 	}
 
 	return m, nil
@@ -329,6 +353,8 @@ func (m Model) View() string {
 		return m.renderDeleteConfirm()
 	case viewToolPicker:
 		return m.renderToolPicker()
+	case viewKing:
+		return m.renderKing()
 	default:
 		return m.viewList()
 	}
@@ -590,6 +616,7 @@ func helpText() string {
 		"    x             cancel in-flight send",
 		"    t             change tool for selected project",
 		"    d             delete selected project",
+		"    K             enter king mode for selected project",
 		"    r             refresh toast",
 		"    ?             toggle this help",
 		"    q or ctrl+c   quit",
@@ -597,7 +624,7 @@ func helpText() string {
 	return strings.Join(lines, "\n")
 }
 
-const footerText = "j/k move  s send  v detail  a attach  n new  x cancel  t tool  d delete  ? help  q quit"
+const footerText = "j/k move  s send  v detail  a attach  n new  x cancel  t tool  d delete  K king  ? help  q quit"
 
 func max(a, b int) int {
 	if a > b {
