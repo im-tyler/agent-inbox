@@ -410,6 +410,13 @@ func renderRow(idx int, p inbox.Project, selected bool) string {
 	if msgStr == "" && p.LastErr != "" {
 		msgStr = "error: " + p.LastErr
 	}
+
+	// If the driver is streaming and we have live activity, surface it
+	// in the status column instead of just "working".
+	if p.Status == driver.StatusWorking && p.Activity != "" {
+		statusStr = "working:" + p.Activity
+	}
+
 	msgStr = truncateOneLine(msgStr, 60)
 
 	statusStyled := statusStyle(p.Status, statusStr)

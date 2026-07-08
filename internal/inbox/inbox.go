@@ -22,6 +22,11 @@ type Project struct {
 	LastErr     string        `json:"last_err"`
 	UpdatedAt   time.Time     `json:"updated_at"`
 	History     []Message     `json:"history,omitempty"`
+
+	// Activity carries the current live status label while Status == Working:
+	// e.g. "typing", "Bash", "Edit". Transient — not persisted; reset on
+	// restart. Populated only when the driver implements StreamingDriver.
+	Activity string `json:"-"`
 }
 
 // Message is a single turn in a project's conversation history.
@@ -101,12 +106,19 @@ func (in *Inbox) Send(idx int, prompt string) error {
 	in.save()
 
 	go func() {
+		// If the driver streams, use the streaming path so the UI can show
+		// live activity (tool name, typing). Otherwise fall back to blocking Send.
+		if sd, ok := d.(driver.StreamingDriver); ok {
+			in.streamSend(sd, p, dir, sid, prompt)
+			return
+		}
 		res := d.Send(context.Background(), dir, sid, prompt)
 		in.mu.Lock()
 		if res.SessionID != "" {
 			p.SessionID = res.SessionID
 		}
 		p.Status = res.Status
+		p.Activity = ""
 		if res.Err != nil {
 			p.LastErr = res.Err.Error()
 			p.appendHistory(Message{Role: "error", Content: res.Err.Error(), Timestamp: time.Now()})
@@ -120,6 +132,72 @@ func (in *Inbox) Send(idx int, prompt string) error {
 		in.save()
 	}()
 	return nil
+}
+
+// streamSend consumes a StreamingDriver's event channel and updates the
+// project's state live. Emits one final assistant (or error) history entry
+// when the turn completes, identical to the blocking path's behavior.
+//
+// Must be called from a background goroutine (it is — by Send's caller).
+// Holds the inbox mutex briefly per event to mutate Project state.
+func (in *Inbox) streamSend(sd driver.StreamingDriver, p *Project, dir, sid, prompt string) {
+	ctx := context.Background()
+	ch := sd.StreamSend(ctx, dir, sid, prompt)
+
+	var finalText string
+	var finalErr error
+
+	for ev := range ch {
+		in.mu.Lock()
+		if ev.SessionID != "" {
+			p.SessionID = ev.SessionID
+		}
+		switch ev.Kind {
+		case driver.StreamStarted:
+			p.Status = driver.StatusWorking
+			p.Activity = ev.Activity
+			if p.Activity == "" {
+				p.Activity = "starting"
+			}
+		case driver.StreamText:
+			p.Status = driver.StatusWorking
+			p.Activity = "typing"
+			finalText += ev.Content
+		case driver.StreamToolCall:
+			p.Status = driver.StatusWorking
+			p.Activity = ev.Activity
+		case driver.StreamDone:
+			finalText = ev.Content
+			p.Status = driver.StatusWaiting
+			p.Activity = ""
+			p.LastErr = ""
+			p.LastMessage = finalText
+			p.appendHistory(Message{Role: "assistant", Content: finalText, Timestamp: time.Now()})
+		case driver.StreamError:
+			finalErr = ev.Err
+			p.Status = driver.StatusError
+			p.Activity = ""
+			msg := "turn failed"
+			if ev.Err != nil {
+				msg = ev.Err.Error()
+			}
+			p.LastErr = msg
+			p.appendHistory(Message{Role: "error", Content: msg, Timestamp: time.Now()})
+		}
+		p.UpdatedAt = time.Now()
+		in.mu.Unlock()
+		in.save()
+	}
+
+	// If the channel closed without a Done or Error event, treat as error.
+	if finalErr == nil && finalText == "" && p.Status == driver.StatusWorking {
+		in.mu.Lock()
+		p.Status = driver.StatusError
+		p.Activity = ""
+		p.LastErr = "stream ended without completion event"
+		in.mu.Unlock()
+		in.save()
+	}
 }
 
 // appendHistory trims to the last 100 messages to bound state.json growth.
