@@ -26,13 +26,17 @@ type KingDirective struct {
 // This is the Layer 1 king: state-injected prompts, directive-based dispatch,
 // no persistent event loop. The king sees fresh state on every turn.
 func (in *Inbox) KingSend(kingIdx int, prompt string, connectedNames []string) error {
-	// Build the full prompt with state context injected — this goes to
-	// the driver but NOT to history.
+	// If there are no connected projects, this is just a normal chat —
+	// no state injection, no directive parsing. The king is a regular
+	// project session.
+	if len(connectedNames) == 0 {
+		return in.sendRaw(kingIdx, prompt, prompt)
+	}
+
+	// Build compact fleet state (one line per project, no verbose instructions).
 	stateCtx := in.formatKingState(connectedNames)
 	driverPrompt := prompt + "\n\n---\n\n" + stateCtx
 
-	// sendRaw stores the clean user prompt in history, sends the injected
-	// version to the driver.
 	if err := in.sendRaw(kingIdx, prompt, driverPrompt); err != nil {
 		return err
 	}
@@ -77,8 +81,9 @@ func (in *Inbox) kingDispatchWatcher(kingIdx int) {
 	}
 }
 
-// formatKingState builds the state-injection text for the king's prompt.
-// One line per connected project: name, tool, status, last message snippet.
+// formatKingState builds compact fleet context for the king's prompt.
+// One line per connected project. No verbose instructions — modern LLMs
+// can infer the [send to NAME: message] directive format from context.
 func (in *Inbox) formatKingState(connectedNames []string) string {
 	snap := in.Snapshot()
 
@@ -88,29 +93,30 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 	}
 
 	var b strings.Builder
-	b.WriteString("Connected project states:\n")
+	b.WriteString("Other projects in your fleet:\n")
+	found := false
 	for _, p := range snap {
 		if !nameSet[p.Name] {
 			continue
 		}
+		found = true
 		status := string(p.Status)
 		if p.Activity != "" {
 			status += ":" + p.Activity
 		}
-		lastMsg := truncateForKing(p.LastMessage, 120)
+		lastMsg := truncateForKing(p.LastMessage, 80)
 		if lastMsg == "" {
 			if p.LastErr != "" {
-				lastMsg = "error: " + truncateForKing(p.LastErr, 100)
+				lastMsg = "error: " + truncateForKing(p.LastErr, 60)
 			} else {
-				lastMsg = "(no recent activity)"
+				lastMsg = "no recent activity"
 			}
 		}
 		b.WriteString(fmt.Sprintf("- %s (%s) [%s]: %s\n", p.Name, p.Tool, status, lastMsg))
 	}
-	b.WriteString("\nTo send a message to a project, include a line like:\n")
-	b.WriteString("[send to PROJECT_NAME: your message here]\n")
-	b.WriteString("You can include multiple [send to ...] lines. The rest of your\n")
-	b.WriteString("response is shown to the user.\n")
+	if found {
+		b.WriteString("\nTo delegate work to a project, write: [send to NAME: your message]\n")
+	}
 	return b.String()
 }
 
