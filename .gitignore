@@ -15,3 +15,5 @@ _internal/
 .env.*
 !.env.example
 *.local
+docs/aispace-harvest.md
+aispace-harvest.md
