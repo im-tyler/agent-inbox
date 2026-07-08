@@ -144,8 +144,15 @@ func (m Model) renderConversation(snap []inbox.Project, width int) string {
 		king.Tool, statusBadge(king.Status, king.Activity))))
 	b.WriteString("\n\n")
 
-	// Render king history as a conversation.
+	// Build ALL conversation lines (history + streaming text).
 	lines := renderConversationMessages(king, width)
+	if king.Status == driver.StatusWorking && king.StreamingText != "" {
+		lines = append(lines, workingStyle.Render("─ generating ─"))
+		for _, ln := range strings.Split(king.StreamingText, "\n") {
+			lines = append(lines, ln)
+		}
+		lines = append(lines, "")
+	}
 
 	// Available height for the conversation body.
 	availH := m.height - 10
@@ -153,73 +160,31 @@ func (m Model) renderConversation(snap []inbox.Project, width int) string {
 		availH = 3
 	}
 
-	// Apply scroll (clamping is done in handleMainKey/tick — here we
-	// just read the current offset). Defensive clamp only.
-	scroll := m.mainScroll
-	maxScroll := len(lines) - availH
-	if maxScroll < 0 {
-		maxScroll = 0
+	// Slice the visible window. mainScrollFromBottom = 0 means "show the
+	// last availH lines" (pinned to bottom). Higher values scroll up.
+	// This is exact — no line-count estimation needed.
+	endIdx := len(lines) - m.mainScrollFromBottom
+	if endIdx < 0 {
+		endIdx = 0
 	}
-	if scroll > maxScroll {
-		scroll = maxScroll
+	if endIdx > len(lines) {
+		endIdx = len(lines)
 	}
-	if scroll < 0 {
-		scroll = 0
+	startIdx := endIdx - availH
+	if startIdx < 0 {
+		startIdx = 0
 	}
 
-	start := scroll
-	end := start + availH
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for _, ln := range lines[start:end] {
+	for _, ln := range lines[startIdx:endIdx] {
 		b.WriteString(ln)
-		b.WriteString("\n")
-	}
-
-	// Streaming text (if king is working).
-	if king.Status == driver.StatusWorking && king.StreamingText != "" {
-		b.WriteString(workingStyle.Render("─ generating ─"))
-		b.WriteString("\n")
-		b.WriteString(indent(truncateOneLine(king.StreamingText, width-2), "  "))
 		b.WriteString("\n")
 	}
 
 	return lipgloss.NewStyle().Width(width).Padding(0, 1).Render(b.String())
 }
 
-// mainMaxScroll estimates the maximum scroll offset for the king conversation.
-func (m Model) mainMaxScroll() int {
-	snap := m.inbox.Snapshot()
-	if m.kingProjectIdx < 1 || m.kingProjectIdx > len(snap) {
-		return 0
-	}
-	king := snap[m.kingProjectIdx-1]
-	lines := 0
-	for _, msg := range king.History {
-		lines += 2 + strings.Count(msg.Content, "\n") + 1
-	}
-	availH := m.height - 10
-	if availH < 1 {
-		availH = 1
-	}
-	max := lines - availH
-	if max < 0 {
-		return 0
-	}
-	return max
-}
-
-// clampMainScroll ensures scroll is within bounds.
-func (m *Model) clampMainScroll() {
-	max := m.mainMaxScroll()
-	if m.mainScroll > max {
-		m.mainScroll = max
-	}
-	if m.mainScroll < 0 {
-		m.mainScroll = 0
-	}
-}
+// mainMaxScroll and clampMainScroll removed — no longer needed.
+// The bottom-relative scroll approach doesn't require line-count estimation.
 
 // renderConversationMessages turns a project's History into display lines.
 func renderConversationMessages(p inbox.Project, width int) []string {
@@ -280,7 +245,7 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// Jump to bottom on send.
 		m.mainAutoScroll = true
-		m.mainScroll = m.mainMaxScroll()
+		m.mainScrollFromBottom = 0
 		return m, nil
 
 	case "esc":
@@ -292,31 +257,29 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "pgup":
 		m.mainAutoScroll = false
-		m.mainScroll -= 10
-		m.clampMainScroll()
+		m.mainScrollFromBottom += 10
 		return m, nil
 
 	case "pgdown":
-		m.mainScroll += 10
-		if m.mainScroll >= m.mainMaxScroll() {
+		m.mainScrollFromBottom -= 10
+		if m.mainScrollFromBottom <= 0 {
+			m.mainScrollFromBottom = 0
 			m.mainAutoScroll = true
 		}
-		m.clampMainScroll()
 		return m, nil
 
 	case "up":
 		m.mainAutoScroll = false
-		if m.mainScroll > 0 {
-			m.mainScroll--
-		}
+		m.mainScrollFromBottom++
 		return m, nil
 
 	case "down":
-		m.mainScroll++
-		if m.mainScroll >= m.mainMaxScroll() {
+		if m.mainScrollFromBottom > 0 {
+			m.mainScrollFromBottom--
+		}
+		if m.mainScrollFromBottom == 0 {
 			m.mainAutoScroll = true
 		}
-		m.clampMainScroll()
 		return m, nil
 
 	case ":":

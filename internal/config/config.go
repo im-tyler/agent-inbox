@@ -38,10 +38,18 @@ func Load(path string) (*Settings, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if len(s.Projects) == 0 {
-		return nil, fmt.Errorf("%s: no projects defined", path)
-	}
 	return &s, nil
+}
+
+// Validate checks that the settings are usable. Called at startup only —
+// internal callers (appendConfig, removeProjectConfig, etc.) use Load
+// without validation so they can operate on configs that temporarily
+// have zero projects during a removal.
+func Validate(s *Settings) error {
+	if len(s.Projects) == 0 {
+		return fmt.Errorf("no projects defined")
+	}
+	return nil
 }
 
 // Save writes the settings back to path atomically (write to temp + rename).

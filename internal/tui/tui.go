@@ -58,7 +58,7 @@ type Model struct {
 
 	// King-first main view state.
 	mainInput      textinput.Model
-	mainScroll     int
+	mainScrollFromBottom int  // lines scrolled up from bottom (0 = at bottom)
 	mainAutoScroll bool // when true, auto-pins to bottom on each tick
 	kingProjectIdx int   // 1-based, defaults to 1 (first project is king)
 
@@ -138,10 +138,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = fmt.Sprintf("waiting: %s", strings.Join(upd, ", "))
 			m.toastAt = time.Now()
 		}
-		// Auto-scroll the king conversation to bottom when new content
-		// arrives and the user hasn't scrolled up manually.
+		// Auto-scroll: pin to bottom (scrollFromBottom = 0).
 		if m.mainAutoScroll {
-			m.mainScroll = m.mainMaxScroll()
+			m.mainScrollFromBottom = 0
 		}
 		return m, tick()
 

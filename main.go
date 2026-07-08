@@ -49,6 +49,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "config: %v\n\nCreate one (see config.example.json) at %s\n", err, *cfgPath)
 		os.Exit(1)
 	}
+	if err := config.Validate(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n\nEdit %s\n", err, *cfgPath)
+		os.Exit(1)
+	}
 
 	drivers := map[string]driver.Driver{
 		"mock":     driver.Mock{},
