@@ -17,11 +17,20 @@ import (
 	"agentinbox/internal/inbox"
 )
 
+// viewMode controls which screen the TUI is rendering.
+type viewMode int
+
+const (
+	viewList viewMode = iota
+	viewDetail
+)
+
 // Model is the Bubble Tea model for the agent-inbox dashboard.
 type Model struct {
 	inbox     *inbox.Inbox
 	eventsDir string
 
+	view      viewMode
 	selected  int  // 1-based, matches existing convention
 	sendMode  bool // when true, sendInput is active for the selected project
 	helpMode  bool // when true, keybindings overlay is shown
@@ -30,8 +39,19 @@ type Model struct {
 	toast   string
 	toastAt time.Time
 
+	// attachRequest, when non-nil, signals the program should exit so
+	// main.go can run the interactive attach command. main.go then
+	// re-launches the TUI.
+	attachRequest *attachArgs
+
 	width  int
 	height int
+}
+
+// attachArgs describes a pending interactive attach request.
+type attachArgs struct {
+	Argv []string
+	Dir  string
 }
 
 // New constructs a Model bound to the given inbox.
@@ -44,9 +64,16 @@ func New(in *inbox.Inbox, eventsDir string) Model {
 	return Model{
 		inbox:     in,
 		eventsDir: eventsDir,
+		view:      viewList,
 		selected:  1,
 		sendInput: ti,
 	}
+}
+
+// AttachRequest returns the pending attach command, if any. main.go
+// inspects this after Run() returns.
+func (m Model) AttachRequest() *attachArgs {
+	return m.attachRequest
 }
 
 // tickMsg is emitted once per second to drive live updates.
@@ -56,11 +83,6 @@ func tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
-}
-
-// sendResultMsg is emitted when a background send completes.
-type sendResultMsg struct {
-	err error
 }
 
 // Init starts the per-second ticker.
@@ -77,7 +99,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		// Ingest any new stop-hook events from disk, then keep ticking.
 		if upd := m.inbox.Ingest(m.eventsDir); len(upd) > 0 {
 			m.toast = fmt.Sprintf("waiting: %s", strings.Join(upd, ", "))
 			m.toastAt = time.Now()
@@ -85,7 +106,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tick()
 
 	case tea.KeyMsg:
-		// Send mode handles its own keys first.
 		if m.sendMode {
 			return m.handleSendKey(msg)
 		}
@@ -95,8 +115,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Global keys (work in any view) unless we're typing into send input.
 	switch msg.String() {
-	case "ctrl+c", "q":
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+
+	switch m.view {
+	case viewList:
+		return m.handleListKey(msg)
+	case viewDetail:
+		return m.handleDetailKey(msg)
+	}
+	return m, nil
+}
+
+func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
 		return m, tea.Quit
 
 	case "?":
@@ -113,7 +149,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		// Direct-select by number.
 		var n int
 		fmt.Sscanf(msg.String(), "%d", &n)
 		snap := m.inbox.Snapshot()
@@ -123,40 +158,61 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "s":
 		// Enter send mode for the selected project.
+		snap := m.inbox.Snapshot()
+		if m.selected < 1 || m.selected > len(snap) {
+			return m, nil
+		}
+		if snap[m.selected-1].Status == driver.StatusWorking {
+			m.toast = fmt.Sprintf("%s is already working", snap[m.selected-1].Name)
+			m.toastAt = time.Now()
+			return m, nil
+		}
 		m.sendMode = true
 		m.sendInput.Focus()
 		return m, textinput.Blink
 
 	case "v", "enter":
-		// Toggle to detail view (toast with full message).
+		// Switch to full-screen detail view.
 		snap := m.inbox.Snapshot()
 		if m.selected >= 1 && m.selected <= len(snap) {
-			p := snap[m.selected-1]
-			if p.LastMessage != "" {
-				m.toast = p.LastMessage
-				m.toastAt = time.Now()
-			} else if p.LastErr != "" {
-				m.toast = "error: " + p.LastErr
-				m.toastAt = time.Now()
-			}
+			m.view = viewDetail
 		}
 
 	case "a":
-		// Attach: surface the command the user should run.
+		// Interactive attach: request the argv from inbox, then exit.
 		args, dir, err := m.inbox.AttachArgs(m.selected)
 		if err != nil {
 			m.toast = err.Error()
 			m.toastAt = time.Now()
-		} else {
-			m.toast = fmt.Sprintf("cd %s && %s", dir, strings.Join(args, " "))
-			m.toastAt = time.Now()
+			return m, nil
 		}
+		m.attachRequest = &attachArgs{Argv: args, Dir: dir}
+		return m, tea.Quit
 
 	case "r":
 		m.toast = "refreshed"
 		m.toastAt = time.Now()
 	}
 
+	return m, nil
+}
+
+func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", "back":
+		m.view = viewList
+
+	case "a":
+		// Attach from detail view too.
+		args, dir, err := m.inbox.AttachArgs(m.selected)
+		if err != nil {
+			m.toast = err.Error()
+			m.toastAt = time.Now()
+			return m, nil
+		}
+		m.attachRequest = &attachArgs{Argv: args, Dir: dir}
+		return m, tea.Quit
+	}
 	return m, nil
 }
 
@@ -173,8 +229,6 @@ func (m Model) handleSendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sendMode = false
 		m.sendInput.Blur()
 		m.sendInput.Reset()
-		// Dispatch in a goroutine; Send returns immediately because it
-		// spawns its own background goroutine for the actual work.
 		err := m.inbox.Send(idx, text)
 		if err != nil {
 			m.toast = err.Error()
@@ -206,22 +260,31 @@ func (m Model) View() string {
 		return "starting..."
 	}
 
+	switch m.view {
+	case viewDetail:
+		return m.viewDetail()
+	default:
+		return m.viewList()
+	}
+}
+
+func (m Model) viewList() string {
 	snap := m.inbox.Snapshot()
 	waiting := m.inbox.WaitingCount()
 
 	var b strings.Builder
 
-	// Header.
 	header := headerStyle.Render(fmt.Sprintf(
 		"agent-inbox  %d projects  %d waiting",
 		len(snap), waiting,
 	))
 	b.WriteString(header)
 	b.WriteByte('\n')
+	b.WriteByte('\n')
 
-	// Project list.
 	if len(snap) == 0 {
-		b.WriteString(mutedStyle.Render("  no projects configured — edit config.json\n"))
+		b.WriteString(mutedStyle.Render("  no projects configured — edit config.json"))
+		b.WriteByte('\n')
 	} else {
 		for i, p := range snap {
 			row := renderRow(i+1, p, m.selected == i+1)
@@ -230,31 +293,94 @@ func (m Model) View() string {
 		}
 	}
 
-	// Toast / detail line.
 	if m.toast != "" && time.Since(m.toastAt) < 6*time.Second {
 		b.WriteByte('\n')
 		b.WriteString(wrapToast(m.toast, m.width))
 		b.WriteByte('\n')
 	}
 
-	// Footer / send input / help.
+	b.WriteString("\n\n")
+	b.WriteString(m.footer())
 	b.WriteByte('\n')
+
+	return b.String()
+}
+
+func (m Model) viewDetail() string {
+	snap := m.inbox.Snapshot()
+	if m.selected < 1 || m.selected > len(snap) {
+		m.view = viewList
+		return m.viewList()
+	}
+	p := snap[m.selected-1]
+
+	var b strings.Builder
+
+	// Header: project name + tool.
+	b.WriteString(headerStyle.Render(fmt.Sprintf("%s  (%s)", p.Name, p.Tool)))
+	b.WriteString(statusStyle(p.Status, "  ["+string(p.Status)+"]"))
+	b.WriteByte('\n')
+	b.WriteByte('\n')
+
+	// Metadata block.
+	rows := [][2]string{
+		{"dir", p.Dir},
+		{"session", shortSession(p.SessionID)},
+		{"updated", fmt.Sprintf("%s (%s ago)", p.UpdatedAt.Format(time.RFC3339), ageHuman(time.Since(p.UpdatedAt)))},
+		{"status", string(p.Status)},
+	}
+	for _, r := range rows {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("  %-10s", r[0])))
+		b.WriteString(r[1])
+		b.WriteByte('\n')
+	}
+
+	// Error (if any).
+	if p.LastErr != "" {
+		b.WriteByte('\n')
+		b.WriteString(errorStyle.Render("  error:"))
+		b.WriteByte('\n')
+		b.WriteString(indent(p.LastErr, "    "))
+		b.WriteByte('\n')
+	}
+
+	// Last message.
+	b.WriteByte('\n')
+	if p.LastMessage == "" {
+		b.WriteString(mutedStyle.Render("  (no messages yet — press 's' to send one)"))
+		b.WriteByte('\n')
+	} else {
+		b.WriteString(workingStyle.Render("  last message:"))
+		b.WriteByte('\n')
+		b.WriteString(indent(p.LastMessage, "    "))
+		b.WriteByte('\n')
+	}
+
+	b.WriteString("\n\n")
+	b.WriteString(mutedStyle.Render("  esc back  s send  a attach  q quit"))
+	b.WriteByte('\n')
+
+	return b.String()
+}
+
+// footer renders the bottom-of-screen prompt area: send input or keybindings.
+func (m Model) footer() string {
 	if m.sendMode {
+		snap := m.inbox.Snapshot()
 		name := ""
 		if m.selected >= 1 && m.selected <= len(snap) {
 			name = snap[m.selected-1].Name
 		}
-		b.WriteString(fmt.Sprintf("  send to %s: %s", name, m.sendInput.View()))
-		b.WriteByte('\n')
-		b.WriteString(mutedStyle.Render("  enter to send  esc to cancel"))
-	} else if m.helpMode {
-		b.WriteString(helpText())
-	} else {
-		b.WriteString(mutedStyle.Render(footerText))
+		return fmt.Sprintf("send to %s: %s\n%s",
+			name,
+			m.sendInput.View(),
+			mutedStyle.Render("enter to send  esc to cancel"),
+		)
 	}
-	b.WriteByte('\n')
-
-	return b.String()
+	if m.helpMode {
+		return helpText()
+	}
+	return mutedStyle.Render(footerText)
 }
 
 func renderRow(idx int, p inbox.Project, selected bool) string {
@@ -317,11 +443,32 @@ func truncateOneLine(s string, max int) string {
 	return s[:max-1] + "…"
 }
 
+func shortSession(id string) string {
+	if len(id) > 12 {
+		return id[:12] + "…"
+	}
+	if id == "" {
+		return "(none — send a message first)"
+	}
+	return id
+}
+
+// indent prepends prefix to every line of s.
+func indent(s, prefix string) string {
+	if s == "" {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		lines[i] = prefix + ln
+	}
+	return strings.Join(lines, "\n")
+}
+
 func wrapToast(s string, width int) string {
 	if width <= 0 {
 		return s
 	}
-	// Simple word-wrap. Toasts are short; this is enough.
 	var b strings.Builder
 	col := 0
 	for _, r := range s {
@@ -345,8 +492,8 @@ func helpText() string {
 		"    j/k or ↑↓     navigate",
 		"    1-9           select by index",
 		"    s             send message to selected",
-		"    v or enter    view full message",
-		"    a             show attach command",
+		"    v or enter    open detail view (full message + metadata)",
+		"    a             attach to live session (interactive)",
 		"    r             refresh toast",
 		"    ?             toggle this help",
 		"    q or ctrl+c   quit",
@@ -354,7 +501,7 @@ func helpText() string {
 	return strings.Join(lines, "\n")
 }
 
-const footerText = "j/k move  s send  v view  a attach  ? help  q quit"
+const footerText = "j/k move  s send  v detail  a attach  ? help  q quit"
 
 func max(a, b int) int {
 	if a > b {

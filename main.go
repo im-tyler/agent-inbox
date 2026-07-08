@@ -70,10 +70,35 @@ func main() {
 		repl(in, eventsDir)
 		return
 	}
-	if err := tui.Run(in, eventsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-inbox: %v\n", err)
-		os.Exit(1)
+
+	// TUI loop: run dashboard; if user requests an attach, exit TUI, exec
+	// the interactive child with the terminal handed over, then re-launch.
+	for {
+		m, err := tui.Run(in, eventsDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "agent-inbox: %v\n", err)
+			os.Exit(1)
+		}
+		req := m.AttachRequest()
+		if req == nil {
+			return
+		}
+		if err := runAttach(req.Argv, req.Dir); err != nil {
+			fmt.Fprintf(os.Stderr, "agent-inbox: attach ended: %v\n", err)
+		}
 	}
+}
+
+// runAttach execs the interactive attach command in the foreground,
+// letting the child take over the terminal. Returns when the child exits.
+func runAttach(argv []string, dir string) error {
+	if len(argv) == 0 {
+		return fmt.Errorf("attach: empty argv")
+	}
+	c := exec.Command(argv[0], argv[1:]...)
+	c.Dir = dir
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return c.Run()
 }
 
 // runHook is invoked as a Claude Stop hook. It reads the hook payload from

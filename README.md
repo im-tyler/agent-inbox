@@ -119,13 +119,14 @@ Config:
 | `j` / `k` or `↑` / `↓` | navigate project list |
 | `1` – `9` | select project by index |
 | `s` | send a message to the selected project (inline prompt) |
-| `v` or `Enter` | view the project's last message in full |
-| `a` | show the attach command (interactive `exec` attach in v0.2) |
+| `v` or `Enter` | open detail view (full message, metadata, session id, errors) |
+| `a` | attach interactively — exits TUI, hands terminal to the agent, re-launches TUI when the agent exits |
 | `r` | refresh the toast line |
 | `?` | toggle keybindings help |
 | `q` or `Ctrl+C` | quit |
 
 While in send mode: `Enter` dispatches, `Esc` cancels.
+While in detail view: `Esc` returns to the list.
 
 ### Legacy REPL
 
