@@ -23,7 +23,7 @@ import (
 func (m *Model) renderKing() string {
 	snap := m.inbox.Snapshot()
 	if m.kingIdx < 1 || m.kingIdx > len(snap) {
-		m.view = viewList
+		m.view = viewMain
 		return m.viewList()
 	}
 	king := snap[m.kingIdx-1]
@@ -166,7 +166,7 @@ func (m *Model) handleKingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "esc", "q":
-		m.view = viewList
+		m.view = viewMain
 		return m, nil
 
 	case "s":

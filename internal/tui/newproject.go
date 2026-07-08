@@ -122,7 +122,7 @@ func (m *Model) handleNewProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) handleNpFolderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.view = viewList
+		m.view = viewMain
 		m.np = newProjectModel{}
 		return m, nil
 	case "enter":
@@ -160,7 +160,7 @@ func (m *Model) handleNpFolderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) handleNpAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.view = viewList
+		m.view = viewMain
 		m.np = newProjectModel{}
 		return m, nil
 	case "enter":
@@ -198,7 +198,7 @@ func (m *Model) handleNpAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) handleNpNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.view = viewList
+		m.view = viewMain
 		m.np = newProjectModel{}
 		return m, nil
 	case "enter":
@@ -217,7 +217,7 @@ func (m *Model) handleNpNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selected = len(snap)
 		m.toast = fmt.Sprintf("added %s (%s)", name, tool)
 		m.toastAt = time.Now()
-		m.view = viewList
+		m.view = viewMain
 		m.np = newProjectModel{}
 		return m, nil
 	}

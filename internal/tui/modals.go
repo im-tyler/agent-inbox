@@ -38,7 +38,7 @@ func (m *Model) handleDeleteConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := m.inbox.RemoveProject(idx); err != nil {
 			m.toast = err.Error()
 			m.toastAt = time.Now()
-			m.view = viewList
+			m.view = viewMain
 			return m, nil
 		}
 		// Clamp selection to the new list length.
@@ -51,11 +51,11 @@ func (m *Model) handleDeleteConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.toast = "deleted"
 		m.toastAt = time.Now()
-		m.view = viewList
+		m.view = viewMain
 		return m, nil
 	default:
 		// Any other key cancels.
-		m.view = viewList
+		m.view = viewMain
 		return m, nil
 	}
 }
@@ -95,7 +95,7 @@ func (m *Model) renderToolPicker() string {
 func (m *Model) handleToolPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
-		m.view = viewList
+		m.view = viewMain
 		m.pendingTool = ""
 		return m, nil
 	case "enter":
@@ -116,7 +116,7 @@ func (m *Model) handleToolPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.toastAt = time.Now()
 		m.pendingTool = ""
-		m.view = viewList
+		m.view = viewMain
 		return m, nil
 	case "1", "2", "3", "4":
 		var n int

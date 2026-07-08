@@ -28,6 +28,7 @@ const (
 	viewToolPicker
 	viewKing
 	viewActions
+	viewMain // king-first split-pane layout (default)
 )
 
 // Model is the Bubble Tea model for the agent-inbox dashboard.
@@ -55,6 +56,11 @@ type Model struct {
 	// Set to a large number when entering detail view to pin to bottom.
 	detailScroll int
 
+	// King-first main view state.
+	mainInput      textinput.Model
+	mainScroll     int
+	kingProjectIdx int // 1-based, defaults to 1 (first project is king)
+
 	toast   string
 	toastAt time.Time
 
@@ -80,12 +86,20 @@ func New(in *inbox.Inbox, eventsDir string) Model {
 	ti.CharLimit = 0
 	ti.Width = 60
 
+	mi := textinput.New()
+	mi.Placeholder = "type to talk to king..."
+	mi.CharLimit = 0
+	mi.Width = 80
+	mi.Focus()
+
 	return Model{
-		inbox:     in,
-		eventsDir: eventsDir,
-		view:      viewList,
-		selected:  1,
-		sendInput: ti,
+		inbox:          in,
+		eventsDir:      eventsDir,
+		view:           viewMain, // king-first layout is default
+		selected:       1,
+		sendInput:      ti,
+		mainInput:      mi,
+		kingProjectIdx: 1,
 	}
 }
 
@@ -141,6 +155,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.view {
+	case viewMain:
+		return m.handleMainKey(msg)
 	case viewList:
 		return m.handleListKey(msg)
 	case viewDetail:
@@ -245,7 +261,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "esc":
-		m.view = viewList
+		m.view = viewMain
 		m.detailScroll = 0
 
 	case "q":
@@ -330,6 +346,8 @@ func (m Model) handleSendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "esc":
+		m.view = viewMain
+		m.detailScroll = 0
 		m.sendMode = false
 		m.sendInput.Blur()
 		m.sendInput.Reset()
@@ -348,6 +366,8 @@ func (m Model) View() string {
 	}
 
 	switch m.view {
+	case viewMain:
+		return m.renderMain()
 	case viewDetail:
 		return m.viewDetail()
 	case viewNewProject:
@@ -405,7 +425,7 @@ func (m Model) viewList() string {
 func (m Model) viewDetail() string {
 	snap := m.inbox.Snapshot()
 	if m.selected < 1 || m.selected > len(snap) {
-		m.view = viewList
+		m.view = viewMain
 		return m.viewList()
 	}
 	p := snap[m.selected-1]

@@ -42,7 +42,7 @@ func (m *Model) renderActions() string {
 func (m *Model) handleActionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
-		m.view = viewList
+		m.view = viewMain
 		return m, nil
 
 	case "n":
@@ -55,13 +55,13 @@ func (m *Model) handleActionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d":
 		snap := m.inbox.Snapshot()
 		if m.selected < 1 || m.selected > len(snap) {
-			m.view = viewList
+			m.view = viewMain
 			m.toast = "no project selected"
 			m.toastAt = time.Now()
 			return m, nil
 		}
 		if snap[m.selected-1].Status == driver.StatusWorking {
-			m.view = viewList
+			m.view = viewMain
 			m.toast = "cancel the send first (x)"
 			m.toastAt = time.Now()
 			return m, nil
@@ -72,13 +72,13 @@ func (m *Model) handleActionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "t":
 		snap := m.inbox.Snapshot()
 		if m.selected < 1 || m.selected > len(snap) {
-			m.view = viewList
+			m.view = viewMain
 			m.toast = "no project selected"
 			m.toastAt = time.Now()
 			return m, nil
 		}
 		if snap[m.selected-1].Status == driver.StatusWorking {
-			m.view = viewList
+			m.view = viewMain
 			m.toast = "cancel the send first (x)"
 			m.toastAt = time.Now()
 			return m, nil
@@ -90,14 +90,14 @@ func (m *Model) handleActionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		snap := m.inbox.Snapshot()
 		if m.selected < 1 || m.selected > len(snap) {
-			m.view = viewList
+			m.view = viewMain
 			m.toast = "no project selected"
 			m.toastAt = time.Now()
 			return m, nil
 		}
 		args, dir, err := m.inbox.AttachArgs(m.selected)
 		if err != nil {
-			m.view = viewList
+			m.view = viewMain
 			m.toast = err.Error()
 			m.toastAt = time.Now()
 			return m, nil
@@ -108,7 +108,7 @@ func (m *Model) handleActionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "K":
 		snap := m.inbox.Snapshot()
 		if m.selected < 1 || m.selected > len(snap) {
-			m.view = viewList
+			m.view = viewMain
 			m.toast = "no project selected"
 			m.toastAt = time.Now()
 			return m, nil
@@ -122,7 +122,7 @@ func (m *Model) handleActionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "?":
-		m.view = viewList
+		m.view = viewMain
 		m.helpMode = true
 		return m, nil
 	}
