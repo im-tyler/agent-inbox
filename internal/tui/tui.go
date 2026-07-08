@@ -59,7 +59,8 @@ type Model struct {
 	// King-first main view state.
 	mainInput      textinput.Model
 	mainScroll     int
-	kingProjectIdx int // 1-based, defaults to 1 (first project is king)
+	mainAutoScroll bool // when true, auto-pins to bottom on each tick
+	kingProjectIdx int   // 1-based, defaults to 1 (first project is king)
 
 	toast   string
 	toastAt time.Time
@@ -95,11 +96,12 @@ func New(in *inbox.Inbox, eventsDir string) Model {
 	return Model{
 		inbox:          in,
 		eventsDir:      eventsDir,
-		view:           viewMain, // king-first layout is default
+		view:           viewMain,
 		selected:       1,
 		sendInput:      ti,
 		mainInput:      mi,
 		kingProjectIdx: 1,
+		mainAutoScroll: true,
 	}
 }
 
@@ -135,6 +137,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if upd := m.inbox.Ingest(m.eventsDir); len(upd) > 0 {
 			m.toast = fmt.Sprintf("waiting: %s", strings.Join(upd, ", "))
 			m.toastAt = time.Now()
+		}
+		// Auto-scroll the king conversation to bottom when new content
+		// arrives and the user hasn't scrolled up manually.
+		if m.mainAutoScroll {
+			m.mainScroll = m.mainMaxScroll()
 		}
 		return m, tick()
 

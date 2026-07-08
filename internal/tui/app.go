@@ -36,8 +36,8 @@ func (m Model) renderMain() string {
 	sidebar := m.renderSidebar(snap, sidebarW)
 	conv := m.renderConversation(snap, convW)
 
-	// Body = sidebar + conversation side by side.
-	content := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, " ", conv)
+	// Body = conversation (left) + sidebar (right), side by side.
+	content := lipgloss.JoinHorizontal(lipgloss.Top, conv, " ", sidebar)
 
 	// Toast line (transient notifications).
 	if m.toast != "" && time.Since(m.toastAt) < 6*time.Second {
@@ -139,31 +139,31 @@ func (m Model) renderConversation(snap []inbox.Project, width int) string {
 	lines := renderConversationMessages(king, width)
 
 	// Available height for the conversation body.
-	// Subtract: frame(2) + title(1) + separator(1) + footer(1) + input bar(3) + padding(2)
 	availH := m.height - 10
 	if availH < 3 {
 		availH = 3
 	}
 
-	if len(lines) > availH {
-		maxScroll := len(lines) - availH
-		if m.mainScroll > maxScroll {
-			m.mainScroll = maxScroll
-		}
-		if m.mainScroll < 0 {
-			m.mainScroll = 0
-		}
-		start := m.mainScroll
-		end := start + availH
-		if end > len(lines) {
-			end = len(lines)
-		}
-		lines = lines[start:end]
-	} else {
-		m.mainScroll = 0
+	// Apply scroll (clamping is done in handleMainKey/tick — here we
+	// just read the current offset). Defensive clamp only.
+	scroll := m.mainScroll
+	maxScroll := len(lines) - availH
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if scroll > maxScroll {
+		scroll = maxScroll
+	}
+	if scroll < 0 {
+		scroll = 0
 	}
 
-	for _, ln := range lines {
+	start := scroll
+	end := start + availH
+	if end > len(lines) {
+		end = len(lines)
+	}
+	for _, ln := range lines[start:end] {
 		b.WriteString(ln)
 		b.WriteString("\n")
 	}
@@ -176,8 +176,40 @@ func (m Model) renderConversation(snap []inbox.Project, width int) string {
 		b.WriteString("\n")
 	}
 
-	// Input is NO LONGER here — it's rendered as a fixed bar in the footer.
 	return lipgloss.NewStyle().Width(width).Padding(0, 1).Render(b.String())
+}
+
+// mainMaxScroll estimates the maximum scroll offset for the king conversation.
+func (m Model) mainMaxScroll() int {
+	snap := m.inbox.Snapshot()
+	if m.kingProjectIdx < 1 || m.kingProjectIdx > len(snap) {
+		return 0
+	}
+	king := snap[m.kingProjectIdx-1]
+	lines := 0
+	for _, msg := range king.History {
+		lines += 2 + strings.Count(msg.Content, "\n") + 1
+	}
+	availH := m.height - 10
+	if availH < 1 {
+		availH = 1
+	}
+	max := lines - availH
+	if max < 0 {
+		return 0
+	}
+	return max
+}
+
+// clampMainScroll ensures scroll is within bounds.
+func (m *Model) clampMainScroll() {
+	max := m.mainMaxScroll()
+	if m.mainScroll > max {
+		m.mainScroll = max
+	}
+	if m.mainScroll < 0 {
+		m.mainScroll = 0
+	}
 }
 
 // renderConversationMessages turns a project's History into display lines.
@@ -222,7 +254,6 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.mainInput.Reset()
-		// All non-king projects are connected by default.
 		snap := m.inbox.Snapshot()
 		var connected []string
 		for i, p := range snap {
@@ -238,8 +269,9 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toast = "sent to king"
 			m.toastAt = time.Now()
 		}
-		// Pin scroll to bottom on send.
-		m.mainScroll = 999999
+		// Jump to bottom on send.
+		m.mainAutoScroll = true
+		m.mainScroll = m.mainMaxScroll()
 		return m, nil
 
 	case "esc":
@@ -250,17 +282,21 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "pgup":
+		m.mainAutoScroll = false
 		m.mainScroll -= 10
-		if m.mainScroll < 0 {
-			m.mainScroll = 0
-		}
+		m.clampMainScroll()
 		return m, nil
 
 	case "pgdown", " ":
 		m.mainScroll += 10
+		if m.mainScroll >= m.mainMaxScroll() {
+			m.mainAutoScroll = true
+		}
+		m.clampMainScroll()
 		return m, nil
 
 	case "up":
+		m.mainAutoScroll = false
 		if m.mainScroll > 0 {
 			m.mainScroll--
 		}
@@ -268,6 +304,10 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "down":
 		m.mainScroll++
+		if m.mainScroll >= m.mainMaxScroll() {
+			m.mainAutoScroll = true
+		}
+		m.clampMainScroll()
 		return m, nil
 
 	case ":":
@@ -275,14 +315,11 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "q":
-		// Only quit if input is empty (so users can type messages
-		// containing 'q' without accidentally quitting).
 		if m.mainInput.Value() == "" {
 			return m, tea.Quit
 		}
 	}
 
-	// Forward printable characters to the text input.
 	var cmd tea.Cmd
 	m.mainInput, cmd = m.mainInput.Update(msg)
 	return m, cmd
