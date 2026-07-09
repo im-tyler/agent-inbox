@@ -120,9 +120,9 @@ func tick() tea.Cmd {
 	})
 }
 
-// Init starts the per-second ticker.
+// Init starts the per-second ticker and the cursor blink.
 func (m Model) Init() tea.Cmd {
-	return tick()
+	return tea.Batch(tick(), textinput.Blink)
 }
 
 // Update handles all messages: key presses, window resize, ticks.
@@ -131,6 +131,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.sendInput.Width = max(60, msg.Width-30)
+		m.mainInput.Width = max(40, msg.Width-8)
 		return m, nil
 
 	case tickMsg:
@@ -138,9 +139,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = fmt.Sprintf("waiting: %s", strings.Join(upd, ", "))
 			m.toastAt = time.Now()
 		}
-		// Auto-scroll: pin to bottom (scrollFromBottom = 0).
+		// Auto-scroll: pin to bottom.
 		if m.mainAutoScroll {
 			m.mainScrollFromBottom = 0
+		}
+		// Clamp scroll to prevent blank conversation.
+		if m.mainScrollFromBottom > 0 {
+			snap := m.inbox.Snapshot()
+			if m.kingProjectIdx >= 1 && m.kingProjectIdx <= len(snap) {
+				king := snap[m.kingProjectIdx-1]
+				lineCount := 2
+				for _, msg := range king.History {
+					lineCount += 1 + strings.Count(msg.Content, "\n") + 1 + 1
+				}
+				bodyH := m.height - 7
+				maxScroll := lineCount - bodyH
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				if m.mainScrollFromBottom > maxScroll {
+					m.mainScrollFromBottom = maxScroll
+				}
+			}
 		}
 		return m, tick()
 

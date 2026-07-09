@@ -297,12 +297,13 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 				msg = ev.Err.Error()
 			}
 			p.LastErr = msg
-			// Preserve partial streaming text so the user can see what
-			// was generated before the failure. Move it to LastMessage
-			// since StreamingText is cleared on error.
+			// Preserve partial streaming text or error content.
 			if p.StreamingText != "" {
 				p.LastMessage = p.StreamingText
 				p.appendHistory(Message{Role: "assistant", Content: p.StreamingText + "\n\n(error: " + msg + ")", Timestamp: time.Now()})
+			} else if ev.Content != "" {
+				p.LastMessage = ev.Content
+				p.appendHistory(Message{Role: "error", Content: ev.Content + "\n\n(error: " + msg + ")", Timestamp: time.Now()})
 			} else {
 				p.appendHistory(Message{Role: "error", Content: msg, Timestamp: time.Now()})
 			}
