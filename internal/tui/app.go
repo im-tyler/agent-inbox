@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 
 	"agentinbox/internal/driver"
 	"agentinbox/internal/inbox"
@@ -175,9 +176,16 @@ func (m Model) buildConversationLines(snap []inbox.Project, width int) []string 
 			style = mutedStyle
 		}
 		ts := msg.Timestamp.Format(time.Kitchen)
+		// Header is short — truncate is fine.
 		lines = append(lines, trunc.Render(style.Render(fmt.Sprintf("[%s %s]", label, ts))))
+		// Content — word-wrap to maxW so long messages break into
+		// multiple visual lines at word boundaries instead of being
+		// truncated off the right edge.
 		for _, ln := range strings.Split(msg.Content, "\n") {
-			lines = append(lines, trunc.Render(ln))
+			wrapped := wordwrap.String(ln, maxW)
+			for _, w := range strings.Split(wrapped, "\n") {
+				lines = append(lines, w)
+			}
 		}
 		lines = append(lines, "")
 	}
@@ -185,7 +193,10 @@ func (m Model) buildConversationLines(snap []inbox.Project, width int) []string 
 	if king.Status == driver.StatusWorking && king.StreamingText != "" {
 		lines = append(lines, trunc.Render(workingStyle.Render("─ generating ─")))
 		for _, ln := range strings.Split(king.StreamingText, "\n") {
-			lines = append(lines, trunc.Render(ln))
+			wrapped := wordwrap.String(ln, maxW)
+			for _, w := range strings.Split(wrapped, "\n") {
+				lines = append(lines, w)
+			}
 		}
 	}
 
