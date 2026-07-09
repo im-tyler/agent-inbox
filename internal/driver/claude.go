@@ -86,7 +86,7 @@ func (c Claude) StreamSend(ctx context.Context, dir, sessionID, prompt string) <
 	go func() {
 		defer close(ch)
 
-		args := []string{"-p", prompt, "--output-format", "stream-json"}
+		args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
 		if sessionID == "" {
 			sessionID = newUUID()
 			args = append(args, "--session-id", sessionID)
