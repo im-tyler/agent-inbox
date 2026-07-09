@@ -172,5 +172,5 @@ func exportLastAssistant(ctx context.Context, sessionID string) (text, errMsg st
 		}
 		return strings.TrimSpace(sb.String()), errMsg, nil
 	}
-	return "", "", nil
+	return "", "", fmt.Errorf("opencode: no assistant message found in session %q", sessionID)
 }

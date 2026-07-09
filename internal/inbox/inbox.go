@@ -414,10 +414,10 @@ func (in *Inbox) RemoveProject(idx int) error {
 	in.mu.Unlock()
 	in.save()
 
-	// Persist removal to config.json best-effort.
+	// Persist removal to config.json best-effort (non-fatal — matches AddProject).
 	if in.configPath != "" {
 		if err := in.removeProjectConfig(name); err != nil {
-			return fmt.Errorf("removed in-memory but failed to persist config: %w", err)
+			fmt.Fprintf(os.Stderr, "agent-inbox: warning: config persist failed: %v\n", err)
 		}
 	}
 	return nil
@@ -452,7 +452,7 @@ func (in *Inbox) SetProjectTool(idx int, tool string) error {
 
 	if in.configPath != "" {
 		if err := in.setProjectToolConfig(name, tool); err != nil {
-			return fmt.Errorf("changed in-memory but failed to persist config: %w", err)
+			fmt.Fprintf(os.Stderr, "agent-inbox: warning: config persist failed: %v\n", err)
 		}
 	}
 	return nil

@@ -169,6 +169,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSendKey(msg)
 		}
 		return m.handleKey(msg)
+	default:
+		// Forward non-key messages (blink, etc.) to the focused input
+		// so the cursor blink cycle stays alive.
+		var cmd tea.Cmd
+		if m.view == viewMain {
+			m.mainInput, cmd = m.mainInput.Update(msg)
+		}
+		return m, cmd
 	}
 	return m, nil
 }
