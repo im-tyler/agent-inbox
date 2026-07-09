@@ -45,6 +45,11 @@ var (
 			Background(lipgloss.Color("52")).
 			Foreground(lipgloss.Color("196")).
 			Padding(0, 1)
+
+	// fleetStyle for inline fleet-project responses in the king's thread.
+	fleetStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("51")). // bright cyan
+			Bold(true)
 )
 
 // statusBadge renders a status as a colored pill badge.

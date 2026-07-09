@@ -174,6 +174,12 @@ func (m Model) buildConversationLines(snap []inbox.Project, width int) []string 
 		case "system":
 			label = "system"
 			style = mutedStyle
+		default:
+			// Fleet project responses (role = project name like "omilator").
+			// Shown with a ▸ prefix and cyan styling to distinguish from
+			// the king's own responses.
+			label = "▸ " + msg.Role
+			style = fleetStyle
 		}
 		ts := msg.Timestamp.Format(time.Kitchen)
 		// Header is short — truncate is fine.

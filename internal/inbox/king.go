@@ -73,6 +73,10 @@ func (in *Inbox) kingDispatchWatcher(kingIdx int) {
 			for _, d := range directives {
 				if idx := in.findProjectByName(d.Target); idx > 0 {
 					_ = in.Send(idx, d.Message)
+					// Spawn a watcher that waits for the target to finish,
+					// then injects its response into the king's history so
+					// it appears inline in the king's conversation thread.
+					go in.fleetResponseWatcher(kingIdx, d.Target, idx)
 				}
 			}
 			return
@@ -167,6 +171,44 @@ func ParseKingDirectives(response string) []KingDirective {
 		}
 	}
 	return dirs
+}
+
+// fleetResponseWatcher waits for a dispatched project to finish, then
+// injects its response into the king's conversation history so the user
+// sees the fleet project's reply inline in the king's thread.
+func (in *Inbox) fleetResponseWatcher(kingIdx int, targetName string, targetIdx int) {
+	for {
+		time.Sleep(500 * time.Millisecond)
+		in.mu.Lock()
+		target, err := in.project(targetIdx)
+		if err != nil {
+			in.mu.Unlock()
+			return
+		}
+		if target.Status != driver.StatusWorking {
+			// Target finished — inject response into king's history.
+			king, err := in.project(kingIdx)
+			if err != nil {
+				in.mu.Unlock()
+				return
+			}
+			response := target.LastMessage
+			if response == "" && target.LastErr != "" {
+				response = "(error: " + target.LastErr + ")"
+			}
+			if response != "" {
+				king.appendHistory(Message{
+					Role:      targetName,
+					Content:   response,
+					Timestamp: time.Now(),
+				})
+			}
+			in.mu.Unlock()
+			in.save()
+			return
+		}
+		in.mu.Unlock()
+	}
 }
 
 func truncateForKing(s string, max int) string {
