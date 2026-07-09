@@ -191,8 +191,9 @@ func (in *Inbox) sendRaw(idx int, displayText, driverText string) error {
 	// NOT the driverText which may include injected state context.
 	p.appendHistory(Message{Role: "user", Content: displayText, Timestamp: time.Now()})
 	dir, sid := p.Dir, p.SessionID
-	// Cancellable context so Cancel() can kill the underlying subprocess.
-	ctx, cancel := context.WithCancel(context.Background())
+	// Cancellable context with a 5-minute timeout so a stuck CLI
+	// (rate-limited API, hung model) doesn't hang the project forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	in.cancels[p.Name] = cancel
 	in.mu.Unlock()
 	in.save()
