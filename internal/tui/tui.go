@@ -57,10 +57,14 @@ type Model struct {
 	detailScroll int
 
 	// King-first main view state.
-	mainInput      textinput.Model
+	mainInput           textinput.Model
 	mainScrollFromBottom int  // lines scrolled up from bottom (0 = at bottom)
-	mainAutoScroll bool // when true, auto-pins to bottom on each tick
-	kingProjectIdx int   // 1-based, defaults to 1 (first project is king)
+	mainAutoScroll      bool // when true, auto-pins to bottom on each tick
+	kingProjectIdx      int   // 1-based, defaults to 1 (first project is king)
+
+	// Tab-focus state: false = chat focused (default), true = sidebar focused.
+	focusSidebar   bool
+	sidebarCursor  int // 1-based project index currently highlighted in sidebar
 
 	toast   string
 	toastAt time.Time
@@ -94,14 +98,15 @@ func New(in *inbox.Inbox, eventsDir string) Model {
 	mi.Focus()
 
 	return Model{
-		inbox:          in,
-		eventsDir:      eventsDir,
-		view:           viewMain,
-		selected:       1,
-		sendInput:      ti,
-		mainInput:      mi,
-		kingProjectIdx: 1,
-		mainAutoScroll: true,
+		inbox:               in,
+		eventsDir:           eventsDir,
+		view:                viewMain,
+		selected:            1,
+		sendInput:           ti,
+		mainInput:           mi,
+		kingProjectIdx:      1,
+		mainAutoScroll:      true,
+		sidebarCursor:       2, // first non-king project
 	}
 }
 

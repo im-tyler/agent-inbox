@@ -2,9 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -93,10 +95,24 @@ func (m Model) renderMain() string {
 		bodyLines = append(bodyLines, clampWidth(line, contentW))
 	}
 
-	// Build input and hint lines.
+	// Build input line.
 	inputText := m.mainInput.View()
-	inputLine := clampWidth("  "+inputText, contentW)
-	hintLine := clampWidth(mutedStyle.Render("  enter send  esc clear  ↑↓ scroll  : more  ctrl+c quit"), contentW)
+	inputPrefix := "  "
+	if m.focusSidebar {
+		inputPrefix = "  " + mutedStyle.Render("(chat not focused — press Tab) ")
+	}
+	inputLine := clampWidth(inputPrefix+inputText, contentW)
+
+	// Contextual footer based on focus.
+	var footerText string
+	if m.focusSidebar {
+		footerText = "  ↑↓ navigate  enter detail  n new  d delete  t tool  a attach  x cancel  tab chat"
+	} else if m.helpMode {
+		footerText = "  ? close help"
+	} else {
+		footerText = "  enter send  tab fleet  ↑↓ scroll  ? help  ctrl+c quit"
+	}
+	hintLine := clampWidth(mutedStyle.Render(footerText), contentW)
 
 	// Assemble the frame.
 	var b strings.Builder
@@ -177,12 +193,14 @@ func (m Model) buildConversationLines(snap []inbox.Project, width int) []string 
 }
 
 // buildSidebarLines returns the fleet sidebar as a slice of lines.
+// When focusSidebar is true, the selected project is highlighted.
 func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	maxW := width - 2
 	if maxW < 10 {
 		maxW = 10
 	}
 	trunc := lipgloss.NewStyle().MaxWidth(maxW)
+	cursorStyle := lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(lipgloss.Color("15"))
 
 	var lines []string
 	lines = append(lines, trunc.Render(headerStyle.Render("fleet")))
@@ -208,7 +226,17 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 		if len(name) > 14 {
 			name = name[:13] + "…"
 		}
-		lines = append(lines, trunc.Render(fmt.Sprintf("%d %-14s %s", i+1, name, badge)))
+		// Cursor marker when sidebar is focused and this is the selected project.
+		marker := "  "
+		if m.focusSidebar && i+1 == m.sidebarCursor {
+			marker = "▶ "
+		}
+		entry := fmt.Sprintf("%s%d %-14s %s", marker, i+1, name, badge)
+		if m.focusSidebar && i+1 == m.sidebarCursor {
+			lines = append(lines, trunc.Render(cursorStyle.Render(entry)))
+		} else {
+			lines = append(lines, trunc.Render(entry))
+		}
 		msg := truncateOneLine(p.LastMessage, maxW-4)
 		if msg != "" {
 			lines = append(lines, trunc.Render(mutedStyle.Render("  "+msg)))
@@ -217,7 +245,7 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 
 	if fleetCount == 0 {
 		lines = append(lines, trunc.Render(mutedStyle.Render("(no projects —")))
-		lines = append(lines, trunc.Render(mutedStyle.Render(" press : then n)")))
+		lines = append(lines, trunc.Render(mutedStyle.Render(" press n to add)")))
 	}
 
 	lines = append(lines, "")
@@ -228,6 +256,12 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 
 // handleMainKey processes keys in the king-first main view.
 func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// If sidebar is focused, route to sidebar handler.
+	if m.focusSidebar {
+		return m.handleSidebarKey(msg)
+	}
+
+	// Chat-focused keys.
 	switch msg.String() {
 	case "enter":
 		text := strings.TrimSpace(m.mainInput.Value())
@@ -249,6 +283,22 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.mainAutoScroll = true
 		m.mainScrollFromBottom = 0
+		return m, nil
+
+	case "tab":
+		// Focus the sidebar.
+		m.focusSidebar = true
+		m.mainInput.Blur()
+		// Ensure sidebarCursor points to a valid non-king project.
+		snap := m.inbox.Snapshot()
+		if m.sidebarCursor < 1 || m.sidebarCursor > len(snap) || m.sidebarCursor == m.kingProjectIdx {
+			for i := 1; i <= len(snap); i++ {
+				if i != m.kingProjectIdx {
+					m.sidebarCursor = i
+					break
+				}
+			}
+		}
 		return m, nil
 
 	case "esc":
@@ -285,21 +335,121 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case ":":
-		// Only open actions menu when input is empty — otherwise the
-		// user is typing a message that contains a colon.
+	case "?":
+		// Help overlay — only when input is empty.
 		if m.mainInput.Value() == "" {
-			m.view = viewActions
+			m.helpMode = !m.helpMode
 			return m, nil
-		}
-
-	case "q":
-		if m.mainInput.Value() == "" {
-			return m, tea.Quit
 		}
 	}
 
+	// Forward printable characters to the text input.
 	var cmd tea.Cmd
 	m.mainInput, cmd = m.mainInput.Update(msg)
 	return m, cmd
+}
+
+// handleSidebarKey processes keys when the sidebar (fleet list) is focused.
+func (m Model) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	snap := m.inbox.Snapshot()
+
+	switch msg.String() {
+	case "tab", "esc":
+		// Return focus to chat.
+		m.focusSidebar = false
+		m.mainInput.Focus()
+		return m, textinput.Blink
+
+	case "ctrl+c":
+		return m, tea.Quit
+
+	case "j", "down":
+		// Next non-king project.
+		for i := m.sidebarCursor + 1; i <= len(snap); i++ {
+			if i != m.kingProjectIdx {
+				m.sidebarCursor = i
+				break
+			}
+		}
+		return m, nil
+
+	case "k", "up":
+		// Previous non-king project.
+		for i := m.sidebarCursor - 1; i >= 1; i-- {
+			if i != m.kingProjectIdx {
+				m.sidebarCursor = i
+				break
+			}
+		}
+		return m, nil
+
+	case "n":
+		// New project modal.
+		m.focusSidebar = false
+		m.mainInput.Focus()
+		m.view = viewNewProject
+		cwd, _ := os.Getwd()
+		m.np = newProjectModelInitial(cwd)
+		m.np.folder.Focus()
+		return m, textinput.Blink
+
+	case "d":
+		// Delete selected project.
+		if m.sidebarCursor >= 1 && m.sidebarCursor <= len(snap) {
+			if snap[m.sidebarCursor-1].Status == driver.StatusWorking {
+				m.toast = "cancel the send first (x)"
+				m.toastAt = time.Now()
+				return m, nil
+			}
+		}
+		m.selected = m.sidebarCursor
+		m.view = viewDeleteConfirm
+		return m, nil
+
+	case "t":
+		// Change tool for selected project.
+		if m.sidebarCursor >= 1 && m.sidebarCursor <= len(snap) {
+			if snap[m.sidebarCursor-1].Status == driver.StatusWorking {
+				m.toast = "cancel the send first (x)"
+				m.toastAt = time.Now()
+				return m, nil
+			}
+		}
+		m.selected = m.sidebarCursor
+		m.pendingTool = ""
+		m.view = viewToolPicker
+		return m, nil
+
+	case "a":
+		// Attach to selected project.
+		args, dir, err := m.inbox.AttachArgs(m.sidebarCursor)
+		if err != nil {
+			m.toast = err.Error()
+			m.toastAt = time.Now()
+			return m, nil
+		}
+		m.attachRequest = &attachArgs{Argv: args, Dir: dir}
+		return m, tea.Quit
+
+	case "x":
+		// Cancel selected project's send.
+		if err := m.inbox.Cancel(m.sidebarCursor); err != nil {
+			m.toast = err.Error()
+		} else {
+			m.toast = "cancelled"
+		}
+		m.toastAt = time.Now()
+		return m, nil
+
+	case "enter":
+		// Drill into project detail — use the existing viewDetail.
+		if m.sidebarCursor >= 1 && m.sidebarCursor <= len(snap) {
+			m.selected = m.sidebarCursor
+			m.view = viewDetail
+			m.detailScroll = m.detailMaxScroll()
+		}
+		return m, nil
+	}
+
+	return m, nil
 }
