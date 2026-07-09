@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 // DefaultOpenCodeModel is a free, no-key model so OpenCode projects work
@@ -69,16 +70,21 @@ func (o *OpenCode) Send(ctx context.Context, dir, sessionID, prompt string) Resu
 	if newSession {
 		id, err := newSessionID(ctx, before)
 		if err != nil {
-			return Result{Status: StatusError, Err: err}
+			// Session was created upstream but we can't determine the ID.
+			// Try once more after a brief delay — the session list might
+			// not have updated yet.
+			time.Sleep(time.Second)
+			id, err = newSessionID(ctx, before)
+			if err != nil {
+				return Result{Status: StatusError, Err: fmt.Errorf("opencode: run succeeded but can't determine session id: %w", err)}
+			}
 		}
 		sessionID = id
 	}
 
-	text, errMsg, err := exportLastAssistant(ctx, sessionID)
+	// Try export with retry — the session may not be immediately exportable.
+	text, errMsg, err := exportWithRetry(ctx, sessionID, 3)
 	if err != nil {
-		// Export failed — session may be stale or format changed.
-		// Fall back to whatever the run produced so the user sees
-		// SOMETHING instead of a cryptic JSON parse error.
 		runText := strings.TrimSpace(string(runOut))
 		if runText != "" {
 			return Result{SessionID: sessionID, Final: runText, Status: StatusWaiting}
@@ -130,6 +136,22 @@ type ocExport struct {
 			Text string `json:"text"`
 		} `json:"parts"`
 	} `json:"messages"`
+}
+
+// exportWithRetry calls exportLastAssistant with retries. OpenCode's
+// session export can return empty immediately after session creation
+// because the internal state hasn't synced yet. Each retry waits 500ms.
+func exportWithRetry(ctx context.Context, sessionID string, attempts int) (text, errMsg string, err error) {
+	for i := 0; i < attempts; i++ {
+		text, errMsg, err = exportLastAssistant(ctx, sessionID)
+		if err == nil {
+			return text, errMsg, nil
+		}
+		if i < attempts-1 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	return "", "", err
 }
 
 func exportLastAssistant(ctx context.Context, sessionID string) (text, errMsg string, err error) {
