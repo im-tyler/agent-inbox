@@ -82,8 +82,8 @@ func (in *Inbox) kingDispatchWatcher(kingIdx int) {
 }
 
 // formatKingState builds compact fleet context for the king's prompt.
-// One line per connected project. No verbose instructions — modern LLMs
-// can infer the [send to NAME: message] directive format from context.
+// Includes a concrete directive example using a real project name so
+// weaker models can copy the format instead of guessing.
 func (in *Inbox) formatKingState(connectedNames []string) string {
 	snap := in.Snapshot()
 
@@ -93,13 +93,17 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 	}
 
 	var b strings.Builder
-	b.WriteString("Other projects in your fleet:\n")
+	var firstProject string
+	b.WriteString("Your fleet:\n")
 	found := false
 	for _, p := range snap {
 		if !nameSet[p.Name] {
 			continue
 		}
 		found = true
+		if firstProject == "" {
+			firstProject = p.Name
+		}
 		status := string(p.Status)
 		if p.Activity != "" {
 			status += ":" + p.Activity
@@ -114,8 +118,11 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 		}
 		b.WriteString(fmt.Sprintf("- %s (%s) [%s]: %s\n", p.Name, p.Tool, status, lastMsg))
 	}
-	if found {
-		b.WriteString("\nTo delegate work to a project, write: [send to NAME: your message]\n")
+	if found && firstProject != "" {
+		b.WriteString("\nTo send a task to a project, output this exact format on its own line:\n")
+		b.WriteString(fmt.Sprintf("[send to %s: describe the task here]\n\n", firstProject))
+		b.WriteString(fmt.Sprintf("Example: [send to %s: what are you working on?]\n", firstProject))
+		b.WriteString("You can include multiple [send to ...] lines. Everything else in your response is shown to the user.\n")
 	}
 	return b.String()
 }
