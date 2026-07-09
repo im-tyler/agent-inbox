@@ -57,7 +57,7 @@ func (o *OpenCode) Send(ctx context.Context, dir, sessionID, prompt string) Resu
 
 	var before map[string]bool
 	if newSession {
-		before = sessionIDs(ctx)
+		before = sessionIDs(ctx, dir)
 	}
 
 	cmd := exec.CommandContext(ctx, "opencode", args...)
@@ -68,13 +68,13 @@ func (o *OpenCode) Send(ctx context.Context, dir, sessionID, prompt string) Resu
 	}
 
 	if newSession {
-		id, err := newSessionID(ctx, before)
+		id, err := newSessionID(ctx, dir, before)
 		if err != nil {
 			// Session was created upstream but we can't determine the ID.
 			// Try once more after a brief delay — the session list might
 			// not have updated yet.
 			time.Sleep(time.Second)
-			id, err = newSessionID(ctx, before)
+			id, err = newSessionID(ctx, dir, before)
 			if err != nil {
 				return Result{Status: StatusError, Err: fmt.Errorf("opencode: run succeeded but can't determine session id: %w", err)}
 			}
@@ -101,9 +101,11 @@ func (*OpenCode) AttachArgs(dir, sessionID string) []string {
 	return []string{"opencode", "run", "-i", "--session", sessionID}
 }
 
-func sessionIDs(ctx context.Context) map[string]bool {
+func sessionIDs(ctx context.Context, dir string) map[string]bool {
 	ids := map[string]bool{}
-	out, err := exec.CommandContext(ctx, "opencode", "session", "list").Output()
+	cmd := exec.CommandContext(ctx, "opencode", "session", "list")
+	cmd.Dir = dir
+	out, err := cmd.Output()
 	if err != nil {
 		return ids
 	}
@@ -116,8 +118,8 @@ func sessionIDs(ctx context.Context) map[string]bool {
 	return ids
 }
 
-func newSessionID(ctx context.Context, before map[string]bool) (string, error) {
-	for id := range sessionIDs(ctx) {
+func newSessionID(ctx context.Context, dir string, before map[string]bool) (string, error) {
+	for id := range sessionIDs(ctx, dir) {
 		if !before[id] {
 			return id, nil
 		}
