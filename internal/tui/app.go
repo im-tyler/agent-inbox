@@ -234,30 +234,44 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	}
 
 	for i, p := range snap {
-		if i+1 == m.kingProjectIdx {
-			continue
+		isKing := i+1 == m.kingProjectIdx
+		if !isKing {
+			fleetCount++
 		}
-		fleetCount++
 		badge := statusBadge(p.Status, p.Activity)
 		name := p.Name
 		if len(name) > 14 {
 			name = name[:13] + "…"
 		}
-		// Cursor marker when sidebar is focused and this is the selected project.
-		marker := "  "
-		if m.focusSidebar && i+1 == m.sidebarCursor {
+		// King gets a crown marker; fleet projects get number + cursor.
+		var marker string
+		if isKing {
+			marker = "★ "
+		} else if m.focusSidebar && i+1 == m.sidebarCursor {
 			marker = "▶ "
+		} else {
+			marker = "  "
 		}
-		entry := fmt.Sprintf("%s%d %-14s %s", marker, i+1, name, badge)
-		if m.focusSidebar && i+1 == m.sidebarCursor {
+		idxLabel := ""
+		if !isKing {
+			idxLabel = fmt.Sprintf("%d ", i+1)
+		}
+		entry := fmt.Sprintf("%s%s%-14s %s", marker, idxLabel, name, badge)
+		if isKing {
+			entry += mutedStyle.Render("  king")
+		}
+		if m.focusSidebar && i+1 == m.sidebarCursor && !isKing {
 			lines = append(lines, trunc.Render(cursorStyle.Render(entry)))
 		} else {
 			lines = append(lines, trunc.Render(entry))
 		}
-		msg := truncateOneLine(p.LastMessage, maxW-4)
-		if msg != "" {
-			lines = append(lines, trunc.Render(mutedStyle.Render("  "+msg)))
+		if !isKing {
+			msg := truncateOneLine(p.LastMessage, maxW-4)
+			if msg != "" {
+				lines = append(lines, trunc.Render(mutedStyle.Render("  "+msg)))
+			}
 		}
+		fleetCount++
 	}
 
 	if fleetCount == 0 {
