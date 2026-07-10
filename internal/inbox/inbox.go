@@ -88,9 +88,13 @@ func (in *Inbox) WithConfigPath(p string) *Inbox {
 func (in *Inbox) AddProject(name, tool, dir string) error {
 	in.mu.Lock()
 	for _, p := range in.projects {
-		if p.Name == name || p.Dir == dir {
+		if p.Name == name {
 			in.mu.Unlock()
-			return fmt.Errorf("duplicate project (name=%q or dir=%q already exists)", name, dir)
+			return fmt.Errorf("a project named %q already exists (dir: %s)", name, p.Dir)
+		}
+		if p.Dir == dir {
+			in.mu.Unlock()
+			return fmt.Errorf("directory %q is already used by project %q", dir, p.Name)
 		}
 	}
 	if _, ok := in.drivers[tool]; !ok {
