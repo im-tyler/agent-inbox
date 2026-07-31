@@ -82,6 +82,35 @@ to streaming mode.
   `read-only` / `workspace-write` / `danger-full-access` (or
   `--dangerously-bypass-approvals-and-sandbox` for full autonomy).
 
+## Reader mode — `agent-inbox inbox`
+
+The dashboard described above *drives* agent sessions by parsing their terminal
+output. Reader mode does the opposite: it only reads state that tools already
+wrote down, and merges it into one list of what is waiting on you.
+
+```sh
+agent-inbox inbox          # the reader
+agent-inbox inbox --json   # the merged feed, for scripts and agents
+```
+
+With no configuration it reads your local **Claude Code** sessions
+(`~/.claude/projects/*.jsonl` — newest session per project, last 24h) and
+`teploy-ship` if it is on `$PATH`. A session whose last assistant turn ended
+with `end_turn` is waiting on you; one mid-tool-call is running; one that has
+been mid-tool-call for minutes is reported as stalled.
+
+Sources are configured in `~/.config/agent-inbox/sources.json` — see
+[`sources.example.json`](sources.example.json). Any producer speaking the
+`teploy.inbox/v1` shape works, over a command or `GET /inbox`; add one and the
+UI needs no change, because items carry their own resolve commands.
+
+Actions are executed as **argv, never through a shell**, so a denial reason
+full of shell metacharacters is one argument and can never become another
+command. A `{placeholder}` in an action prompts you and is substituted as a
+single whole argument.
+
+An unreachable source reports itself and never blanks the rest of the list.
+
 ## Run
 
 ### From a release binary

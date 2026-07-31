@@ -1,0 +1,22 @@
+{
+  "sources": [
+    {
+      "name": "claude-code",
+      "kind": "claude",
+      "max_age_hours": 24,
+      "all_sessions": false
+    },
+    {
+      "name": "teploy-ship",
+      "kind": "exec",
+      "command": ["teploy-ship", "inbox", "--json"]
+    },
+    {
+      "_comment": "Any service exposing GET /inbox in the teploy.inbox/v1 shape. The URL is a base; /inbox is appended if absent.",
+      "name": "ship-prod",
+      "kind": "http",
+      "http": "https://ship.internal",
+      "token_env": "SHIP_INBOX_TOKEN"
+    }
+  ]
+}

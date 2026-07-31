@@ -32,6 +32,9 @@ func main() {
 		case "hook":
 			runHook()
 			return
+		case "inbox":
+			runInbox(os.Args[2:])
+			return
 		case "version", "-version", "--version":
 			printVersion()
 			return
