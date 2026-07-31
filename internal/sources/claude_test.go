@@ -4,47 +4,28 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"agentinbox/internal/feed"
 )
 
-var fixedNow = time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+var fixedNow = time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 
-// transcript writes a session file whose last assistant record carries
-// stopReason, then backdates it so age-based rules are testable.
-func transcript(t *testing.T, root, project, id, stopReason string, ago time.Duration, extra ...string) string {
+func claude(t *testing.T, agentsJSON string) Claude {
 	t.Helper()
-	dir := filepath.Join(root, project)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	script := "#!/bin/sh\ncat <<'JSON'\n" + agentsJSON + "\nJSON\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ts := fixedNow.Add(-ago).Format(time.RFC3339)
-	lines := []string{
-		`{"type":"ai-title","aiTitle":"Polish the team UI","sessionId":"` + id + `"}`,
-		`{"type":"last-prompt","lastPrompt":"keep going"}`,
-		`{"type":"assistant","isSidechain":false,"sessionId":"` + id + `","cwd":"/repos/` + project + `","gitBranch":"main","timestamp":"` + ts + `","message":{"stop_reason":"` + stopReason + `"}}`,
-	}
-	lines = append(lines, extra...)
-	path := filepath.Join(dir, id+".jsonl")
-	body := ""
-	for _, l := range lines {
-		body += l + "\n"
-	}
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	mod := fixedNow.Add(-ago)
-	if err := os.Chtimes(path, mod, mod); err != nil {
-		t.Fatal(err)
-	}
-	return path
+	return Claude{Bin: bin, Root: filepath.Join(dir, "projects"), Now: func() time.Time { return fixedNow }}
 }
 
 func fetch(t *testing.T, c Claude) []feed.Item {
 	t.Helper()
-	c.Now = func() time.Time { return fixedNow }
 	f, err := c.Fetch(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -52,116 +33,138 @@ func fetch(t *testing.T, c Claude) []feed.Item {
 	return f.Items
 }
 
-func TestEndTurnMeansTheSessionIsWaitingOnYou(t *testing.T) {
-	root := t.TempDir()
-	transcript(t, root, "akiroo", "sess-1", "end_turn", time.Minute)
+const blockedBg = `[{"id":"ad19117b","sessionId":"ad19117b-67a4-4ad0-a333-e39fcc756240",
+  "cwd":"/repos/teploy","kind":"background","name":"resume-background-agent",
+  "status":"idle","state":"blocked","startedAt":1783971598326}]`
 
-	items := fetch(t, Claude{Root: root})
+func TestClaudeCodesOwnBlockedStateIsTrustedRatherThanRederived(t *testing.T) {
+	items := fetch(t, claude(t, blockedBg))
 	if len(items) != 1 {
-		t.Fatalf("expected one session, got %d", len(items))
+		t.Fatalf("got %d items", len(items))
 	}
-	if items[0].State != feed.StateBlocked {
-		t.Fatalf("end_turn means the human is next, got %q", items[0].State)
+	if items[0].State != feed.StateBlocked || items[0].Attention != "" && items[0].Needs == nil {
+		t.Fatalf("expected a blocked item with needs, got %+v", items[0])
 	}
-	if items[0].Needs == nil || len(items[0].Needs.Actions) != 1 {
-		t.Fatal("a waiting session should offer a resume action")
-	}
-	action := items[0].Needs.Actions[0]
-	if action.Run[0] != "claude" || action.Run[1] != "--resume" || action.Run[2] != "sess-1" {
-		t.Fatalf("unexpected resume argv: %v", action.Run)
-	}
-	if action.Dir != "/repos/akiroo" {
-		t.Fatalf("resume should start in the session's repo, got %q", action.Dir)
+	if items[0].Context["kind"] != "background" || items[0].Context["project"] != "teploy" {
+		t.Fatalf("context lost detail: %+v", items[0].Context)
 	}
 }
 
-func TestRecentToolUseIsRunningAndStaleToolUseIsStalled(t *testing.T) {
-	root := t.TempDir()
-	transcript(t, root, "fresh", "sess-fresh", "tool_use", 30*time.Second)
-	transcript(t, root, "wedged", "sess-wedged", "tool_use", 30*time.Minute)
-
-	byProject := map[string]feed.Item{}
-	for _, item := range fetch(t, Claude{Root: root}) {
-		byProject[item.Context["project"]] = item
+func TestABackgroundAgentIsAttachedToNotResumed(t *testing.T) {
+	// Claude Code refuses --resume on a live session: "currently running as a
+	// background agent (bg)". Offering resume here produced exit status 1 and
+	// was the whole reason this source stopped guessing at state.
+	actions := fetch(t, claude(t, blockedBg))[0].Needs.Actions
+	if len(actions) != 2 {
+		t.Fatalf("expected attach and fork, got %+v", actions)
 	}
-	if got := byProject["fresh"].State; got != feed.StateRunning {
-		t.Fatalf("a live tool call is running, got %q", got)
+	if actions[0].Label != "attach" {
+		t.Fatalf("attach must lead, got %q", actions[0].Label)
 	}
-	// It claims to be mid-tool-call but nothing has been written in half an
-	// hour: the process is gone or wedged, and a human should look.
-	if got := byProject["wedged"].State; got != feed.StateFailed {
-		t.Fatalf("a stalled tool call should surface as a failure, got %q", got)
+	joined := strings.Join(actions[0].Run, " ")
+	if joined != "claude agents --cwd /repos/teploy" {
+		t.Fatalf("attach should open the agent view filtered to the project, got %q", joined)
 	}
-	if byProject["wedged"].Context["stalled_for"] == "" {
-		t.Fatal("a stalled session should say how long it has been stuck")
+	if actions[0].Dir != "/repos/teploy" {
+		t.Fatalf("attach should run in the project, got %q", actions[0].Dir)
+	}
+	// Fork always works and does not disturb the running session.
+	if strings.Join(actions[1].Run, " ") != "claude --resume ad19117b-67a4-4ad0-a333-e39fcc756240 --fork-session" {
+		t.Fatalf("unexpected fork argv: %v", actions[1].Run)
 	}
 }
 
-func TestSidechainTurnsDoNotDecideTheSessionState(t *testing.T) {
-	root := t.TempDir()
-	// A subagent finishing its turn must not report the parent session as
-	// waiting while the parent is still working.
-	transcript(t, root, "proj", "sess-1", "tool_use", time.Minute,
-		`{"type":"assistant","isSidechain":true,"message":{"stop_reason":"end_turn"},"timestamp":"`+fixedNow.Add(-time.Minute).Format(time.RFC3339)+`"}`)
-
-	items := fetch(t, Claude{Root: root})
+func TestABusySessionIsRunningAndOffersNothing(t *testing.T) {
+	items := fetch(t, claude(t, `[{"sessionId":"s1","cwd":"/repos/neutron","kind":"interactive",
+	  "name":"neutron-79","status":"busy","startedAt":1784915267440}]`))
 	if items[0].State != feed.StateRunning {
-		t.Fatalf("a sidechain end_turn must not mark the session waiting, got %q", items[0].State)
+		t.Fatalf("a busy session is running, got %q", items[0].State)
+	}
+	if items[0].Needs != nil {
+		t.Fatal("nothing is being asked of you while it works")
 	}
 }
 
-func TestOnlyTheNewestSessionPerProjectIsShownByDefault(t *testing.T) {
-	root := t.TempDir()
-	transcript(t, root, "proj", "old", "end_turn", 4*time.Hour)
-	transcript(t, root, "proj", "new", "end_turn", time.Minute)
+func TestBackgroundAndInteractiveBlocksReadDifferently(t *testing.T) {
+	bg := fetch(t, claude(t, blockedBg))[0]
+	inter := fetch(t, claude(t, `[{"sessionId":"s1","cwd":"/repos/x","kind":"interactive",
+	  "name":"x","state":"blocked"}]`))[0]
 
-	items := fetch(t, Claude{Root: root})
-	if len(items) != 1 || items[0].ID != "new" {
-		t.Fatalf("expected only the newest session, got %+v", items)
+	if !strings.Contains(bg.Needs.Prompt, "Background agent") {
+		t.Fatalf("a background block should say so, got %q", bg.Needs.Prompt)
 	}
-	if got := len(fetch(t, Claude{Root: root, AllPerProject: true})); got != 2 {
-		t.Fatalf("all_sessions should show both, got %d", got)
-	}
-}
-
-func TestSessionsOlderThanMaxAgeAreDropped(t *testing.T) {
-	root := t.TempDir()
-	transcript(t, root, "ancient", "sess-old", "end_turn", 72*time.Hour)
-	transcript(t, root, "today", "sess-new", "end_turn", time.Hour)
-
-	items := fetch(t, Claude{Root: root})
-	if len(items) != 1 || items[0].Context["project"] != "today" {
-		t.Fatalf("stale sessions should drop out, got %+v", items)
+	if strings.Contains(inter.Needs.Prompt, "Background") {
+		t.Fatalf("an interactive block should not, got %q", inter.Needs.Prompt)
 	}
 }
 
-func TestTitleFallsBackFromAITitleToPromptToProject(t *testing.T) {
-	root := t.TempDir()
-	dir := filepath.Join(root, "bare")
+func TestTitleFallsBackToTheProjectWhenUnnamed(t *testing.T) {
+	items := fetch(t, claude(t, `[{"sessionId":"s1","cwd":"/repos/akiroo","kind":"background"}]`))
+	if items[0].Title != "session in akiroo" {
+		t.Fatalf("got %q", items[0].Title)
+	}
+}
+
+func TestSinceFallsBackToStartedAtWhenNoTranscriptIsFound(t *testing.T) {
+	items := fetch(t, claude(t, blockedBg))
+	want := time.UnixMilli(1783971598326).UTC().Format(time.RFC3339)
+	if items[0].Since != want {
+		t.Fatalf("got %q, want %q", items[0].Since, want)
+	}
+}
+
+func TestIDFallsBackToTheShortAgentIDWhenSessionIDIsAbsent(t *testing.T) {
+	items := fetch(t, claude(t, `[{"id":"09eac2f6","cwd":"/repos/x","kind":"background"}]`))
+	if items[0].ID != "09eac2f6" {
+		t.Fatalf("got %q", items[0].ID)
+	}
+}
+
+func TestNoLiveSessionsIsAnEmptyFeedNotAnError(t *testing.T) {
+	if got := len(fetch(t, claude(t, `[]`))); got != 0 {
+		t.Fatalf("got %d items", got)
+	}
+}
+
+func TestAMissingOrFailingClaudeBinaryIsReportedNotSwallowed(t *testing.T) {
+	// "claude is not installed" and "you have nothing waiting" mean very
+	// different things to whoever is reading the merged list.
+	c := Claude{Bin: filepath.Join(t.TempDir(), "nope"), Now: func() time.Time { return fixedNow }}
+	if _, err := c.Fetch(context.Background()); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+func TestMalformedAgentJSONIsReported(t *testing.T) {
+	if _, err := claude(t, `not json`).Fetch(context.Background()); err == nil {
+		t.Fatal("expected a parse error")
+	}
+}
+
+func TestEnrichmentAddsBranchAndLastPromptFromTheTranscript(t *testing.T) {
+	c := claude(t, `[{"sessionId":"sess-1","cwd":"/repos/akiroo","kind":"background","name":"Polish the UI","state":"blocked"}]`)
+	dir := filepath.Join(c.Root, "-repos-akiroo")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	line := `{"type":"assistant","sessionId":"s","cwd":"/repos/bare","timestamp":"` +
-		fixedNow.Add(-time.Minute).Format(time.RFC3339) + `","message":{"stop_reason":"end_turn"}}` + "\n"
-	path := filepath.Join(dir, "s.jsonl")
-	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	mod := fixedNow.Add(-time.Minute)
-	if err := os.Chtimes(path, mod, mod); err != nil {
+	line := `{"gitBranch":"feat/mail","lastPrompt":"keep going","timestamp":"2026-07-31T11:00:00Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "sess-1.jsonl"), []byte(line), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	items := fetch(t, Claude{Root: root})
-	if items[0].Title != "session in bare" {
-		t.Fatalf("expected a project fallback title, got %q", items[0].Title)
+	item := fetch(t, c)[0]
+	if item.Context["branch"] != "feat/mail" || item.Context["last_prompt"] != "keep going" {
+		t.Fatalf("enrichment missing: %+v", item.Context)
+	}
+	if item.Since != "2026-07-31T11:00:00Z" {
+		t.Fatalf("transcript time should win over startedAt, got %q", item.Since)
 	}
 }
 
-func TestMissingClaudeDirectoryIsEmptyNotAnError(t *testing.T) {
-	items := fetch(t, Claude{Root: filepath.Join(t.TempDir(), "nope")})
-	if len(items) != 0 {
-		t.Fatalf("expected no items, got %d", len(items))
+func TestAnUnreadableTranscriptCostsDetailNotTheItem(t *testing.T) {
+	items := fetch(t, claude(t, blockedBg))
+	if len(items) != 1 || items[0].Context["branch"] != "" {
+		t.Fatalf("expected the item without enrichment, got %+v", items)
 	}
 }
 
@@ -182,10 +185,7 @@ func TestDecodeAcceptsEnvelopeBareArrayAndEmptyOutput(t *testing.T) {
 }
 
 func TestOneDeadSourceDoesNotBlankTheList(t *testing.T) {
-	root := t.TempDir()
-	transcript(t, root, "proj", "sess-1", "end_turn", time.Minute)
-
-	live := Claude{Root: root, Now: func() time.Time { return fixedNow }}
+	live := claude(t, blockedBg)
 	dead := Exec{Label: "dead", Command: []string{"/nonexistent/binary"}}
 
 	items, results := FetchAll(context.Background(), []Source{live, dead})
@@ -198,10 +198,7 @@ func TestOneDeadSourceDoesNotBlankTheList(t *testing.T) {
 }
 
 func TestFetchAllStampsOriginSoSameIDsFromTwoSourcesCoexist(t *testing.T) {
-	root := t.TempDir()
-	transcript(t, root, "proj", "sess-1", "end_turn", time.Minute)
-
-	items, _ := FetchAll(context.Background(), []Source{Claude{Root: root, Now: func() time.Time { return fixedNow }}})
+	items, _ := FetchAll(context.Background(), []Source{claude(t, blockedBg)})
 	if items[0].Origin != "claude-code" {
 		t.Fatalf("origin should name the configured source, got %q", items[0].Origin)
 	}

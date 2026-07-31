@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"time"
 )
 
 // SourceConfig is one configured producer. Exactly one of Command or URL is
@@ -20,10 +19,10 @@ type SourceConfig struct {
 	TokenEnv string   `json:"token_env,omitempty"`
 	Disabled bool     `json:"disabled,omitempty"`
 
-	// Claude-only knobs.
-	MaxAgeHours   float64 `json:"max_age_hours,omitempty"`
-	AllPerProject bool    `json:"all_sessions,omitempty"`
-	Root          string  `json:"root,omitempty"`
+	// Claude-only knobs. Root is where transcripts live (for branch/prompt
+	// enrichment); Bin overrides the claude executable.
+	Root string `json:"root,omitempty"`
+	Bin  string `json:"bin,omitempty"`
 }
 
 type Config struct {
@@ -96,11 +95,7 @@ func (c Config) Build() []Source {
 		}
 		switch kind {
 		case "claude":
-			src := Claude{Root: s.Root, AllPerProject: s.AllPerProject}
-			if s.MaxAgeHours > 0 {
-				src.MaxAge = time.Duration(s.MaxAgeHours * float64(time.Hour))
-			}
-			out = append(out, src)
+			out = append(out, Claude{Root: s.Root, Bin: s.Bin})
 		case "exec":
 			if len(s.Command) == 0 {
 				continue
