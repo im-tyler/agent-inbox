@@ -319,3 +319,56 @@ func TestKingStateEmptyWithoutFleet(t *testing.T) {
 		t.Errorf("fleet rules injected with no fleet:\n%s", got)
 	}
 }
+
+// Watchers live for minutes and RemoveProject splices the slice, shifting
+// every index after it down by one. A watcher holding an index would file
+// akiroo's reply under omni's name, or send the summary to the wrong session
+// entirely. Identity is by name for exactly this reason.
+func TestRoundSurvivesAProjectRemovedMidFlight(t *testing.T) {
+	d := newScriptDriver()
+	gate := make(chan struct{})
+	d.block["/akiroo"] = gate
+	d.replies["/king"] = []string{"[send to akiroo: check]", "akiroo reported in."}
+	d.replies["/akiroo"] = []string{"akiroo's own findings"}
+
+	in := kingFixture(t, d)
+	if err := in.KingSend(1, "ask akiroo", []string{"akiroo"}); err != nil {
+		t.Fatalf("KingSend: %v", err)
+	}
+	waitFor(t, "akiroo to start working", func() bool {
+		for _, p := range in.Snapshot() {
+			if p.Name == "akiroo" && p.Status == driver.StatusWorking {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Remove omni (index 2), which sits between the king and akiroo. Every
+	// index after it now points somewhere else.
+	if err := in.RemoveProject(2); err != nil {
+		t.Fatalf("RemoveProject: %v", err)
+	}
+	close(gate)
+
+	waitFor(t, "the round to finish", func() bool {
+		return strings.Contains(in.Snapshot()[0].LastMessage, "akiroo reported in")
+	})
+
+	king := in.Snapshot()[0]
+	if king.Name != "king" {
+		t.Fatalf("the summary landed on %q, not the king", king.Name)
+	}
+	var receipts []string
+	for _, m := range king.History {
+		if m.Role == "akiroo" || m.Role == "omni" {
+			receipts = append(receipts, m.Role+": "+m.Content)
+		}
+	}
+	if len(receipts) != 1 || !strings.HasPrefix(receipts[0], "akiroo: ") {
+		t.Errorf("receipts filed under the wrong project: %v", receipts)
+	}
+	if !strings.Contains(receipts[0], "akiroo's own findings") {
+		t.Errorf("receipt content came from the wrong project: %v", receipts)
+	}
+}

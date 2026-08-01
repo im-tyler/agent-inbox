@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -188,6 +189,17 @@ func (in *Inbox) project(idx int) (*Project, error) {
 	return in.projects[idx-1], nil
 }
 
+// projectByName is the stable lookup. Names are unique (addProject enforces
+// it) and never move; indices shift on every removal. Callers must hold mu.
+func (in *Inbox) projectByName(name string) (*Project, error) {
+	for _, p := range in.projects {
+		if strings.EqualFold(p.Name, name) {
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("no project named %q", name)
+}
+
 // Send dispatches a prompt to project idx (1-based) in the background.
 // The prompt is stored verbatim in history AND sent to the driver.
 func (in *Inbox) Send(idx int, prompt string) error {
@@ -206,8 +218,21 @@ func (in *Inbox) sendRaw(idx int, displayText, driverText string) error {
 // a user turn. The king's summary pass sends a prompt the user never typed;
 // showing it as their message would be a lie about who said what.
 func (in *Inbox) sendInternal(idx int, displayText, driverText string, record bool) error {
+	return in.sendResolved(func() (*Project, error) { return in.project(idx) }, displayText, driverText, record)
+}
+
+// sendNamed sends to a project by name. Anything holding a reference across
+// time must use this: an index is only valid until the next RemoveProject,
+// which splices the slice and shifts every index after it down by one.
+func (in *Inbox) sendNamed(name, displayText, driverText string, record bool) error {
+	return in.sendResolved(func() (*Project, error) { return in.projectByName(name) }, displayText, driverText, record)
+}
+
+// sendResolved resolves the target under the same lock that starts the turn,
+// so a project cannot be removed between the lookup and the send.
+func (in *Inbox) sendResolved(resolve func() (*Project, error), displayText, driverText string, record bool) error {
 	in.mu.Lock()
-	p, err := in.project(idx)
+	p, err := resolve()
 	if err != nil {
 		in.mu.Unlock()
 		return err
