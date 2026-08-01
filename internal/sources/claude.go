@@ -99,15 +99,139 @@ func (c Claude) listAgents(ctx context.Context) ([]agentInfo, error) {
 	return agents, nil
 }
 
-// enrichment is the handful of things worth pulling out of a transcript that
-// `claude agents --json` does not carry.
+// enrichment is what a transcript can add that `claude agents --json` does
+// not carry — most importantly `ask`, the thing the session actually wants.
+//
+// "Session X is blocked" is not useful on its own; you still have to open each
+// one to find out what it wants. The last thing the assistant said before it
+// stopped IS the question, and surfacing it is the difference between a list
+// of rows and knowing what your fleet needs.
 type enrichment struct {
 	branch     string
 	lastPrompt string
+	ask        string
 	lastAt     time.Time
 }
 
+// askFrom reduces a final assistant message to the part that is actually a
+// question. These messages usually end with the ask after some working-out, so
+// the last prose paragraph is nearly always the right pick — and far better
+// than the first 200 characters, which is preamble.
+func askFrom(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	// Drop fenced code; a trailing code block is never the question.
+	for {
+		open := strings.Index(text, "```")
+		if open < 0 {
+			break
+		}
+		rest := text[open+3:]
+		close := strings.Index(rest, "```")
+		if close < 0 {
+			text = strings.TrimSpace(text[:open])
+			break
+		}
+		text = strings.TrimSpace(text[:open] + "\n" + rest[close+3:])
+	}
+
+	raw := strings.Split(text, "\n\n")
+	paragraphs := make([]string, 0, len(raw))
+	for _, p := range raw {
+		// Strip headings and list scaffolding; the ask is prose.
+		p = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(p), "#*->|_ \t"))
+		if len(p) >= 12 {
+			paragraphs = append(paragraphs, p)
+		}
+	}
+	if len(paragraphs) == 0 {
+		return truncate(text, 240)
+	}
+	// Prefer an actual question. These messages typically close with a
+	// summary of what was done and then the ask; taking the last paragraph
+	// blindly surfaces the summary and buries the thing needing an answer.
+	for i := len(paragraphs) - 1; i >= 0; i-- {
+		if strings.Contains(paragraphs[i], "?") {
+			return truncate(paragraphs[i], 240)
+		}
+	}
+	return truncate(paragraphs[len(paragraphs)-1], 240)
+}
+
+// assistantText pulls the text blocks out of an assistant record, tolerating
+// both the string and content-array shapes.
+func assistantText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var asString string
+	if json.Unmarshal(raw, &asString) == nil {
+		return asString
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 const tailBytes = 256 * 1024
+
+// jobState is the part of ~/.claude/jobs/<id>/state.json worth reading.
+//
+// Background agents keep their state here rather than only in a transcript,
+// and Claude Code already does the work this tool was about to redo badly:
+// `needs` is a one-line statement of what the agent wants from you, `detail`
+// summarises what it just did, and `suggestedReply` is sometimes a draft
+// answer. Parsing the last assistant paragraph was a guess at exactly this.
+type jobState struct {
+	State          string `json:"state"`
+	Detail         string `json:"detail"`
+	Needs          string `json:"needs"`
+	SuggestedReply string `json:"suggestedReply"`
+	UpdatedAt      string `json:"updatedAt"`
+}
+
+func (c Claude) jobRoot() string {
+	if c.Root != "" {
+		// Tests point Root at a fixture tree; jobs sit beside projects.
+		return filepath.Join(filepath.Dir(c.Root), "jobs")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "jobs")
+}
+
+// job reads a background agent's state. shortID is the `id` from
+// `claude agents --json`, which names the directory.
+func (c Claude) job(shortID string) jobState {
+	root := c.jobRoot()
+	if root == "" || shortID == "" {
+		return jobState{}
+	}
+	data, err := os.ReadFile(filepath.Join(root, shortID, "state.json"))
+	if err != nil {
+		return jobState{}
+	}
+	var js jobState
+	if json.Unmarshal(data, &js) != nil {
+		return jobState{}
+	}
+	return js
+}
 
 // transcriptPath locates a session's JSONL by scanning project directories.
 // Claude Code names the file after the session id, but the directory is a
@@ -168,9 +292,14 @@ func (c Claude) enrich(sessionID string) enrichment {
 			continue
 		}
 		var r struct {
-			GitBranch  string `json:"gitBranch"`
-			LastPrompt string `json:"lastPrompt"`
-			Timestamp  string `json:"timestamp"`
+			Type        string `json:"type"`
+			GitBranch   string `json:"gitBranch"`
+			LastPrompt  string `json:"lastPrompt"`
+			Timestamp   string `json:"timestamp"`
+			IsSidechain bool   `json:"isSidechain"`
+			Message     *struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
 		}
 		if json.Unmarshal([]byte(line), &r) != nil {
 			continue
@@ -180,6 +309,13 @@ func (c Claude) enrich(sessionID string) enrichment {
 		}
 		if r.LastPrompt != "" {
 			out.lastPrompt = r.LastPrompt
+		}
+		// A sidechain is a subagent's turn. Its closing message is not what
+		// the session is asking you.
+		if r.Type == "assistant" && !r.IsSidechain && r.Message != nil {
+			if ask := askFrom(assistantText(r.Message.Content)); ask != "" {
+				out.ask = ask
+			}
 		}
 		if t, err := time.Parse(time.RFC3339, r.Timestamp); err == nil && t.After(out.lastAt) {
 			out.lastAt = t
@@ -217,7 +353,7 @@ func actionsFor(a agentInfo) []feed.Action {
 	return actions
 }
 
-func (c Claude) item(a agentInfo, e enrichment) feed.Item {
+func (c Claude) item(a agentInfo, e enrichment, js jobState) feed.Item {
 	project := filepath.Base(a.Cwd)
 	if project == "." || project == string(filepath.Separator) {
 		project = a.Cwd
@@ -229,9 +365,19 @@ func (c Claude) item(a agentInfo, e enrichment) feed.Item {
 	prompt := ""
 	if a.State == "blocked" {
 		state = feed.StateBlocked
-		prompt = "Finished its turn — waiting on you."
-		if a.Kind == "background" {
+		// What it actually wants. Best source first: Claude Code's own
+		// `needs` line, then the last thing the assistant said. The generic
+		// line is the fallback, not the goal — knowing a session is blocked
+		// without knowing why still costs you a context switch.
+		switch {
+		case js.Needs != "":
+			prompt = truncate(js.Needs, 240)
+		case e.ask != "":
+			prompt = e.ask
+		case a.Kind == "background":
 			prompt = "Background agent finished its turn — waiting on you."
+		default:
+			prompt = "Finished its turn — waiting on you."
 		}
 	}
 
@@ -267,6 +413,17 @@ func (c Claude) item(a agentInfo, e enrichment) feed.Item {
 	if e.lastPrompt != "" && e.lastPrompt != title {
 		ctx["last_prompt"] = truncate(e.lastPrompt, 120)
 	}
+	// What it just did, as distinct from what it wants — the two answer
+	// different questions and you usually want both before deciding.
+	if js.Detail != "" {
+		ctx["did"] = truncate(js.Detail, 200)
+	}
+	// A draft answer, when Claude Code offers one. Shown, never sent: there
+	// is no way to write into a live session from outside, and auto-replying
+	// on your behalf is not what this is for.
+	if js.SuggestedReply != "" {
+		ctx["suggested_reply"] = truncate(js.SuggestedReply, 200)
+	}
 
 	item := feed.Item{
 		Schema:    feed.Schema,
@@ -295,7 +452,7 @@ func (c Claude) Fetch(ctx context.Context) (feed.Feed, error) {
 	}
 	f := feed.Feed{Schema: feed.Schema, Items: make([]feed.Item, 0, len(agents))}
 	for _, a := range agents {
-		f.Items = append(f.Items, c.item(a, c.enrich(a.SessionID)))
+		f.Items = append(f.Items, c.item(a, c.enrich(a.SessionID), c.job(a.ID)))
 	}
 	return f, nil
 }

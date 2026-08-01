@@ -203,3 +203,64 @@ func TestFetchAllStampsOriginSoSameIDsFromTwoSourcesCoexist(t *testing.T) {
 		t.Fatalf("origin should name the configured source, got %q", items[0].Origin)
 	}
 }
+
+// writeJob plants a background agent's state.json beside the fixture
+// projects tree, the way ~/.claude/jobs sits beside ~/.claude/projects.
+func writeJob(t *testing.T, c Claude, shortID, body string) {
+	t.Helper()
+	dir := filepath.Join(c.jobRoot(), shortID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNeedsFromTheJobStoreBeatsGuessingAtTheTranscript(t *testing.T) {
+	c := claude(t, blockedBg)
+	writeJob(t, c, "ad19117b", `{"state":"blocked",
+	  "needs":"paste a fresh 6-digit OTP code, or reply `+"`go`"+` to proceed",
+	  "detail":"ready to publish 5 packages; need OTP code or go-ahead"}`)
+
+	item := fetch(t, c)[0]
+	// Claude Code already computes what an agent wants. Parsing the last
+	// assistant paragraph was a worse guess at exactly this.
+	if item.Needs.Prompt != "paste a fresh 6-digit OTP code, or reply `go` to proceed" {
+		t.Fatalf("got %q", item.Needs.Prompt)
+	}
+	// What it did and what it wants answer different questions; both show.
+	if item.Context["did"] != "ready to publish 5 packages; need OTP code or go-ahead" {
+		t.Fatalf("did missing: %+v", item.Context)
+	}
+}
+
+func TestASuggestedReplyIsShownAndNeverSent(t *testing.T) {
+	c := claude(t, blockedBg)
+	writeJob(t, c, "ad19117b", `{"state":"blocked","needs":"which direction?","suggestedReply":"wire it up now"}`)
+
+	item := fetch(t, c)[0]
+	if item.Context["suggested_reply"] != "wire it up now" {
+		t.Fatalf("suggested reply should surface: %+v", item.Context)
+	}
+	// There is no way to write into a live session from outside, and
+	// auto-replying is not what this is for: actions stay attach/fork.
+	for _, a := range item.Needs.Actions {
+		if strings.Contains(strings.Join(a.Run, " "), "wire it up now") {
+			t.Fatalf("a suggested reply must never become a command: %v", a.Run)
+		}
+	}
+	if len(item.Needs.Actions) != 2 || item.Needs.Actions[0].Label != "attach" {
+		t.Fatalf("actions should still be attach/fork, got %+v", item.Needs.Actions)
+	}
+}
+
+func TestAMissingJobStateFallsBackRatherThanBlanking(t *testing.T) {
+	item := fetch(t, claude(t, blockedBg))[0]
+	if item.Needs.Prompt == "" {
+		t.Fatal("a blocked item must always say something")
+	}
+	if item.Context["did"] != "" {
+		t.Fatalf("no job state means no did, got %q", item.Context["did"])
+	}
+}

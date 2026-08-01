@@ -346,6 +346,11 @@ func (m Model) View() string {
 		} else {
 			b.WriteString("  " + line + suffix + "\n")
 		}
+		// The ask, inline. A list that only says "blocked" still costs you a
+		// context switch per row to find out what each one wants.
+		if item.Attention == feed.AttentionDecision && item.Needs != nil && item.Needs.Prompt != "" {
+			b.WriteString(mutedStyle.Render("            "+clip(item.Needs.Prompt, width-16)) + "\n")
+		}
 	}
 
 	if m.mode == modeDetail {
