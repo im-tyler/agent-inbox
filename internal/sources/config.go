@@ -12,7 +12,7 @@ import (
 // set; Kind "claude" needs neither.
 type SourceConfig struct {
 	Name     string   `json:"name"`
-	Kind     string   `json:"kind,omitempty"` // claude | opencode | exec | http (inferred when empty)
+	Kind     string   `json:"kind,omitempty"` // claude | opencode | codex | exec | http (inferred when empty)
 	Command  []string `json:"command,omitempty"`
 	Dir      string   `json:"dir,omitempty"`
 	URL      string   `json:"http,omitempty"`
@@ -21,7 +21,7 @@ type SourceConfig struct {
 
 	// Bin overrides the source's executable (claude, opencode, …).
 	Bin string `json:"bin,omitempty"`
-	// Claude-only: where transcripts live, for branch/last-prompt enrichment.
+	// Claude: where transcripts live. Codex: the sessions root.
 	Root string `json:"root,omitempty"`
 	// OpenCode-only: path to opencode's SQLite database.
 	OpenCodeDB string `json:"opencode_db,omitempty"`
@@ -103,6 +103,8 @@ func (c Config) Build() []Source {
 			out = append(out, Claude{Root: s.Root, Bin: s.Bin})
 		case "opencode":
 			out = append(out, OpenCode{Bin: s.Bin, DB: s.OpenCodeDB})
+		case "codex":
+			out = append(out, Codex{Bin: s.Bin, Root: s.Root})
 		case "exec":
 			if len(s.Command) == 0 {
 				continue
