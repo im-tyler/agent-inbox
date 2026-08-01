@@ -36,13 +36,13 @@ func TestParseKingDirectives(t *testing.T) {
 			},
 		},
 		{
-			name:  "empty message skipped",
-			input: "[send to maccel: ]",
+			name:     "empty message skipped",
+			input:    "[send to maccel: ]",
 			expected: nil,
 		},
 		{
-			name:  "missing colon skipped",
-			input: "[send to maccel]",
+			name:     "missing colon skipped",
+			input:    "[send to maccel]",
 			expected: nil,
 		},
 		{
