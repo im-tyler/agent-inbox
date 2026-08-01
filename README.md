@@ -93,11 +93,23 @@ agent-inbox inbox          # the reader
 agent-inbox inbox --json   # the merged feed, for scripts and agents
 ```
 
-With no configuration it reads your local **Claude Code** sessions
-(`~/.claude/projects/*.jsonl` — newest session per project, last 24h) and
-`teploy-ship` if it is on `$PATH`. A session whose last assistant turn ended
-with `end_turn` is waiting on you; one mid-tool-call is running; one that has
-been mid-tool-call for minutes is reported as stalled.
+With no configuration it picks up whichever agent CLIs are installed:
+
+| Source | State signal | Reply from the inbox |
+|---|---|---|
+| **Claude Code** | `claude agents --json` reports `state: blocked` outright, with a one-line `needs` from `~/.claude/jobs/` | no — a live session cannot be written into |
+| **opencode** | last message's `finish` is `stop` | yes, `opencode run -s <id>` |
+| **codex** | rollout ends on a `task_complete` event | yes, `codex exec resume <id>` |
+| **teploy-ship** | parked durable runs | yes, approve/deny |
+
+An opencode fork such as **fylun-code** works through the `opencode` kind by
+pointing `opencode_db` at that build's own database.
+
+Only sessions whose process is actually running are listed. Claude Code keeps
+reporting agents whose process is long gone, still carrying whatever state they
+last recorded, and opencode's database holds every session ever created with
+almost all of them ended on `stop` — without a liveness check the list fills
+with months of finished work that all looks like it is waiting on you.
 
 Sources are configured in `~/.config/agent-inbox/sources.json` — see
 [`sources.example.json`](sources.example.json). Any producer speaking the

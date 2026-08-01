@@ -1,16 +1,24 @@
 {
   "sources": [
+    { "name": "claude-code", "kind": "claude" },
+    { "name": "opencode", "kind": "opencode" },
+    { "name": "codex", "kind": "codex" },
+
     {
-      "name": "claude-code",
-      "kind": "claude",
-      "max_age_hours": 24,
-      "all_sessions": false
+      "_comment": "An opencode fork or overlay: same schema, so reuse the opencode kind and point it at that build's own database. bin is what the reply action runs.",
+      "name": "fylun-code",
+      "kind": "opencode",
+      "bin": "fylun-code",
+      "opencode_db": "/Users/tyler/.local/share/fylun-code/opencode.db"
     },
+
     {
+      "_comment": "Any command printing a teploy.inbox/v1 envelope on stdout.",
       "name": "teploy-ship",
       "kind": "exec",
       "command": ["teploy-ship", "inbox", "--json"]
     },
+
     {
       "_comment": "Any service exposing GET /inbox in the teploy.inbox/v1 shape. The URL is a base; /inbox is appended if absent.",
       "name": "ship-prod",
