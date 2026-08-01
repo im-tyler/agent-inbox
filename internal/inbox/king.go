@@ -70,14 +70,25 @@ func (in *Inbox) kingDispatchWatcher(kingIdx int) {
 
 			// Parse and dispatch directives.
 			directives := ParseKingDirectives(response)
+			var sent []dispatched
 			for _, d := range directives {
-				if idx := in.findProjectByName(d.Target); idx > 0 {
-					_ = in.Send(idx, d.Message)
-					// Spawn a watcher that waits for the target to finish,
-					// then injects its response into the king's history so
-					// it appears inline in the king's conversation thread.
-					go in.fleetResponseWatcher(kingIdx, d.Target, idx)
+				idx := in.findProjectByName(d.Target)
+				if idx == 0 {
+					in.noteToKing(kingIdx, fmt.Sprintf("no project named %q — nothing sent", d.Target))
+					continue
 				}
+				// A failed dispatch must not get a watcher. Otherwise the
+				// watcher waits out whatever that project was already doing
+				// and files its unrelated answer as the reply to this
+				// question — confident, stale, and wrong.
+				if err := in.Send(idx, d.Message); err != nil {
+					in.noteToKing(kingIdx, fmt.Sprintf("%s: %v — nothing sent", d.Target, err))
+					continue
+				}
+				sent = append(sent, dispatched{name: d.Target, idx: idx})
+			}
+			if len(sent) > 0 {
+				go in.kingRoundWatcher(kingIdx, sent)
 			}
 			return
 		}
@@ -123,10 +134,19 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 		b.WriteString(fmt.Sprintf("- %s (%s) [%s]: %s\n", p.Name, p.Tool, status, lastMsg))
 	}
 	if found && firstProject != "" {
-		b.WriteString("\nTo send a task to a project, output this exact format on its own line:\n")
+		// Stating the format was not enough. Asked about another project, a
+		// model reaches for the filesystem first — and every one of those
+		// calls is rejected, because a fleet project's folder is outside the
+		// king's working directory. So say what is impossible, not just what
+		// is available.
+		b.WriteString("\nYou cannot read these projects' files or run commands in their directories.")
+		b.WriteString(" They are outside your working directory and every such attempt is rejected.")
+		b.WriteString(" Each project is a live agent session in its own folder, and asking it is the only way to learn anything about it.\n")
+		b.WriteString("\nTo ask a project something, or give it a task, output this exact format on its own line:\n")
 		b.WriteString(fmt.Sprintf("[send to %s: describe the task here]\n\n", firstProject))
 		b.WriteString(fmt.Sprintf("Example: [send to %s: what are you working on?]\n", firstProject))
-		b.WriteString("You can include multiple [send to ...] lines. Everything else in your response is shown to the user.\n")
+		b.WriteString("You can include multiple [send to ...] lines — they run in parallel, and you get every reply back before you answer the user.\n")
+		b.WriteString("Everything else in your response is shown to the user.\n")
 	}
 	return b.String()
 }
@@ -173,49 +193,140 @@ func ParseKingDirectives(response string) []KingDirective {
 	return dirs
 }
 
-// fleetResponseWatcher waits for a dispatched project to finish, then
-// injects its response into the king's conversation history so the user
-// sees the fleet project's reply inline in the king's thread.
-func (in *Inbox) fleetResponseWatcher(kingIdx int, targetName string, targetIdx int) {
-	for {
-		time.Sleep(500 * time.Millisecond)
-		in.mu.Lock()
-		target, err := in.project(targetIdx)
-		if err != nil {
-			in.mu.Unlock()
-			return
+// dispatched is one project the king successfully sent a task to.
+type dispatched struct {
+	name string
+	idx  int
+}
+
+// fleetReply is what a dispatched project came back with.
+type fleetReply struct {
+	name    string
+	content string
+	failed  bool
+}
+
+const (
+	// kingRoundTimeout bounds a round. A project whose driver never returns
+	// would otherwise hold the summary — and this goroutine — forever.
+	kingRoundTimeout = 15 * time.Minute
+	// receiptWidth is how much of a reply the king's thread shows. The full
+	// text is in that project's own thread; repeating it here would make the
+	// supervisor's conversation the transcript of every other one.
+	receiptWidth = 100
+)
+
+// kingPollEvery is how often a round checks its targets. A var so tests can
+// run a full round without waiting on real polling intervals.
+var kingPollEvery = 500 * time.Millisecond
+
+// kingRoundWatcher waits for every dispatched project, files a one-line
+// receipt for each in the king's thread, then hands the full replies back to
+// the king so it can report to the user.
+//
+// The summary turn is sent directly rather than through KingSend, so any
+// directives in it are not dispatched. That is deliberate: it is what stops a
+// king from answering its own summary with more work, forever.
+func (in *Inbox) kingRoundWatcher(kingIdx int, targets []dispatched) {
+	deadline := time.Now().Add(kingRoundTimeout)
+
+	replies := make([]fleetReply, 0, len(targets))
+	for _, t := range targets {
+		if r, ok := in.awaitReply(t, deadline); ok {
+			replies = append(replies, r)
+		} else {
+			replies = append(replies, fleetReply{
+				name:    t.name,
+				content: "(no reply within the round timeout)",
+				failed:  true,
+			})
 		}
-		if target.Status != driver.StatusWorking {
-			// Target finished — inject response into king's history.
-			king, err := in.project(kingIdx)
-			if err != nil {
-				in.mu.Unlock()
-				return
-			}
-			response := target.LastMessage
-			if response == "" && target.LastErr != "" {
-				response = "(error: " + target.LastErr + ")"
-			}
-			if response != "" {
-				king.appendHistory(Message{
-					Role:      targetName,
-					Content:   response,
-					Timestamp: time.Now(),
-				})
-			}
-			in.mu.Unlock()
-			in.save()
-			return
-		}
+	}
+
+	in.mu.Lock()
+	king, err := in.project(kingIdx)
+	if err != nil {
 		in.mu.Unlock()
+		return
+	}
+	for _, r := range replies {
+		king.appendHistory(Message{
+			Role:      r.name,
+			Content:   truncateForKing(r.content, receiptWidth),
+			Timestamp: time.Now(),
+		})
+	}
+	in.mu.Unlock()
+	in.save()
+
+	if err := in.sendInternal(kingIdx, "", summaryPrompt(replies), false); err != nil {
+		in.noteToKing(kingIdx, fmt.Sprintf("fleet replies arrived but the summary could not start: %v", err))
 	}
 }
 
+// awaitReply polls one target until its turn ends or the round runs out.
+func (in *Inbox) awaitReply(t dispatched, deadline time.Time) (fleetReply, bool) {
+	for time.Now().Before(deadline) {
+		time.Sleep(kingPollEvery)
+		in.mu.Lock()
+		target, err := in.project(t.idx)
+		if err != nil {
+			in.mu.Unlock()
+			return fleetReply{}, false
+		}
+		if target.Status == driver.StatusWorking {
+			in.mu.Unlock()
+			continue
+		}
+		reply := fleetReply{name: t.name, content: target.LastMessage}
+		if target.LastErr != "" {
+			reply.content = "(error: " + target.LastErr + ")"
+			reply.failed = true
+		}
+		if reply.content == "" {
+			reply.content = "(no output)"
+			reply.failed = true
+		}
+		in.mu.Unlock()
+		return reply, true
+	}
+	return fleetReply{}, false
+}
+
+// summaryPrompt hands the king the full replies it dispatched for.
+func summaryPrompt(replies []fleetReply) string {
+	var b strings.Builder
+	b.WriteString("The projects you dispatched have replied. Their full responses:\n\n")
+	for _, r := range replies {
+		b.WriteString("--- " + r.name + " ---\n")
+		b.WriteString(r.content)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Report back to the user: what each project found, and what it means taken together. ")
+	b.WriteString("Do not emit [send to ...] directives in this reply — they will not be dispatched.\n")
+	return b.String()
+}
+
+// noteToKing records a system line in the king's thread. Used for the things
+// the user has to know but no agent said: a dispatch that never happened, a
+// round that timed out.
+func (in *Inbox) noteToKing(kingIdx int, text string) {
+	in.mu.Lock()
+	king, err := in.project(kingIdx)
+	if err != nil {
+		in.mu.Unlock()
+		return
+	}
+	king.appendHistory(Message{Role: "system", Content: text, Timestamp: time.Now()})
+	in.mu.Unlock()
+	in.save()
+}
+
 func truncateForKing(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.TrimSpace(s)
-	if len(s) <= max {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= max {
 		return s
 	}
-	return s[:max-1] + "…"
+	return string(r[:max-1]) + "…"
 }
