@@ -95,3 +95,27 @@ func TestFrameCyclesWithoutOverflow(t *testing.T) {
 		t.Errorf("cycled through %d frames, want %d", len(seen), len(spinnerFrames))
 	}
 }
+
+func TestStripDirectivesRemovesMachineSyntax(t *testing.T) {
+	got := stripDirectives("On it.\n[send to omni: check for bugs]\n[note: omni runs on glm-5.2]\nI'll report back.")
+	want := "On it.\nI'll report back."
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// Prose that merely mentions the syntax is not a directive — the parsers read
+// whole lines, and the display has to agree with them.
+func TestStripDirectivesKeepsProse(t *testing.T) {
+	s := "you can write [note: something] on its own line to remember it"
+	if got := stripDirectives(s); got != s {
+		t.Errorf("stripped prose: %q", got)
+	}
+}
+
+// A turn that was nothing but dispatch has no words to show.
+func TestStripDirectivesCanEmptyAMessage(t *testing.T) {
+	if got := stripDirectives("[send to omni: go]\n[send to akiroo: go]"); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}

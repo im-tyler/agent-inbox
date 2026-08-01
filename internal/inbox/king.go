@@ -45,54 +45,57 @@ func (in *Inbox) KingSend(kingIdx int, prompt string, connectedNames []string) e
 	return nil
 }
 
-// kingDispatchWatcher polls the king's status until it's no longer Working,
-// then parses the response for [send to X: Y] directives and dispatches them.
-func (in *Inbox) kingDispatchWatcher(kingIdx int) {
-	// Wait for the king to finish.
+// awaitKing polls until the king's turn ends, returning its response. A turn
+// that was cancelled (Idle) or errored is not a response: acting on one would
+// mean dispatching work off a failure.
+func (in *Inbox) awaitKing(kingIdx int) (string, bool) {
 	for {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(in.pollInterval())
 		in.mu.Lock()
 		p, err := in.project(kingIdx)
 		if err != nil {
 			in.mu.Unlock()
-			return
+			return "", false
 		}
-		if p.Status != driver.StatusWorking {
-			// Only dispatch directives when the king completed successfully
-			// (StatusWaiting). If cancelled (Idle) or errored (Error), skip —
-			// we don't want to act on stale or failed responses.
-			if p.Status != driver.StatusWaiting {
-				in.mu.Unlock()
-				return
-			}
-			response := p.LastMessage
+		if p.Status == driver.StatusWorking {
 			in.mu.Unlock()
-
-			// Parse and dispatch directives.
-			directives := ParseKingDirectives(response)
-			var sent []dispatched
-			for _, d := range directives {
-				idx := in.findProjectByName(d.Target)
-				if idx == 0 {
-					in.noteToKing(kingIdx, fmt.Sprintf("no project named %q — nothing sent", d.Target))
-					continue
-				}
-				// A failed dispatch must not get a watcher. Otherwise the
-				// watcher waits out whatever that project was already doing
-				// and files its unrelated answer as the reply to this
-				// question — confident, stale, and wrong.
-				if err := in.Send(idx, d.Message); err != nil {
-					in.noteToKing(kingIdx, fmt.Sprintf("%s: %v — nothing sent", d.Target, err))
-					continue
-				}
-				sent = append(sent, dispatched{name: d.Target, idx: idx})
-			}
-			if len(sent) > 0 {
-				go in.kingRoundWatcher(kingIdx, sent)
-			}
-			return
+			continue
 		}
+		response := p.LastMessage
+		ok := p.Status == driver.StatusWaiting
 		in.mu.Unlock()
+		return response, ok
+	}
+}
+
+// kingDispatchWatcher waits for the king's turn, records any notes it took,
+// then parses the response for [send to X: Y] directives and dispatches them.
+func (in *Inbox) kingDispatchWatcher(kingIdx int) {
+	response, ok := in.awaitKing(kingIdx)
+	if !ok {
+		return
+	}
+	in.AddNotes(ParseKingNotes(response))
+
+	var sent []dispatched
+	for _, d := range ParseKingDirectives(response) {
+		idx := in.findProjectByName(d.Target)
+		if idx == 0 {
+			in.noteToKing(kingIdx, fmt.Sprintf("no project named %q — nothing sent", d.Target))
+			continue
+		}
+		// A failed dispatch must not get a watcher. Otherwise the watcher
+		// waits out whatever that project was already doing and files its
+		// unrelated answer as the reply to this question — confident,
+		// stale, and wrong.
+		if err := in.Send(idx, d.Message); err != nil {
+			in.noteToKing(kingIdx, fmt.Sprintf("%s: %v — nothing sent", d.Target, err))
+			continue
+		}
+		sent = append(sent, dispatched{name: d.Target, idx: idx})
+	}
+	if len(sent) > 0 {
+		go in.kingRoundWatcher(kingIdx, sent)
 	}
 }
 
@@ -109,6 +112,17 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 
 	var b strings.Builder
 	var firstProject string
+
+	// Notes lead. They are what you knew before this turn, and a fact you
+	// already established should not be re-derived from a status line.
+	if notes := in.Notes(); len(notes) > 0 {
+		b.WriteString("What you have noted about this fleet:\n")
+		for _, n := range notes {
+			b.WriteString("- " + n.Text + "\n")
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("Your fleet:\n")
 	found := false
 	for _, p := range snap {
@@ -146,6 +160,10 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 		b.WriteString(fmt.Sprintf("[send to %s: describe the task here]\n\n", firstProject))
 		b.WriteString(fmt.Sprintf("Example: [send to %s: what are you working on?]\n", firstProject))
 		b.WriteString("You can include multiple [send to ...] lines — they run in parallel, and you get every reply back before you answer the user.\n")
+		b.WriteString("\nTo remember something across turns, output a line of its own:\n")
+		b.WriteString("[note: teploy depends on Neutron's DB layer]\n\n")
+		b.WriteString("Note only durable facts that span projects or would cost a round-trip to rediscover.")
+		b.WriteString(" Not status — you are given that fresh every turn.\n")
 		b.WriteString("Everything else in your response is shown to the user.\n")
 	}
 	return b.String()
@@ -216,9 +234,18 @@ const (
 	receiptWidth = 100
 )
 
-// kingPollEvery is how often a round checks its targets. A var so tests can
-// run a full round without waiting on real polling intervals.
-var kingPollEvery = 500 * time.Millisecond
+// defaultPollEvery is how often a round checks its targets. It lives on the
+// Inbox rather than in a package var: watchers outlive the turn that started
+// them, so a test that reset a global would be writing it while a live
+// goroutine still read it.
+const defaultPollEvery = 500 * time.Millisecond
+
+func (in *Inbox) pollInterval() time.Duration {
+	if in.pollEvery > 0 {
+		return in.pollEvery
+	}
+	return defaultPollEvery
+}
 
 // kingRoundWatcher waits for every dispatched project, files a one-line
 // receipt for each in the king's thread, then hands the full replies back to
@@ -261,13 +288,19 @@ func (in *Inbox) kingRoundWatcher(kingIdx int, targets []dispatched) {
 
 	if err := in.sendInternal(kingIdx, "", summaryPrompt(replies), false); err != nil {
 		in.noteToKing(kingIdx, fmt.Sprintf("fleet replies arrived but the summary could not start: %v", err))
+		return
+	}
+	// The summary is where the cross-project facts actually surface, so it is
+	// the turn most worth harvesting notes from.
+	if response, ok := in.awaitKing(kingIdx); ok {
+		in.AddNotes(ParseKingNotes(response))
 	}
 }
 
 // awaitReply polls one target until its turn ends or the round runs out.
 func (in *Inbox) awaitReply(t dispatched, deadline time.Time) (fleetReply, bool) {
 	for time.Now().Before(deadline) {
-		time.Sleep(kingPollEvery)
+		time.Sleep(in.pollInterval())
 		in.mu.Lock()
 		target, err := in.project(t.idx)
 		if err != nil {

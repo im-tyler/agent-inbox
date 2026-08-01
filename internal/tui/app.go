@@ -158,9 +158,15 @@ func (m Model) buildConversationLines(snap []inbox.Project, width int) []string 
 	lines = append(lines, "")
 
 	for _, msg := range king.History {
+		body := stripDirectives(msg.Content)
+		if body == "" {
+			// A turn that was nothing but directives has already been shown
+			// as the dispatch it caused. An empty bubble adds nothing.
+			continue
+		}
 		glyph, label, style := speaker(msg.Role, king.Tool)
 		lines = append(lines, speakerLine(glyph, label, msg.Timestamp.Format(time.Kitchen), style, maxW))
-		lines = append(lines, wrapBody(msg.Content, maxW)...)
+		lines = append(lines, wrapBody(body, maxW)...)
 		lines = append(lines, "")
 	}
 

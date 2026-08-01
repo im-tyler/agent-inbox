@@ -52,6 +52,14 @@ type Inbox struct {
 	drivers    map[string]driver.Driver
 	statePath  string
 	configPath string // empty = AddProject can't persist to config
+	notesPath  string // empty = notes live for this session only
+
+	// pollEvery overrides how often a king round checks its targets. Zero
+	// means the default; set before any turn starts, never during one.
+	pollEvery time.Duration
+
+	// notes are the supervisor's durable facts about the fleet.
+	notes []Note
 
 	// cancels maps project Name -> the cancel function for its in-flight
 	// send goroutine. Empty when no send is active for that project.

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"path/filepath"
+	"strings"
 
 	"agentinbox/internal/feed"
 )
@@ -75,4 +76,24 @@ func candidateFrom(item feed.Item) (candidate, bool) {
 		Dir:       dir,
 		SessionID: resumableSessionID(item.Source, item.ID),
 	}, true
+}
+
+// stripDirectives removes the king's machine syntax from what a human reads.
+// [send to X: Y] and [note: ...] are instructions to this program, not speech
+// — the dispatch shows up as receipts and the note as remembered fact, so
+// printing the raw line too is the same information wearing a worse shape.
+//
+// Only whole lines are dropped, matching how the parsers read them: prose
+// that merely mentions the syntax stays.
+func stripDirectives(content string) string {
+	lines := strings.Split(content, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		t := strings.ToLower(strings.TrimSpace(ln))
+		if strings.HasSuffix(t, "]") && (strings.HasPrefix(t, "[send to ") || strings.HasPrefix(t, "[note:")) {
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }

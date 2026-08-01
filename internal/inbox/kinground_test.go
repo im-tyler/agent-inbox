@@ -81,7 +81,10 @@ func kingFixture(t *testing.T, d *scriptDriver) *Inbox {
 		{Name: "omni", Tool: "script", Dir: "/omni", Status: driver.StatusIdle},
 		{Name: "akiroo", Tool: "script", Dir: "/akiroo", Status: driver.StatusIdle},
 	}
-	return New(projects, map[string]driver.Driver{"script": d}, filepath.Join(t.TempDir(), "state.json"))
+	in := New(projects, map[string]driver.Driver{"script": d}, filepath.Join(t.TempDir(), "state.json"))
+	// Set before any turn starts: watchers read this and outlive the test.
+	in.pollEvery = time.Millisecond
+	return in
 }
 
 func historyRoles(p Project) []string {
@@ -95,10 +98,6 @@ func historyRoles(p Project) []string {
 // The whole loop: one instruction fans out to two projects, both replies come
 // back, and the king gets them in full so it can report.
 func TestKingRoundClosesTheLoop(t *testing.T) {
-	old := kingPollEvery
-	kingPollEvery = time.Millisecond
-	defer func() { kingPollEvery = old }()
-
 	d := newScriptDriver()
 	d.replies["/king"] = []string{
 		"On it.\n[send to omni: check for bugs]\n[send to akiroo: check for bugs]",
@@ -159,10 +158,6 @@ func TestKingRoundClosesTheLoop(t *testing.T) {
 // the reply. Duplicating full replies makes the supervisor's conversation the
 // transcript of every other one.
 func TestKingReceiptsAreCompact(t *testing.T) {
-	old := kingPollEvery
-	kingPollEvery = time.Millisecond
-	defer func() { kingPollEvery = old }()
-
 	long := strings.Repeat("this is a very long finding. ", 40)
 	d := newScriptDriver()
 	d.replies["/king"] = []string{"[send to omni: look]", "done"}
@@ -202,10 +197,6 @@ func TestKingReceiptsAreCompact(t *testing.T) {
 // waits out the work already in flight and files that unrelated answer as the
 // reply to the question just asked.
 func TestKingDoesNotWatchAFailedDispatch(t *testing.T) {
-	old := kingPollEvery
-	kingPollEvery = time.Millisecond
-	defer func() { kingPollEvery = old }()
-
 	d := newScriptDriver()
 	gate := make(chan struct{})
 	d.block["/omni"] = gate
@@ -254,10 +245,6 @@ func TestKingDoesNotWatchAFailedDispatch(t *testing.T) {
 }
 
 func TestKingNotesAnUnknownTarget(t *testing.T) {
-	old := kingPollEvery
-	kingPollEvery = time.Millisecond
-	defer func() { kingPollEvery = old }()
-
 	d := newScriptDriver()
 	d.replies["/king"] = []string{"[send to nonexistent: do a thing]"}
 
