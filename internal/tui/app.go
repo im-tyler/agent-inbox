@@ -259,46 +259,49 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 		}
 	}
 
+	// Every row is marker + name + glyph, the marker always two columns, so
+	// the names share a left edge. The per-row index that used to sit here
+	// selected nothing — the sidebar navigates with j/k — and it pushed the
+	// fleet's names two columns right of the king's.
 	for i, p := range snap {
 		isKing := i+1 == m.kingProjectIdx
 		if !isKing {
 			fleetCount++
 		}
-		// King gets a crown marker; fleet projects get number + cursor.
 		var marker string
-		if isKing {
+		switch {
+		case isKing:
 			marker = "★ "
-		} else if m.focusSidebar && i+1 == m.sidebarCursor {
+		case m.focusSidebar && i+1 == m.sidebarCursor:
 			marker = "▶ "
-		} else {
+		default:
 			marker = "  "
-		}
-		idxLabel := ""
-		if !isKing {
-			idxLabel = fmt.Sprintf("%d ", i+1)
 		}
 		// The status glyph is pinned to the right edge; the name takes
 		// whatever is left rather than a fixed column that overflows.
-		nameW := maxW - lipgloss.Width(marker+idxLabel) - 2
+		nameW := maxW - 4
 		if nameW < 4 {
 			nameW = 4
 		}
 		name := truncateOneLine(p.Name, nameW)
-		entry := fmt.Sprintf("%s%s%-*s %s", marker, idxLabel, nameW, name,
-			statusGlyph(p.Status, m.frame()))
+		entry := fmt.Sprintf("%s%-*s %s", marker, nameW, name, statusGlyph(p.Status, m.frame()))
 		if m.focusSidebar && i+1 == m.sidebarCursor && !isKing {
 			lines = append(lines, trunc.Render(cursorStyle.Render(entry)))
 		} else {
 			lines = append(lines, trunc.Render(entry))
 		}
 		// A working project's activity says more than the message it is
-		// replacing, which is by definition the previous turn's.
+		// replacing, which is by definition the previous turn's. A failed one
+		// has to show why, or the ✗ is a fact with no cause attached.
 		sub := p.LastMessage
-		if p.Status == driver.StatusWorking && p.Activity != "" {
+		switch {
+		case p.Status == driver.StatusWorking && p.Activity != "":
 			sub = p.Activity
+		case p.Status == driver.StatusError && p.LastErr != "":
+			sub = p.LastErr
 		}
 		if !isKing {
-			if s := truncateOneLine(sub, maxW-4); s != "" {
+			if s := truncateOneLine(sub, maxW-2); s != "" {
 				lines = append(lines, trunc.Render(mutedStyle.Render("  "+s)))
 			}
 		}
@@ -311,9 +314,35 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, trunc.Render(mutedStyle.Render(fmt.Sprintf("%d projects  %d waiting", fleetCount, waiting))))
-	lines = append(lines, trunc.Render(mutedStyle.Render(fmt.Sprintf("%d working", working))))
+	for _, s := range fleetSummary(len(snap), working, waiting, maxW) {
+		lines = append(lines, trunc.Render(mutedStyle.Render(s)))
+	}
 	return lines
+}
+
+// fleetSummary is the count block under the sidebar. It counts every project
+// including the king — the king is one, and a total that silently excluded it
+// never matched the rows above. Kept to short lines because the sidebar is
+// twenty columns at its narrowest, where "3 projects  2 waiting" was cut to
+// "3 projects  2 wait".
+func fleetSummary(total, working, waiting, width int) []string {
+	out := []string{fmt.Sprintf("%d projects", total)}
+	var parts []string
+	if working > 0 {
+		parts = append(parts, fmt.Sprintf("%d working", working))
+	}
+	if waiting > 0 {
+		parts = append(parts, fmt.Sprintf("%d waiting", waiting))
+	}
+	if len(parts) == 0 {
+		return out
+	}
+	// One line if it fits, otherwise one per line. Truncating a count is
+	// worse than spending a row on it: "2 waitin" is not a number.
+	if joined := strings.Join(parts, " "); lipgloss.Width(joined) <= width {
+		return append(out, joined)
+	}
+	return append(out, parts...)
 }
 
 // handleMainKey processes keys in the king-first main view.

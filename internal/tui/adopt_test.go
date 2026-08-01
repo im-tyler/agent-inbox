@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"agentinbox/internal/driver"
 	"agentinbox/internal/feed"
+	"agentinbox/internal/inbox"
 )
 
 func row(source, id, cwd string) feed.Item {
@@ -81,5 +85,51 @@ func TestCandidateFromRejectsUndrivableRows(t *testing.T) {
 func TestCandidateNameFallsBackToDir(t *testing.T) {
 	if got := (candidate{Dir: "/"}).Name(); got != "/" {
 		t.Errorf("Name() = %q, want /", got)
+	}
+}
+
+// Every sidebar row is marker + name + glyph with a two-column marker, so the
+// king's name and the fleet's share a left edge. A per-row index used to sit
+// between them, selecting nothing and shifting the fleet two columns right.
+func TestSidebarNamesShareALeftEdge(t *testing.T) {
+	m := sidebarFixture(t)
+	lines := m.buildSidebarLines(m.inbox.Snapshot(), 24)
+
+	var rows []string
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "★ ") || strings.HasPrefix(ln, "  king") ||
+			strings.HasPrefix(ln, "  omni") || strings.HasPrefix(ln, "  akiroo") {
+			rows = append(rows, ln)
+		}
+	}
+	if len(rows) < 2 {
+		t.Fatalf("expected several project rows, got %q", rows)
+	}
+	for _, ln := range rows {
+		if r := []rune(ln); len(r) < 3 || r[1] != ' ' {
+			t.Errorf("row %q does not use a two-column marker", ln)
+		}
+	}
+}
+
+func sidebarFixture(t *testing.T) Model {
+	t.Helper()
+	projects := []*inbox.Project{
+		{Name: "king", Tool: "claude", Dir: "/k", Status: driver.StatusWorking},
+		{Name: "omni", Tool: "opencode", Dir: "/o", Status: driver.StatusWaiting, LastMessage: "done"},
+		{Name: "akiroo", Tool: "codex", Dir: "/a", Status: driver.StatusError, LastErr: "boom"},
+	}
+	in := inbox.New(projects, map[string]driver.Driver{}, filepath.Join(t.TempDir(), "s.json"))
+	m := New(in, "")
+	m.width, m.height = 100, 30
+	return m
+}
+
+// A failed project has to show why, or the ✗ is a fact with no cause attached.
+func TestSidebarShowsTheErrorReason(t *testing.T) {
+	m := sidebarFixture(t)
+	joined := strings.Join(m.buildSidebarLines(m.inbox.Snapshot(), 24), "\n")
+	if !strings.Contains(joined, "boom") {
+		t.Errorf("the error reason never appears:\n%s", joined)
 	}
 }

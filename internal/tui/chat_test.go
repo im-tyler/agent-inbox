@@ -119,3 +119,33 @@ func TestStripDirectivesCanEmptyAMessage(t *testing.T) {
 		t.Errorf("got %q, want empty", got)
 	}
 }
+
+// A count cut to "2 waitin" is not a number. At the sidebar's narrowest the
+// parts get a row each rather than being truncated onto one.
+func TestFleetSummaryWrapsRatherThanTruncates(t *testing.T) {
+	narrow := fleetSummary(4, 2, 2, 18)
+	if len(narrow) != 3 {
+		t.Fatalf("got %v, want the parts split across rows", narrow)
+	}
+	for _, ln := range narrow {
+		if lipgloss.Width(ln) > 18 {
+			t.Errorf("%q is wider than the sidebar", ln)
+		}
+	}
+	// With room, one line is tidier than three.
+	if wide := fleetSummary(4, 2, 2, 40); len(wide) != 2 {
+		t.Errorf("got %v, want two rows when it fits", wide)
+	}
+}
+
+// The count includes the king. A total that silently excluded it never
+// matched the rows drawn above it.
+func TestFleetSummaryCountsTheKing(t *testing.T) {
+	if got := fleetSummary(4, 0, 0, 40); got[0] != "4 projects" {
+		t.Errorf("got %q, want 4 projects", got[0])
+	}
+	// Nothing in flight means no second line at all.
+	if got := fleetSummary(4, 0, 0, 40); len(got) != 1 {
+		t.Errorf("got %v, want just the total", got)
+	}
+}
