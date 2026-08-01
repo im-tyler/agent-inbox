@@ -12,17 +12,19 @@ import (
 // set; Kind "claude" needs neither.
 type SourceConfig struct {
 	Name     string   `json:"name"`
-	Kind     string   `json:"kind,omitempty"` // "claude" | "exec" | "http" (inferred when empty)
+	Kind     string   `json:"kind,omitempty"` // claude | opencode | exec | http (inferred when empty)
 	Command  []string `json:"command,omitempty"`
 	Dir      string   `json:"dir,omitempty"`
 	URL      string   `json:"http,omitempty"`
 	TokenEnv string   `json:"token_env,omitempty"`
 	Disabled bool     `json:"disabled,omitempty"`
 
-	// Claude-only knobs. Root is where transcripts live (for branch/prompt
-	// enrichment); Bin overrides the claude executable.
+	// Bin overrides the source's executable (claude, opencode, …).
+	Bin string `json:"bin,omitempty"`
+	// Claude-only: where transcripts live, for branch/last-prompt enrichment.
 	Root string `json:"root,omitempty"`
-	Bin  string `json:"bin,omitempty"`
+	// OpenCode-only: path to opencode's SQLite database.
+	OpenCodeDB string `json:"opencode_db,omitempty"`
 }
 
 type Config struct {
@@ -65,6 +67,9 @@ func Load(path string) (Config, error) {
 
 func Default() Config {
 	cfg := Config{Sources: []SourceConfig{{Name: "claude-code", Kind: "claude"}}}
+	if _, err := exec.LookPath("opencode"); err == nil {
+		cfg.Sources = append(cfg.Sources, SourceConfig{Name: "opencode", Kind: "opencode"})
+	}
 	if path, err := exec.LookPath("teploy-ship"); err == nil {
 		cfg.Sources = append(cfg.Sources, SourceConfig{
 			Name:    "teploy-ship",
@@ -96,6 +101,8 @@ func (c Config) Build() []Source {
 		switch kind {
 		case "claude":
 			out = append(out, Claude{Root: s.Root, Bin: s.Bin})
+		case "opencode":
+			out = append(out, OpenCode{Bin: s.Bin, DB: s.OpenCodeDB})
 		case "exec":
 			if len(s.Command) == 0 {
 				continue
