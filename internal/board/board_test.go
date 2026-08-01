@@ -122,8 +122,16 @@ func TestListViewLeadsWithTheCountThatMattersAndMarksTheCursor(t *testing.T) {
 	if !strings.Contains(out, "2 waiting on you") {
 		t.Fatalf("header should lead with the decision count:\n%s", out)
 	}
-	if !strings.Contains(out, "decision") || !strings.Contains(out, "info") {
+	if !strings.Contains(out, "decision") {
 		t.Fatalf("rows should carry their attention band:\n%s", out)
+	}
+	// Sessions that want nothing are hidden by default — a list of twelve
+	// running things is the pane-switching problem wearing a list.
+	if strings.Contains(out, "Engine performance instrumentation") {
+		t.Fatalf("running items should be hidden by default:\n%s", out)
+	}
+	if !strings.Contains(out, "a show 1 running") {
+		t.Fatalf("the hidden count should be discoverable:\n%s", out)
 	}
 	if !strings.Contains(out, "> ") {
 		t.Fatalf("the selected row should be marked:\n%s", out)
@@ -173,3 +181,33 @@ func TestAFailingSourceIsReportedWithoutHidingTheList(t *testing.T) {
 type errTest struct{}
 
 func (errTest) Error() string { return "dash is unreachable" }
+
+func TestShowAllRevealsRunningSessionsAndTheHelpFlips(t *testing.T) {
+	out := populated().SetShowAll(true).View()
+	if !strings.Contains(out, "Engine performance instrumentation") {
+		t.Fatalf("--all should reveal running sessions:\n%s", out)
+	}
+	if !strings.Contains(out, "a hide running") {
+		t.Fatalf("the toggle should offer the way back:\n%s", out)
+	}
+}
+
+func TestAnInboxWithNothingWaitingSaysSoRatherThanLookingEmpty(t *testing.T) {
+	m := New(nil)
+	m.loading = false
+	m.items = []feed.Item{{ID: "a", Title: "busy thing", State: feed.StateRunning, Attention: feed.AttentionInfo}}
+	out := m.View()
+	// "empty" and "nothing needs you, three are running" are different facts.
+	if !strings.Contains(out, "nothing needs you — 1 running") {
+		t.Fatalf("got:\n%s", out)
+	}
+}
+
+func TestSelectionTracksTheVisibleListNotTheFullOne(t *testing.T) {
+	m := populated()
+	m.cursor = 1
+	item, ok := m.selected()
+	if !ok || item.ID != "sess-1" {
+		t.Fatalf("cursor must index the filtered list, got %+v", item)
+	}
+}

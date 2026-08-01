@@ -22,12 +22,14 @@ import (
 func runInbox(argv []string) {
 	fs := flag.NewFlagSet("inbox", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "print the merged feed as JSON instead of opening the UI")
+	all := fs.Bool("all", false, "also list sessions that are merely running")
 	cfgPath := fs.String("sources", sources.ConfigPath(), "path to sources.json")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `agent-inbox inbox — what is waiting on you, across every source
 
 Usage:
-  agent-inbox inbox              open the reader
+  agent-inbox inbox              what needs you
+  agent-inbox inbox --all        everything, including sessions just running
   agent-inbox inbox --json       merged teploy.inbox/v1 feed on stdout
 
 Sources come from %s. With no such file, the default is your local Claude Code
@@ -70,7 +72,7 @@ Flags:
 		return
 	}
 
-	if err := board.Run(built); err != nil {
+	if err := board.Run(built, *all); err != nil {
 		fmt.Fprintf(os.Stderr, "inbox: %v\n", err)
 		os.Exit(1)
 	}

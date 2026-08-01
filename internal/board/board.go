@@ -71,6 +71,11 @@ type Model struct {
 	lastErr  error
 	loading  bool
 	quitting bool
+
+	// showAll includes everything that is merely happening. Off by default:
+	// an inbox of twelve sessions that want nothing is the pane-switching
+	// problem again, wearing a list.
+	showAll bool
 }
 
 func New(srcs []sources.Source) Model {
@@ -78,6 +83,24 @@ func New(srcs []sources.Source) Model {
 	in.Prompt = "> "
 	in.CharLimit = 500
 	return Model{srcs: srcs, input: in, loading: true}
+}
+
+// SetShowAll starts the board with everything visible.
+func (m Model) SetShowAll(all bool) Model { m.showAll = all; return m }
+
+// visible is what the list renders: only what wants something from you,
+// unless you ask for the rest.
+func (m Model) visible() []feed.Item {
+	if m.showAll {
+		return m.items
+	}
+	out := make([]feed.Item, 0, len(m.items))
+	for _, item := range m.items {
+		if item.Attention != feed.AttentionInfo {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func (m Model) Init() tea.Cmd {
@@ -99,10 +122,11 @@ func (m Model) load() tea.Cmd {
 }
 
 func (m Model) selected() (feed.Item, bool) {
-	if m.cursor < 0 || m.cursor >= len(m.items) {
+	items := m.visible()
+	if m.cursor < 0 || m.cursor >= len(items) {
 		return feed.Item{}, false
 	}
-	return m.items[m.cursor], true
+	return items[m.cursor], true
 }
 
 // run executes an action's argv directly — no shell is involved, so a
@@ -185,8 +209,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case loadedMsg:
 		m.items, m.results, m.loading = msg.items, msg.results, false
-		if m.cursor >= len(m.items) {
-			m.cursor = max(0, len(m.items)-1)
+		if m.cursor >= len(m.visible()) {
+			m.cursor = max(0, len(m.visible())-1)
 		}
 		return m, nil
 
@@ -236,8 +260,11 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		m.quitting = true
 		return m, tea.Quit
+	case "a":
+		m.showAll = !m.showAll
+		m.cursor = 0
 	case "j", "down":
-		if m.cursor < len(m.items)-1 {
+		if m.cursor < len(m.visible())-1 {
 			m.cursor++
 		}
 	case "k", "up":
@@ -247,7 +274,7 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		m.cursor = 0
 	case "G":
-		m.cursor = max(0, len(m.items)-1)
+		m.cursor = max(0, len(m.visible())-1)
 	case "r":
 		m.loading = true
 		return m, m.load()
@@ -333,12 +360,17 @@ func (m Model) View() string {
 	}
 	b.WriteString("\n")
 
-	if len(m.items) == 0 && !m.loading {
-		b.WriteString(mutedStyle.Render("  inbox empty\n"))
+	items := m.visible()
+	if len(items) == 0 && !m.loading {
+		if len(m.items) > 0 {
+			b.WriteString(mutedStyle.Render(fmt.Sprintf("  nothing needs you — %d running (a to show)\n", len(m.items))))
+		} else {
+			b.WriteString(mutedStyle.Render("  inbox empty\n"))
+		}
 	}
 
 	width := maxWidth(m.width)
-	for i, item := range m.items {
+	for i, item := range items {
 		line := fmt.Sprintf("%s  %-4s  %s", tag(item.Attention), age(item), clip(item.Title, width-34))
 		suffix := mutedStyle.Render("  " + item.Origin)
 		if i == m.cursor {
@@ -363,7 +395,14 @@ func (m Model) View() string {
 		return b.String()
 	}
 
-	b.WriteString("\n" + mutedStyle.Render("j/k move · enter detail · 1-5 act · r refresh · q quit") + "\n")
+	hidden := len(m.items) - len(items)
+	help := "j/k move · enter detail · 1-5 act · r refresh · q quit"
+	if hidden > 0 {
+		help = fmt.Sprintf("a show %d running · %s", hidden, help)
+	} else if m.showAll {
+		help = "a hide running · " + help
+	}
+	b.WriteString("\n" + mutedStyle.Render(help) + "\n")
 	return b.String()
 }
 
@@ -425,7 +464,7 @@ func max(a, b int) int {
 }
 
 // Run starts the board.
-func Run(srcs []sources.Source) error {
-	_, err := tea.NewProgram(New(srcs), tea.WithAltScreen()).Run()
+func Run(srcs []sources.Source, showAll bool) error {
+	_, err := tea.NewProgram(New(srcs).SetShowAll(showAll), tea.WithAltScreen()).Run()
 	return err
 }

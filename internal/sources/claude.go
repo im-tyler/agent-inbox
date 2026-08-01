@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"agentinbox/internal/feed"
@@ -32,6 +33,8 @@ type Claude struct {
 	Bin string
 	// Timeout bounds the `claude agents --json` call.
 	Timeout time.Duration
+	// IncludeDead keeps sessions whose process is gone. Off by default.
+	IncludeDead bool
 
 	Now func() time.Time
 }
@@ -363,7 +366,11 @@ func (c Claude) item(a agentInfo, e enrichment, js jobState) feed.Item {
 	// rather than re-deriving the same fact from the transcript.
 	state := feed.StateRunning
 	prompt := ""
-	if a.State == "blocked" {
+	// `status` is live; `state` is a checkpoint that outlives it. An agent
+	// can report state:"blocked" while status says busy — it recorded a
+	// question, you never answered, and it carried on anyway. Trusting state
+	// alone listed month-old questions as though they were pending.
+	if a.State == "blocked" && a.Status != "busy" {
 		state = feed.StateBlocked
 		// What it actually wants. Best source first: Claude Code's own
 		// `needs` line, then the last thing the assistant said. The generic
@@ -452,7 +459,32 @@ func (c Claude) Fetch(ctx context.Context) (feed.Feed, error) {
 	}
 	f := feed.Feed{Schema: feed.Schema, Items: make([]feed.Item, 0, len(agents))}
 	for _, a := range agents {
+		if !c.alive(a) {
+			continue
+		}
 		f.Items = append(f.Items, c.item(a, c.enrich(a.SessionID), c.job(a.ID)))
 	}
 	return f, nil
+}
+
+// alive reports whether a session actually exists right now.
+//
+// `claude agents --json` also returns agents whose process is long gone: they
+// keep whatever state they last recorded, so a question asked six weeks ago
+// still reads as "blocked". Those have no pid at all. A pid that no longer
+// resolves means the same thing. Either way it is not waiting on you — it is
+// over, and listing it as a decision is how the list fills with ghosts.
+func (c Claude) alive(a agentInfo) bool {
+	if c.IncludeDead {
+		return true
+	}
+	if a.PID <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(a.PID)
+	if err != nil {
+		return false
+	}
+	// Signal 0 checks for existence without touching the process.
+	return proc.Signal(syscall.Signal(0)) == nil
 }

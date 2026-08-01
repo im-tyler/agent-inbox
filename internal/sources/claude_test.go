@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,9 @@ func claude(t *testing.T, agentsJSON string) Claude {
 	t.Helper()
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "claude")
+	// Fixtures name this process so the liveness check passes; a session
+	// whose pid is gone is deliberately dropped.
+	agentsJSON = strings.ReplaceAll(agentsJSON, "__PID__", strconv.Itoa(os.Getpid()))
 	script := "#!/bin/sh\ncat <<'JSON'\n" + agentsJSON + "\nJSON\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -35,7 +39,7 @@ func fetch(t *testing.T, c Claude) []feed.Item {
 
 const blockedBg = `[{"id":"ad19117b","sessionId":"ad19117b-67a4-4ad0-a333-e39fcc756240",
   "cwd":"/repos/teploy","kind":"background","name":"resume-background-agent",
-  "status":"idle","state":"blocked","startedAt":1783971598326}]`
+  "status":"idle","state":"blocked","pid":__PID__,"startedAt":1783971598326}]`
 
 func TestClaudeCodesOwnBlockedStateIsTrustedRatherThanRederived(t *testing.T) {
 	items := fetch(t, claude(t, blockedBg))
@@ -76,7 +80,7 @@ func TestABackgroundAgentIsAttachedToNotResumed(t *testing.T) {
 
 func TestABusySessionIsRunningAndOffersNothing(t *testing.T) {
 	items := fetch(t, claude(t, `[{"sessionId":"s1","cwd":"/repos/neutron","kind":"interactive",
-	  "name":"neutron-79","status":"busy","startedAt":1784915267440}]`))
+	  "name":"neutron-79","status":"busy","pid":__PID__,"startedAt":1784915267440}]`))
 	if items[0].State != feed.StateRunning {
 		t.Fatalf("a busy session is running, got %q", items[0].State)
 	}
@@ -88,7 +92,7 @@ func TestABusySessionIsRunningAndOffersNothing(t *testing.T) {
 func TestBackgroundAndInteractiveBlocksReadDifferently(t *testing.T) {
 	bg := fetch(t, claude(t, blockedBg))[0]
 	inter := fetch(t, claude(t, `[{"sessionId":"s1","cwd":"/repos/x","kind":"interactive",
-	  "name":"x","state":"blocked"}]`))[0]
+	  "name":"x","state":"blocked","pid":__PID__}]`))[0]
 
 	if !strings.Contains(bg.Needs.Prompt, "Background agent") {
 		t.Fatalf("a background block should say so, got %q", bg.Needs.Prompt)
@@ -99,7 +103,7 @@ func TestBackgroundAndInteractiveBlocksReadDifferently(t *testing.T) {
 }
 
 func TestTitleFallsBackToTheProjectWhenUnnamed(t *testing.T) {
-	items := fetch(t, claude(t, `[{"sessionId":"s1","cwd":"/repos/akiroo","kind":"background"}]`))
+	items := fetch(t, claude(t, `[{"sessionId":"s1","cwd":"/repos/akiroo","kind":"background","pid":__PID__}]`))
 	if items[0].Title != "session in akiroo" {
 		t.Fatalf("got %q", items[0].Title)
 	}
@@ -114,7 +118,7 @@ func TestSinceFallsBackToStartedAtWhenNoTranscriptIsFound(t *testing.T) {
 }
 
 func TestIDFallsBackToTheShortAgentIDWhenSessionIDIsAbsent(t *testing.T) {
-	items := fetch(t, claude(t, `[{"id":"09eac2f6","cwd":"/repos/x","kind":"background"}]`))
+	items := fetch(t, claude(t, `[{"id":"09eac2f6","cwd":"/repos/x","kind":"background","pid":__PID__}]`))
 	if items[0].ID != "09eac2f6" {
 		t.Fatalf("got %q", items[0].ID)
 	}
@@ -142,7 +146,7 @@ func TestMalformedAgentJSONIsReported(t *testing.T) {
 }
 
 func TestEnrichmentAddsBranchAndLastPromptFromTheTranscript(t *testing.T) {
-	c := claude(t, `[{"sessionId":"sess-1","cwd":"/repos/akiroo","kind":"background","name":"Polish the UI","state":"blocked"}]`)
+	c := claude(t, `[{"sessionId":"sess-1","cwd":"/repos/akiroo","kind":"background","name":"Polish the UI","state":"blocked","pid":__PID__}]`)
 	dir := filepath.Join(c.Root, "-repos-akiroo")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -262,5 +266,41 @@ func TestAMissingJobStateFallsBackRatherThanBlanking(t *testing.T) {
 	}
 	if item.Context["did"] != "" {
 		t.Fatalf("no job state means no did, got %q", item.Context["did"])
+	}
+}
+
+func TestASessionWhoseProcessIsGoneIsDroppedNotListedAsWaiting(t *testing.T) {
+	// `claude agents --json` keeps returning agents whose process died, still
+	// carrying whatever state they last recorded. That is how a question
+	// asked six weeks ago shows up as a pending decision.
+	noPID := `[{"id":"old","sessionId":"s-old","cwd":"/repos/x","kind":"background","state":"blocked"}]`
+	if got := len(fetch(t, claude(t, noPID))); got != 0 {
+		t.Fatalf("an agent with no pid is over, got %d items", got)
+	}
+
+	deadPID := `[{"id":"old","sessionId":"s-old","cwd":"/repos/x","kind":"background","state":"blocked","pid":2147483}]`
+	if got := len(fetch(t, claude(t, deadPID))); got != 0 {
+		t.Fatalf("a pid that no longer resolves is over, got %d items", got)
+	}
+
+	c := claude(t, noPID)
+	c.IncludeDead = true
+	if got := len(fetch(t, c)); got != 1 {
+		t.Fatalf("IncludeDead should keep it, got %d", got)
+	}
+}
+
+func TestABlockedStateIsIgnoredWhileTheSessionIsBusy(t *testing.T) {
+	// state is a checkpoint that outlives the question; status is live. An
+	// agent that recorded a question, never got an answer, and carried on is
+	// working — not waiting on you.
+	busyBlocked := `[{"id":"b","sessionId":"s1","cwd":"/repos/x","kind":"background",
+	  "state":"blocked","status":"busy","pid":__PID__}]`
+	item := fetch(t, claude(t, busyBlocked))[0]
+	if item.State == feed.StateBlocked {
+		t.Fatalf("a busy session is running, got %q", item.State)
+	}
+	if item.Needs != nil {
+		t.Fatalf("a busy session is not asking you anything, got %+v", item.Needs)
 	}
 }
