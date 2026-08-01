@@ -3,6 +3,9 @@ package board
 import (
 	"strings"
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"agentinbox/internal/feed"
 	"agentinbox/internal/sources"
@@ -209,5 +212,111 @@ func TestSelectionTracksTheVisibleListNotTheFullOne(t *testing.T) {
 	item, ok := m.selected()
 	if !ok || item.ID != "sess-1" {
 		t.Fatalf("cursor must index the filtered list, got %+v", item)
+	}
+}
+
+func sendableItem(id, label string) feed.Item {
+	return feed.Item{
+		Origin: "opencode", Source: "opencode", ID: id, State: feed.StateBlocked,
+		Attention: feed.AttentionDecision, Title: id,
+		Needs: &feed.Needs{Prompt: "waiting", Actions: []feed.Action{
+			{Label: label, Run: []string{"opencode", "run", "-s", id, "{message}"}},
+		}},
+	}
+}
+
+func TestSendableRecognisesReplyAndSendButNotAttach(t *testing.T) {
+	if _, ok := sendable(sendableItem("a", "reply")); !ok {
+		t.Fatal("reply is a delivery action")
+	}
+	if _, ok := sendable(sendableItem("b", "send")); !ok {
+		t.Fatal("send is a delivery action")
+	}
+	// attach opens a session for a human; it delivers nothing.
+	if _, ok := sendable(sendableItem("c", "attach")); ok {
+		t.Fatal("attach must not count as sendable")
+	}
+	if _, ok := sendable(feed.Item{State: feed.StateRunning}); ok {
+		t.Fatal("an item with no needs is not sendable")
+	}
+}
+
+func TestMarkedSendableCountsOnlyWhatCanActuallyReceive(t *testing.T) {
+	m := New(nil)
+	reachable := sendableItem("a", "reply")
+	// A Claude Code session whose pane never resolved: markable, but a
+	// broadcast cannot deliver to it.
+	unreachable := sendableItem("b", "attach")
+
+	m.items = []feed.Item{reachable, unreachable}
+	m.marked[reachable.Key()] = true
+	m.marked[unreachable.Key()] = true
+
+	if got := m.markedSendable(); got != 1 {
+		t.Fatalf("got %d, want 1 — an unreachable mark must not inflate the count", got)
+	}
+}
+
+func TestSpaceTogglesAMarkAndBroadcastRefusesWithNothingReachable(t *testing.T) {
+	m := New(nil)
+	m.loading = false
+	m.items = []feed.Item{sendableItem("a", "attach")}
+
+	updated, _ := m.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = updated.(Model)
+	if len(m.marked) != 1 {
+		t.Fatal("space should mark the selected item")
+	}
+
+	updated, _ = m.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m = updated.(Model)
+	if m.mode == modeBroadcast {
+		t.Fatal("broadcast must not open when nothing marked can receive")
+	}
+	if m.lastErr == nil {
+		t.Fatal("refusing silently is worse than saying why")
+	}
+}
+
+func TestBroadcastComposerOpensWhenSomethingIsReachable(t *testing.T) {
+	m := New(nil)
+	m.loading = false
+	m.items = []feed.Item{sendableItem("a", "reply")}
+	m.marked[m.items[0].Key()] = true
+
+	updated, _ := m.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m = updated.(Model)
+	if m.mode != modeBroadcast {
+		t.Fatalf("expected the composer, got mode %v", m.mode)
+	}
+	if !strings.Contains(m.View(), "broadcast to 1 session") {
+		t.Fatalf("composer should state the reach:\n%s", m.View())
+	}
+}
+
+func TestBroadcastResultClearsMarksAndReportsFailures(t *testing.T) {
+	m := New(nil)
+	m.loading = false
+	m.items = []feed.Item{sendableItem("a", "reply")}
+	m.marked[m.items[0].Key()] = true
+
+	updated, _ := m.Update(broadcastMsg{ok: 2, failed: 1, firstErr: errTest{}})
+	m = updated.(Model)
+	if !strings.Contains(m.sent, "sent to 2") || !strings.Contains(m.sent, "1 failed") {
+		t.Fatalf("got %q", m.sent)
+	}
+	if len(m.marked) != 0 {
+		t.Fatal("marks should clear after a send, or the next broadcast repeats it")
+	}
+}
+
+func TestRefreshIsSuspendedWhileComposingABroadcast(t *testing.T) {
+	// A list reordering under a half-typed message is how you send the
+	// wrong thing to the wrong session.
+	m := New(nil)
+	m.mode = modeBroadcast
+	_, cmd := m.Update(tickMsg(time.Now()))
+	if cmd == nil {
+		t.Fatal("the tick should still be rescheduled")
 	}
 }

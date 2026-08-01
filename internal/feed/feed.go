@@ -50,6 +50,10 @@ type Action struct {
 	// contract — local sources set it so "resume this session" starts in
 	// the right repo.
 	Dir string `json:"-"`
+	// Pane, if set, means this action types into a terminal pane instead of
+	// running a command. Local only: it exists because Claude Code accepts
+	// no message from outside, so the only way in is to simulate typing.
+	Pane string `json:"-"`
 }
 
 // Needs is present when State is Blocked: what decision is being asked for.

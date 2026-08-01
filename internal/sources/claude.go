@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"agentinbox/internal/feed"
+	"agentinbox/internal/mux"
 )
 
 // Claude reports your live Claude Code sessions.
@@ -113,7 +114,12 @@ type enrichment struct {
 	branch     string
 	lastPrompt string
 	ask        string
-	lastAt     time.Time
+	// aiTitle is what Claude Code puts in the terminal's title bar, and so
+	// the only handle for finding this session's pane: `claude agents
+	// --json` reports a slug like "neutron-79" while the pane shows the
+	// conversation topic.
+	aiTitle string
+	lastAt  time.Time
 }
 
 // askFrom reduces a final assistant message to the part that is actually a
@@ -298,6 +304,7 @@ func (c Claude) enrich(sessionID string) enrichment {
 			Type        string `json:"type"`
 			GitBranch   string `json:"gitBranch"`
 			LastPrompt  string `json:"lastPrompt"`
+			AITitle     string `json:"aiTitle"`
 			Timestamp   string `json:"timestamp"`
 			IsSidechain bool   `json:"isSidechain"`
 			Message     *struct {
@@ -312,6 +319,9 @@ func (c Claude) enrich(sessionID string) enrichment {
 		}
 		if r.LastPrompt != "" {
 			out.lastPrompt = r.LastPrompt
+		}
+		if r.AITitle != "" {
+			out.aiTitle = r.AITitle
 		}
 		// A sidechain is a subagent's turn. Its closing message is not what
 		// the session is asking you.
@@ -342,7 +352,7 @@ func truncate(s string, n int) string {
 // through the agent view, which `--cwd` filters to the right project. Forking
 // is offered alongside because it always works and does not disturb the
 // running session.
-func actionsFor(a agentInfo) []feed.Action {
+func actionsFor(a agentInfo, pane string) []feed.Action {
 	actions := []feed.Action{
 		{Label: "attach", Run: []string{"claude", "agents", "--cwd", a.Cwd}, Dir: a.Cwd},
 	}
@@ -353,10 +363,23 @@ func actionsFor(a agentInfo) []feed.Action {
 			Dir:   a.Cwd,
 		})
 	}
+	// Typing into the pane is the only way to answer a live Claude Code
+	// session — and only when exactly one pane matched. On an ambiguous
+	// match the action is withheld rather than guessed at: several panes
+	// are titled just "Claude Code", and a wrong guess sends your message
+	// to a different agent.
+	if pane != "" {
+		actions = append(actions, feed.Action{
+			Label: "send",
+			Run:   []string{"{message}"},
+			Pane:  pane,
+			Dir:   a.Cwd,
+		})
+	}
 	return actions
 }
 
-func (c Claude) item(a agentInfo, e enrichment, js jobState) feed.Item {
+func (c Claude) item(a agentInfo, e enrichment, js jobState, pane string) feed.Item {
 	project := filepath.Base(a.Cwd)
 	if project == "." || project == string(filepath.Separator) {
 		project = a.Cwd
@@ -447,7 +470,7 @@ func (c Claude) item(a agentInfo, e enrichment, js jobState) feed.Item {
 		item.ID = a.ID
 	}
 	if state == feed.StateBlocked {
-		item.Needs = &feed.Needs{Prompt: prompt, Actions: actionsFor(a)}
+		item.Needs = &feed.Needs{Prompt: prompt, Actions: actionsFor(a, pane)}
 	}
 	return item
 }
@@ -457,12 +480,31 @@ func (c Claude) Fetch(ctx context.Context) (feed.Feed, error) {
 	if err != nil {
 		return feed.Feed{}, err
 	}
+	// Panes are listed once, not per session. A missing multiplexer simply
+	// means no send action is offered.
+	var panes []mux.Pane
+	if m := mux.Detect(); m != nil {
+		panes, _ = m.Panes(ctx)
+	}
+
 	f := feed.Feed{Schema: feed.Schema, Items: make([]feed.Item, 0, len(agents))}
 	for _, a := range agents {
 		if !c.alive(a) {
 			continue
 		}
-		f.Items = append(f.Items, c.item(a, c.enrich(a.SessionID), c.job(a.ID)))
+		e := c.enrich(a.SessionID)
+		pane := ""
+		if len(panes) > 0 {
+			// tmux reports a working directory, which identifies a pane far
+			// more reliably than its title; zellij reports neither pid nor
+			// path, so there the title is all there is.
+			if p, ok := mux.FindByPath(panes, a.Cwd); ok {
+				pane = p.ID
+			} else if p, ok := mux.FindByTitle(panes, e.aiTitle); ok {
+				pane = p.ID
+			}
+		}
+		f.Items = append(f.Items, c.item(a, e, c.job(a.ID), pane))
 	}
 	return f, nil
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"agentinbox/internal/feed"
+	"agentinbox/internal/mux"
 	"agentinbox/internal/sources"
 )
 
@@ -43,6 +44,7 @@ const (
 	modeList mode = iota
 	modeDetail
 	modeInput
+	modeBroadcast
 )
 
 type loadedMsg struct {
@@ -53,6 +55,13 @@ type loadedMsg struct {
 type tickMsg time.Time
 
 type ranMsg struct{ err error }
+
+// broadcastMsg reports a finished multi-session send.
+type broadcastMsg struct {
+	ok       int
+	failed   int
+	firstErr error
+}
 
 type Model struct {
 	srcs    []sources.Source
@@ -76,13 +85,18 @@ type Model struct {
 	// an inbox of twelve sessions that want nothing is the pane-switching
 	// problem again, wearing a list.
 	showAll bool
+
+	// marked holds items selected for a broadcast, keyed by Item.Key().
+	marked map[string]bool
+	// sent reports the outcome of the last broadcast.
+	sent string
 }
 
 func New(srcs []sources.Source) Model {
 	in := textinput.New()
 	in.Prompt = "> "
 	in.CharLimit = 500
-	return Model{srcs: srcs, input: in, loading: true}
+	return Model{srcs: srcs, input: in, loading: true, marked: map[string]bool{}}
 }
 
 // SetShowAll starts the board with everything visible.
@@ -137,6 +151,22 @@ func run(action feed.Action, fills []string) tea.Cmd {
 	if len(argv) == 0 {
 		return func() tea.Msg { return ranMsg{err: fmt.Errorf("action %q has no command", action.Label)} }
 	}
+	// A pane action types into a terminal rather than running a command.
+	// It stays in the background: unlike attaching, there is nothing for the
+	// user to look at, and taking over the screen to type one line would be
+	// worse than not.
+	if action.Pane != "" {
+		text := strings.Join(argv, " ")
+		return func() tea.Msg {
+			m := mux.Detect()
+			if m == nil {
+				return ranMsg{err: fmt.Errorf("no zellij or tmux session to type into")}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			return ranMsg{err: m.Send(ctx, action.Pane, text)}
+		}
+	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = action.Dir
 	return tea.ExecProcess(cmd, func(err error) tea.Msg { return ranMsg{err: err} })
@@ -187,6 +217,97 @@ func (m Model) actionsFor(item feed.Item) []feed.Action {
 	return item.Needs.Actions
 }
 
+// sendable returns the action that delivers a message to this item, if it has
+// one. opencode and codex accept a prompt into an existing session; a Claude
+// Code session can only be typed into, and only when its pane resolved
+// unambiguously. Items with neither are skipped by a broadcast rather than
+// silently counted as delivered.
+func sendable(item feed.Item) (feed.Action, bool) {
+	if item.Needs == nil {
+		return feed.Action{}, false
+	}
+	for _, a := range item.Needs.Actions {
+		if a.Label == "reply" || a.Label == "send" {
+			return a, true
+		}
+	}
+	return feed.Action{}, false
+}
+
+// broadcast delivers text to every marked item that can receive it,
+// concurrently. Each send is a model turn that can run for minutes, so doing
+// them in sequence would block the UI for as long as the slowest one.
+func (m Model) broadcast(text string) tea.Cmd {
+	var targets []feed.Action
+	for _, item := range m.items {
+		if !m.marked[item.Key()] {
+			continue
+		}
+		if a, ok := sendable(item); ok {
+			targets = append(targets, a)
+		}
+	}
+	return func() tea.Msg {
+		type result struct{ err error }
+		results := make(chan result, len(targets))
+		for _, a := range targets {
+			go func(a feed.Action) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				defer cancel()
+				results <- result{err: deliver(ctx, a, text)}
+			}(a)
+		}
+		msg := broadcastMsg{}
+		for range targets {
+			if r := <-results; r.err != nil {
+				msg.failed++
+				if msg.firstErr == nil {
+					msg.firstErr = r.err
+				}
+			} else {
+				msg.ok++
+			}
+		}
+		return msg
+	}
+}
+
+// deliver performs one send, by typing into a pane or by running the action's
+// command. Unlike the interactive path this never takes over the terminal —
+// a broadcast is fire-and-report.
+func deliver(ctx context.Context, action feed.Action, text string) error {
+	if action.Pane != "" {
+		m := mux.Detect()
+		if m == nil {
+			return fmt.Errorf("no zellij or tmux session to type into")
+		}
+		return m.Send(ctx, action.Pane, text)
+	}
+	argv := substitute(action.Run, []string{text})
+	if len(argv) == 0 {
+		return fmt.Errorf("action %q has no command", action.Label)
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Dir = action.Dir
+	return cmd.Run()
+}
+
+// markedSendable counts marked items that can actually receive a message.
+// Marking a Claude Code session whose pane did not resolve is allowed — it
+// just cannot be part of a broadcast, and saying so beats a silent no-op.
+func (m Model) markedSendable() int {
+	n := 0
+	for _, item := range m.items {
+		if !m.marked[item.Key()] {
+			continue
+		}
+		if _, ok := sendable(item); ok {
+			n++
+		}
+	}
+	return n
+}
+
 func (m Model) startAction(action feed.Action) (Model, tea.Cmd) {
 	needed := placeholders(action)
 	if len(needed) == 0 {
@@ -217,7 +338,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Never refetch under an open prompt: the list reordering beneath a
 		// half-typed decision is how you approve the wrong thing.
-		if m.mode == modeInput {
+		if m.mode == modeInput || m.mode == modeBroadcast {
 			return m, tick()
 		}
 		return m, tea.Batch(m.load(), tick())
@@ -227,6 +348,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = modeList
 		return m, m.load()
 
+	case broadcastMsg:
+		m.sent = fmt.Sprintf("sent to %d", msg.ok)
+		if msg.failed > 0 {
+			m.sent = fmt.Sprintf("sent to %d, %d failed", msg.ok, msg.failed)
+			m.lastErr = msg.firstErr
+		}
+		m.marked = map[string]bool{}
+		return m, m.load()
+
 	case tea.KeyMsg:
 		return m.key(msg)
 	}
@@ -234,6 +364,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeBroadcast {
+		switch msg.Type {
+		case tea.KeyEsc:
+			m.mode = modeList
+			return m, nil
+		case tea.KeyEnter:
+			text := strings.TrimSpace(m.input.Value())
+			if text == "" {
+				m.mode = modeList
+				return m, nil
+			}
+			m.mode = modeList
+			m.sent = "sending…"
+			return m, m.broadcast(text)
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
 	if m.mode == modeInput {
 		switch msg.Type {
 		case tea.KeyEsc:
@@ -263,6 +412,25 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.showAll = !m.showAll
 		m.cursor = 0
+	case " ":
+		if item, ok := m.selected(); ok {
+			if m.marked[item.Key()] {
+				delete(m.marked, item.Key())
+			} else {
+				m.marked[item.Key()] = true
+			}
+		}
+	case "b":
+		if m.markedSendable() == 0 {
+			m.lastErr = fmt.Errorf("nothing marked that can receive a message (space to mark)")
+			break
+		}
+		m.mode = modeBroadcast
+		m.sent = ""
+		m.input.SetValue("")
+		m.input.Placeholder = "message to every marked session"
+		m.input.Focus()
+		return m, textinput.Blink
 	case "j", "down":
 		if m.cursor < len(m.visible())-1 {
 			m.cursor++
@@ -373,10 +541,20 @@ func (m Model) View() string {
 	for i, item := range items {
 		line := fmt.Sprintf("%s  %-4s  %s", tag(item.Attention), age(item), clip(item.Title, width-34))
 		suffix := mutedStyle.Render("  " + item.Origin)
+		mark := " "
+		if m.marked[item.Key()] {
+			if _, ok := sendable(item); ok {
+				mark = "*"
+			} else {
+				// Marked but unreachable: shown so it is obvious why the
+				// broadcast count is lower than the number of marks.
+				mark = "-"
+			}
+		}
 		if i == m.cursor {
-			b.WriteString(selectedStyle.Render("> "+line) + suffix + "\n")
+			b.WriteString(selectedStyle.Render(mark+"> "+line) + suffix + "\n")
 		} else {
-			b.WriteString("  " + line + suffix + "\n")
+			b.WriteString(mark + "  " + line + suffix + "\n")
 		}
 		// The ask, inline. A list that only says "blocked" still costs you a
 		// context switch per row to find out what each one wants.
@@ -394,9 +572,18 @@ func (m Model) View() string {
 		b.WriteString(mutedStyle.Render("enter to confirm · esc to cancel") + "\n")
 		return b.String()
 	}
+	if m.mode == modeBroadcast {
+		b.WriteString("\n" + titleStyle.Render(fmt.Sprintf("broadcast to %d session(s)", m.markedSendable())) + "\n")
+		b.WriteString(m.input.View() + "\n")
+		b.WriteString(mutedStyle.Render("enter to send · esc to cancel") + "\n")
+		return b.String()
+	}
 
+	if m.sent != "" {
+		b.WriteString("\n" + titleStyle.Render(m.sent) + "\n")
+	}
 	hidden := len(m.items) - len(items)
-	help := "j/k move · enter detail · 1-5 act · r refresh · q quit"
+	help := "j/k move · space mark · b broadcast · enter detail · 1-5 act · r refresh · q quit"
 	if hidden > 0 {
 		help = fmt.Sprintf("a show %d running · %s", hidden, help)
 	} else if m.showAll {
