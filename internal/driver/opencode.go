@@ -85,8 +85,7 @@ func (o *OpenCode) Send(ctx context.Context, dir, sessionID, prompt string) Resu
 	// Try export with retry — the session may not be immediately exportable.
 	text, errMsg, err := exportWithRetry(ctx, sessionID, 3)
 	if err != nil {
-		runText := strings.TrimSpace(string(runOut))
-		if runText != "" {
+		if runText := cleanRunOutput(string(runOut)); runText != "" {
 			return Result{SessionID: sessionID, Final: runText, Status: StatusWaiting}
 		}
 		return Result{SessionID: sessionID, Status: StatusError, Err: err}
@@ -197,4 +196,23 @@ func exportLastAssistant(ctx context.Context, sessionID string) (text, errMsg st
 		return strings.TrimSpace(sb.String()), errMsg, nil
 	}
 	return "", "", fmt.Errorf("opencode: no assistant message found in session %q", sessionID)
+}
+
+// cleanRunOutput tidies raw `opencode run` stdout for the fallback path taken
+// when export fails. opencode opens with a "> build · model" banner meant for
+// someone watching a terminal; in a chat transcript it reads as the agent's
+// first words.
+//
+// Only the banner goes. The "!" and "✗" lines stay: when the fallback is what
+// you are reading, a rejected tool call is usually the reason the turn went
+// the way it did, and dropping it would leave an inexplicable answer.
+func cleanRunOutput(s string) string {
+	lines := strings.Split(s, "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+		lines = lines[1:]
+	}
+	if len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[0]), "> ") {
+		lines = lines[1:]
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }

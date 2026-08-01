@@ -28,6 +28,8 @@ Working name. Phase 1 = Claude + OpenCode.
 | StreamingDriver interface (live activity) | done — Claude adapter streams; UI shows `working:Bash` / `working:typing` |
 | Per-project message history (last 100 turns) | done |
 | TUI dashboard (Bubble Tea) | done — list view, detail view with history, interactive attach |
+| Session inbox (`i`) | done — every session on the machine in one list; `n` adopts a row as a project. Also headless via `agent-inbox inbox [--json]` |
+| King round loop | done — one instruction fans out, every reply comes back, the king summarizes |
 | Legacy REPL | done, available via `--repl` flag |
 | Stop-hook bridge + live notify | **done, live-verified** (Claude only — OpenCode has no Stop hook; Codex hook system exists but not wired) |
 | CI + goreleaser + GitHub releases | done |
@@ -48,11 +50,21 @@ Working name. Phase 1 = Claude + OpenCode.
 
 ```
 main.go                 entry: dispatches to TUI (default), legacy REPL (--repl), or hook
+inbox_cmd.go            `agent-inbox inbox` — the reader headless, or as --json
 internal/config         config.json (projects + per-tool settings)
 internal/inbox          project state, mutex-guarded; background Send; persistence
-internal/driver         Driver interface + adapters (mock, claude, opencode)
+internal/driver         Driver interface + adapters (mock, claude, opencode, codex)
+internal/feed           the teploy.inbox/v1 item shape, merge and sort
+internal/sources        session discovery per tool (claude, opencode, codex)
+internal/mux            zellij/tmux pane detection and injection
+internal/board          the inbox reader UI — standalone, or hosted by the TUI
 internal/tui            Bubble Tea dashboard (model/view/update, styles, run)
 ```
+
+The reader is one UI with two entry points, not two programs: `i` inside the
+dashboard hosts `internal/board` as a view, and `agent-inbox inbox` runs the
+same model standalone for a terminal or a pipe. A second list of the same
+sessions would only have drifted from the first.
 
 The only vendor-specific code lives in `internal/driver/*.go`. Each adapter
 implements:
