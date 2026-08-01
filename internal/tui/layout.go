@@ -50,13 +50,28 @@ var (
 	fleetStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("51")). // bright cyan
 			Bold(true)
+
+	// Chat speakers. You and the agent need to be told apart at a glance
+	// while scrolling, which is all the color here is for.
+	userStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("42")). // green
+			Bold(true)
+
+	assistantStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("39")). // blue
+			Bold(true)
 )
 
-// statusBadge renders a status as a colored pill badge.
-func statusBadge(s driver.Status, activity string) string {
+// statusBadge renders a status as a colored pill badge. A working badge leads
+// with the spinner frame, so a stalled project is distinguishable from a busy
+// one without reading anything.
+func statusBadge(s driver.Status, activity, frame string) string {
 	text := string(s)
-	if activity != "" && s == driver.StatusWorking {
-		text = string(s) + ":" + activity
+	if s == driver.StatusWorking {
+		text = frame + " " + string(s)
+		if activity != "" {
+			text = frame + " " + activity
+		}
 	}
 	switch s {
 	case driver.StatusIdle:
@@ -69,6 +84,20 @@ func statusBadge(s driver.Status, activity string) string {
 		return badgeError.Render(text)
 	}
 	return text
+}
+
+// statusGlyph is the one-column form of a status, for the sidebar — where a
+// padded pill costs a third of the width and gets truncated to "wa".
+func statusGlyph(s driver.Status, frame string) string {
+	switch s {
+	case driver.StatusWorking:
+		return workingStyle.Render(frame)
+	case driver.StatusWaiting:
+		return waitingStyle.Render("●")
+	case driver.StatusError:
+		return errorStyle.Render("✗")
+	}
+	return mutedStyle.Render("·")
 }
 
 // renderFrame wraps body content in a rounded border with a title line

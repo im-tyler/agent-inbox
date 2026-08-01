@@ -107,7 +107,7 @@ func (m Model) renderMain() string {
 	// Contextual footer based on focus.
 	var footerText string
 	if m.focusSidebar {
-		footerText = "  ↑↓ navigate  enter detail  n new  d delete  t tool  a attach  x cancel  tab chat"
+		footerText = "  ↑↓ navigate  enter detail  i inbox  n new  d delete  t tool  a attach  x cancel  tab chat"
 	} else if m.helpMode {
 		footerText = "  ? close help"
 	} else {
@@ -154,59 +154,79 @@ func (m Model) buildConversationLines(snap []inbox.Project, width int) []string 
 	trunc := lipgloss.NewStyle().MaxWidth(maxW)
 
 	var lines []string
-	lines = append(lines, trunc.Render(headerStyle.Render(fmt.Sprintf("king (%s) %s",
-		king.Tool, statusBadge(king.Status, king.Activity)))))
+	lines = append(lines, trunc.Render(headerStyle.Render("king")+mutedStyle.Render("  "+king.Tool)))
 	lines = append(lines, "")
 
 	for _, msg := range king.History {
-		label := msg.Role
-		style := mutedStyle
-		switch msg.Role {
-		case "user":
-			label = "you"
-			style = workingStyle
-		case "assistant":
-			label = king.Tool
-			style = waitingStyle
-		case "error":
-			label = "error"
-			style = errorStyle
-		case "system":
-			label = "system"
-			style = mutedStyle
-		default:
-			// Fleet project responses (role = project name like "omilator").
-			// Shown with a ▸ prefix and cyan styling to distinguish from
-			// the king's own responses.
-			label = "▸ " + msg.Role
-			style = fleetStyle
-		}
-		ts := msg.Timestamp.Format(time.Kitchen)
-		// Header is short — truncate is fine.
-		lines = append(lines, trunc.Render(style.Render(fmt.Sprintf("[%s %s]", label, ts))))
-		// Content — word-wrap to maxW so long messages break into
-		// multiple visual lines at word boundaries instead of being
-		// truncated off the right edge.
-		for _, ln := range strings.Split(msg.Content, "\n") {
-			wrapped := wordwrap.String(ln, maxW)
-			for _, w := range strings.Split(wrapped, "\n") {
-				lines = append(lines, w)
-			}
-		}
+		glyph, label, style := speaker(msg.Role, king.Tool)
+		lines = append(lines, speakerLine(glyph, label, msg.Timestamp.Format(time.Kitchen), style, maxW))
+		lines = append(lines, wrapBody(msg.Content, maxW)...)
 		lines = append(lines, "")
 	}
 
-	if king.Status == driver.StatusWorking && king.StreamingText != "" {
-		lines = append(lines, trunc.Render(workingStyle.Render("─ generating ─")))
-		for _, ln := range strings.Split(king.StreamingText, "\n") {
-			wrapped := wordwrap.String(ln, maxW)
-			for _, w := range strings.Split(wrapped, "\n") {
-				lines = append(lines, w)
-			}
+	// A turn in flight gets the same speaker line as a finished one, so the
+	// reply appears to grow in place rather than jumping to a new shape when
+	// it lands.
+	if king.Status == driver.StatusWorking {
+		lines = append(lines, speakerLine(m.frame(), king.Tool, workingLabel(king.Activity), workingStyle, maxW))
+		if king.StreamingText != "" {
+			lines = append(lines, wrapBody(king.StreamingText, maxW)...)
 		}
 	}
 
 	return lines
+}
+
+// speaker maps a history role to how it is drawn. Roles that are not one of
+// the four known kinds are fleet projects answering the king by name.
+func speaker(role, tool string) (glyph, label string, style lipgloss.Style) {
+	switch role {
+	case "user":
+		return "›", "you", userStyle
+	case "assistant":
+		return "●", tool, assistantStyle
+	case "error":
+		return "✗", "error", errorStyle
+	case "system":
+		return "·", "system", mutedStyle
+	default:
+		return "▸", role, fleetStyle
+	}
+}
+
+// speakerLine draws "‹glyph› label ............ right", the right-hand text
+// pushed to the far edge so the eye can ignore it.
+func speakerLine(glyph, label, right string, style lipgloss.Style, width int) string {
+	left := glyph + " " + label
+	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if pad < 1 {
+		pad = 1
+	}
+	return style.Render(left) + strings.Repeat(" ", pad) + mutedStyle.Render(right)
+}
+
+// working describes what the agent is doing right now, when the driver told
+// us. "working" alone is still better than a blank line.
+func workingLabel(activity string) string {
+	if activity == "" {
+		return "working"
+	}
+	return "working · " + activity
+}
+
+// wrapBody word-wraps message content and indents it under its speaker line.
+func wrapBody(content string, width int) []string {
+	inner := width - 2
+	if inner < 10 {
+		inner = 10
+	}
+	var out []string
+	for _, ln := range strings.Split(content, "\n") {
+		for _, w := range strings.Split(wordwrap.String(ln, inner), "\n") {
+			out = append(out, "  "+w)
+		}
+	}
+	return out
 }
 
 // buildSidebarLines returns the fleet sidebar as a slice of lines.
@@ -238,11 +258,6 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 		if !isKing {
 			fleetCount++
 		}
-		badge := statusBadge(p.Status, p.Activity)
-		name := p.Name
-		if len(name) > 14 {
-			name = name[:13] + "…"
-		}
 		// King gets a crown marker; fleet projects get number + cursor.
 		var marker string
 		if isKing {
@@ -256,27 +271,37 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 		if !isKing {
 			idxLabel = fmt.Sprintf("%d ", i+1)
 		}
-		entry := fmt.Sprintf("%s%s%-14s %s", marker, idxLabel, name, badge)
-		if isKing {
-			entry += mutedStyle.Render("  king")
+		// The status glyph is pinned to the right edge; the name takes
+		// whatever is left rather than a fixed column that overflows.
+		nameW := maxW - lipgloss.Width(marker+idxLabel) - 2
+		if nameW < 4 {
+			nameW = 4
 		}
+		name := truncateOneLine(p.Name, nameW)
+		entry := fmt.Sprintf("%s%s%-*s %s", marker, idxLabel, nameW, name,
+			statusGlyph(p.Status, m.frame()))
 		if m.focusSidebar && i+1 == m.sidebarCursor && !isKing {
 			lines = append(lines, trunc.Render(cursorStyle.Render(entry)))
 		} else {
 			lines = append(lines, trunc.Render(entry))
 		}
+		// A working project's activity says more than the message it is
+		// replacing, which is by definition the previous turn's.
+		sub := p.LastMessage
+		if p.Status == driver.StatusWorking && p.Activity != "" {
+			sub = p.Activity
+		}
 		if !isKing {
-			msg := truncateOneLine(p.LastMessage, maxW-4)
-			if msg != "" {
-				lines = append(lines, trunc.Render(mutedStyle.Render("  "+msg)))
+			if s := truncateOneLine(sub, maxW-4); s != "" {
+				lines = append(lines, trunc.Render(mutedStyle.Render("  "+s)))
 			}
 		}
-		fleetCount++
 	}
 
 	if fleetCount == 0 {
 		lines = append(lines, trunc.Render(mutedStyle.Render("(no projects —")))
-		lines = append(lines, trunc.Render(mutedStyle.Render(" press n to add)")))
+		lines = append(lines, trunc.Render(mutedStyle.Render(" tab, then i to")))
+		lines = append(lines, trunc.Render(mutedStyle.Render(" add from the inbox)")))
 	}
 
 	lines = append(lines, "")
@@ -314,7 +339,9 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.mainAutoScroll = true
 		m.mainScrollFromBottom = 0
-		return m, nil
+		// Start animating now rather than on the next second-tick, so the
+		// spinner appears in the same frame the message does.
+		return m, m.startSpin()
 
 	case "tab":
 		// Focus the sidebar.
@@ -423,6 +450,10 @@ func (m Model) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.np = newProjectModelInitial(cwd)
 		m.np.folder.Focus()
 		return m, textinput.Blink
+
+	case "i":
+		// The inbox: every session on the machine, and the way to take one on.
+		return m, m.openInbox()
 
 	case "d":
 		// Delete selected project.

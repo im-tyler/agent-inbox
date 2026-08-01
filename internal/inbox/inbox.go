@@ -60,10 +60,10 @@ type Inbox struct {
 
 func New(projects []*Project, drivers map[string]driver.Driver, statePath string) *Inbox {
 	return &Inbox{
-		projects: projects,
-		drivers:  drivers,
+		projects:  projects,
+		drivers:   drivers,
 		statePath: statePath,
-		cancels:  make(map[string]context.CancelFunc),
+		cancels:   make(map[string]context.CancelFunc),
 	}
 }
 
@@ -86,6 +86,22 @@ func (in *Inbox) WithConfigPath(p string) *Inbox {
 // Returns an error only for validation failures: duplicate name/dir,
 // or unknown tool.
 func (in *Inbox) AddProject(name, tool, dir string) error {
+	return in.addProject(name, tool, dir, "")
+}
+
+// AdoptProject registers a project already backed by an existing agent
+// session, so the first send resumes that conversation instead of starting a
+// fresh one. The session id is persisted in state.json, not config.json —
+// config describes which projects exist, state describes where they are.
+//
+// Only pass a session id the driver can actually resume. A Claude Code session
+// that is live right now cannot be: the CLI refuses with "currently running as
+// a background agent". Adopt the folder alone in that case.
+func (in *Inbox) AdoptProject(name, tool, dir, sessionID string) error {
+	return in.addProject(name, tool, dir, sessionID)
+}
+
+func (in *Inbox) addProject(name, tool, dir, sessionID string) error {
 	in.mu.Lock()
 	for _, p := range in.projects {
 		if p.Name == name {
@@ -102,10 +118,11 @@ func (in *Inbox) AddProject(name, tool, dir string) error {
 		return fmt.Errorf("unknown tool %q (no driver registered)", tool)
 	}
 	in.projects = append(in.projects, &Project{
-		Name:   name,
-		Tool:   tool,
-		Dir:    dir,
-		Status: driver.StatusIdle,
+		Name:      name,
+		Tool:      tool,
+		Dir:       dir,
+		SessionID: sessionID,
+		Status:    driver.StatusIdle,
 	})
 	in.mu.Unlock()
 
@@ -174,6 +191,13 @@ func (in *Inbox) Send(idx int, prompt string) error {
 // identical. For king sends, displayText is the user's original message and
 // driverText includes the injected fleet state context.
 func (in *Inbox) sendRaw(idx int, displayText, driverText string) error {
+	return in.sendInternal(idx, displayText, driverText, true)
+}
+
+// sendInternal is sendRaw with control over whether the prompt is recorded as
+// a user turn. The king's summary pass sends a prompt the user never typed;
+// showing it as their message would be a lie about who said what.
+func (in *Inbox) sendInternal(idx int, displayText, driverText string, record bool) error {
 	in.mu.Lock()
 	p, err := in.project(idx)
 	if err != nil {
@@ -193,7 +217,9 @@ func (in *Inbox) sendRaw(idx int, displayText, driverText string) error {
 	p.UpdatedAt = time.Now()
 	// Append the DISPLAY text (user's original message) to history —
 	// NOT the driverText which may include injected state context.
-	p.appendHistory(Message{Role: "user", Content: displayText, Timestamp: time.Now()})
+	if record {
+		p.appendHistory(Message{Role: "user", Content: displayText, Timestamp: time.Now()})
+	}
 	dir, sid := p.Dir, p.SessionID
 	// Cancellable context with a 5-minute timeout so a stuck CLI
 	// (rate-limited API, hung model) doesn't hang the project forever.

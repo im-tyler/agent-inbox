@@ -159,3 +159,42 @@ func TestSendAlreadyWorkingFails(t *testing.T) {
 		t.Error("Send should fail when project is already working")
 	}
 }
+
+func TestAdoptProjectCarriesSessionID(t *testing.T) {
+	tmp := t.TempDir()
+	statePath := filepath.Join(tmp, "state.json")
+	in := New(nil, map[string]driver.Driver{"mock": driver.Mock{}}, statePath)
+
+	if err := in.AdoptProject("neutron", "mock", "/repo/neutron", "sess-1"); err != nil {
+		t.Fatalf("AdoptProject: %v", err)
+	}
+	snap := in.Snapshot()
+	if len(snap) != 1 || snap[0].SessionID != "sess-1" {
+		t.Fatalf("adopted project = %+v, want session sess-1", snap)
+	}
+
+	// The session id has to survive a restart, or the next send starts a
+	// brand-new conversation and the adoption silently meant nothing.
+	b, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("state not written: %v", err)
+	}
+	var saved []Project
+	if err := json.Unmarshal(b, &saved); err != nil {
+		t.Fatalf("state unreadable: %v", err)
+	}
+	if len(saved) != 1 || saved[0].SessionID != "sess-1" {
+		t.Errorf("persisted = %+v, want session sess-1", saved)
+	}
+}
+
+func TestAddProjectHasNoSession(t *testing.T) {
+	tmp := t.TempDir()
+	in := New(nil, map[string]driver.Driver{"mock": driver.Mock{}}, filepath.Join(tmp, "state.json"))
+	if err := in.AddProject("fresh", "mock", "/repo/fresh"); err != nil {
+		t.Fatalf("AddProject: %v", err)
+	}
+	if got := in.Snapshot()[0].SessionID; got != "" {
+		t.Errorf("session = %q, want empty", got)
+	}
+}

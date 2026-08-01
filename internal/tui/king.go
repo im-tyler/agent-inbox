@@ -45,7 +45,7 @@ func (m *Model) renderKing() string {
 			if !connSet[p.Name] {
 				continue
 			}
-			badge := statusBadge(p.Status, p.Activity)
+			badge := statusBadge(p.Status, p.Activity, m.frame())
 			msg := truncateOneLine(p.LastMessage, 50)
 			if msg == "" && p.LastErr != "" {
 				msg = "err: " + truncateOneLine(p.LastErr, 40)

@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"agentinbox/internal/board"
 	"agentinbox/internal/driver"
 	"agentinbox/internal/inbox"
 )
@@ -28,7 +29,8 @@ const (
 	viewToolPicker
 	viewKing
 	viewActions
-	viewMain // king-first split-pane layout (default)
+	viewMain  // king-first split-pane layout (default)
+	viewInbox // the session inbox, hosted rather than run as its own program
 )
 
 // Model is the Bubble Tea model for the agent-inbox dashboard.
@@ -36,20 +38,27 @@ type Model struct {
 	inbox     *inbox.Inbox
 	eventsDir string
 
-	view      viewMode
-	selected  int  // 1-based, matches existing convention
-	sendMode  bool // when true, sendInput is active for the selected project
-	helpMode  bool // when true, keybindings overlay is shown
-	sendInput textinput.Model
-	np        newProjectModel // populated when view == viewNewProject
-	pendingTool string        // populated when view == viewToolPicker
+	view        viewMode
+	selected    int  // 1-based, matches existing convention
+	sendMode    bool // when true, sendInput is active for the selected project
+	helpMode    bool // when true, keybindings overlay is shown
+	sendInput   textinput.Model
+	np          newProjectModel // populated when view == viewNewProject
+	pendingTool string          // populated when view == viewToolPicker
+
+	// board is the session inbox, live while view == viewInbox.
+	board board.Model
+
+	// Spinner animation state; runs only while a turn is in flight.
+	spin     int
+	spinning bool
 
 	// King mode state.
-	kingIdx        int            // 1-based index of the project acting as king
-	connected      []string       // names of connected projects
-	kingSendMode   bool           // when true, kingInput is active
-	kingAddMode    bool           // when true, showing add-connected picker
-	kingRemoveMode bool           // when true, showing remove-connected picker
+	kingIdx        int             // 1-based index of the project acting as king
+	connected      []string        // names of connected projects
+	kingSendMode   bool            // when true, kingInput is active
+	kingAddMode    bool            // when true, showing add-connected picker
+	kingRemoveMode bool            // when true, showing remove-connected picker
 	kingInput      textinput.Model // shared input for king send/add/remove
 
 	// Detail view scroll: number of lines from the top of the body.
@@ -57,14 +66,14 @@ type Model struct {
 	detailScroll int
 
 	// King-first main view state.
-	mainInput           textinput.Model
+	mainInput            textinput.Model
 	mainScrollFromBottom int  // lines scrolled up from bottom (0 = at bottom)
-	mainAutoScroll      bool // when true, auto-pins to bottom on each tick
-	kingProjectIdx      int   // 1-based, defaults to 1 (first project is king)
+	mainAutoScroll       bool // when true, auto-pins to bottom on each tick
+	kingProjectIdx       int  // 1-based, defaults to 1 (first project is king)
 
 	// Tab-focus state: false = chat focused (default), true = sidebar focused.
-	focusSidebar   bool
-	sidebarCursor  int // 1-based project index currently highlighted in sidebar
+	focusSidebar  bool
+	sidebarCursor int // 1-based project index currently highlighted in sidebar
 
 	toast   string
 	toastAt time.Time
@@ -98,15 +107,15 @@ func New(in *inbox.Inbox, eventsDir string) Model {
 	mi.Focus()
 
 	return Model{
-		inbox:               in,
-		eventsDir:           eventsDir,
-		view:                viewMain,
-		selected:            1,
-		sendInput:           ti,
-		mainInput:           mi,
-		kingProjectIdx:      1,
-		mainAutoScroll:      true,
-		sidebarCursor:       2, // first non-king project
+		inbox:          in,
+		eventsDir:      eventsDir,
+		view:           viewMain,
+		selected:       1,
+		sendInput:      ti,
+		mainInput:      mi,
+		kingProjectIdx: 1,
+		mainAutoScroll: true,
+		sidebarCursor:  2, // first non-king project
 	}
 }
 
@@ -137,6 +146,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.sendInput.Width = max(60, msg.Width-30)
 		m.mainInput.Width = max(40, msg.Width-8)
+		if m.view == viewInbox {
+			return m.forwardToBoard(msg)
+		}
 		return m, nil
 
 	case tickMsg:
@@ -167,7 +179,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		return m, tick()
+		// Catch a turn that started without going through a keypress —
+		// an ingested hook event, or a restart mid-send.
+		return m, tea.Batch(tick(), m.startSpin())
+
+	case spinMsg:
+		m.spin++
+		if !m.anyWorking() {
+			m.spinning = false
+			return m, nil
+		}
+		return m, spinTick()
 
 	case tea.KeyMsg:
 		if m.sendMode {
@@ -175,6 +197,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleKey(msg)
 	default:
+		// The board owns message types this package cannot name — its tick,
+		// its fetch results. While its view is open they belong to it.
+		if m.view == viewInbox {
+			return m.forwardToBoard(msg)
+		}
 		// Forward non-key messages (blink, etc.) to the focused input
 		// so the cursor blink cycle stays alive.
 		var cmd tea.Cmd
@@ -183,7 +210,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
-	return m, nil
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -210,6 +236,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleKingKey(msg)
 	case viewActions:
 		return m.handleActionsKey(msg)
+	case viewInbox:
+		return m.handleInboxKey(msg)
 	}
 	return m, nil
 }
@@ -419,6 +447,8 @@ func (m Model) View() string {
 		return m.renderKing()
 	case viewActions:
 		return m.renderActions()
+	case viewInbox:
+		return m.board.View()
 	default:
 		return m.viewList()
 	}
@@ -445,7 +475,7 @@ func (m Model) viewList() string {
 			contentW = 30
 		}
 		for i, p := range snap {
-			row := renderRow(i+1, p, m.selected == i+1, contentW)
+			row := renderRow(i+1, p, m.selected == i+1, contentW, m.frame())
 			b.WriteString(row)
 			b.WriteString("\n")
 		}
@@ -555,7 +585,7 @@ func (m Model) viewDetail() string {
 		scrollInfo = fmt.Sprintf("  (%d-%d of %d lines)", start+1, end, len(bodyLines))
 	}
 
-	title := fmt.Sprintf("%s  (%s)  %s%s", p.Name, p.Tool, statusBadge(p.Status, p.Activity), scrollInfo)
+	title := fmt.Sprintf("%s  (%s)  %s%s", p.Name, p.Tool, statusBadge(p.Status, p.Activity, m.frame()), scrollInfo)
 	var footer string
 	if m.sendMode {
 		footer = fmt.Sprintf("send: %s  (enter to send, esc to cancel)", m.sendInput.View())
@@ -637,7 +667,7 @@ func (m Model) footer() string {
 	return mutedStyle.Render(footerText)
 }
 
-func renderRow(idx int, p inbox.Project, selected bool, contentW int) string {
+func renderRow(idx int, p inbox.Project, selected bool, contentW int, frame string) string {
 	idxStr := fmt.Sprintf("[%d]", idx)
 	ageStr := ageHuman(time.Since(p.UpdatedAt))
 	msgStr := p.LastMessage
@@ -646,7 +676,7 @@ func renderRow(idx int, p inbox.Project, selected bool, contentW int) string {
 	}
 
 	// Use a badge for the status column.
-	badge := statusBadge(p.Status, p.Activity)
+	badge := statusBadge(p.Status, p.Activity, frame)
 
 	// Fixed columns: "[N] " = 4, name = 21, tool = 11, age = 7, badge ~14, spaces ~6 = ~63
 	// Message gets the rest.

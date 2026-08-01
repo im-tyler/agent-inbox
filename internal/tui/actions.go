@@ -28,7 +28,8 @@ func (m *Model) renderActions() string {
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("  selected: %s", selName)))
 		b.WriteString("\n\n")
 	}
-	b.WriteString("  n  new project\n")
+	b.WriteString("  i  inbox — every session, add one as a project\n")
+	b.WriteString("  n  new project from a path\n")
 	b.WriteString("  d  delete project\n")
 	b.WriteString("  t  change tool\n")
 	b.WriteString("  a  attach to session\n")
@@ -44,6 +45,9 @@ func (m *Model) handleActionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q":
 		m.view = viewMain
 		return m, nil
+
+	case "i":
+		return m, m.openInbox()
 
 	case "n":
 		m.view = viewNewProject

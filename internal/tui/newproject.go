@@ -24,11 +24,11 @@ const (
 // newProjectModel holds the state of the new-project modal. Embedded into
 // the main Model when view == viewNewProject.
 type newProjectModel struct {
-	step    newProjectStep
-	folder  textinput.Model
-	name    textinput.Model
-	agent   string // "claude" | "opencode" | "codex" | "mock"
-	errMsg  string
+	step   newProjectStep
+	folder textinput.Model
+	name   textinput.Model
+	agent  string // "claude" | "opencode" | "codex" | "mock"
+	errMsg string
 }
 
 func newProjectModelInitial(cwd string) newProjectModel {

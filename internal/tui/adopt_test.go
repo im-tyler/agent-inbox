@@ -1,0 +1,85 @@
+package tui
+
+import (
+	"testing"
+
+	"agentinbox/internal/feed"
+)
+
+func row(source, id, cwd string) feed.Item {
+	return feed.Item{Source: source, ID: id, Context: map[string]string{"cwd": cwd}}
+}
+
+func TestToolFor(t *testing.T) {
+	cases := map[string]string{
+		"claude-code": "claude",
+		"claude":      "claude",
+		"opencode":    "opencode",
+		"codex":       "codex",
+		"teploy-ship": "",
+		"":            "",
+	}
+	for source, want := range cases {
+		if got := toolFor(source); got != want {
+			t.Errorf("toolFor(%q) = %q, want %q", source, got, want)
+		}
+	}
+}
+
+// A live Claude Code session cannot be resumed — the CLI refuses. Adopting its
+// id would build a project whose every send fails, so the id is dropped and
+// the supervisor starts its own session in that folder.
+func TestResumableSessionIDDropsClaude(t *testing.T) {
+	if got := resumableSessionID("claude-code", "abc"); got != "" {
+		t.Errorf("claude session id survived: %q", got)
+	}
+	if got := resumableSessionID("opencode", "abc"); got != "abc" {
+		t.Errorf("opencode id = %q, want abc", got)
+	}
+	if got := resumableSessionID("codex", "abc"); got != "abc" {
+		t.Errorf("codex id = %q, want abc", got)
+	}
+}
+
+func TestCandidateFromDrivableRow(t *testing.T) {
+	c, ok := candidateFrom(row("opencode", "ses_1", "/repo/lab"))
+	if !ok {
+		t.Fatal("opencode row was not adoptable")
+	}
+	if c.Tool != "opencode" || c.Dir != "/repo/lab" || c.SessionID != "ses_1" {
+		t.Errorf("candidate = %+v", c)
+	}
+	if c.Name() != "lab" {
+		t.Errorf("Name() = %q, want lab", c.Name())
+	}
+}
+
+func TestCandidateFromClaudeDropsSession(t *testing.T) {
+	c, ok := candidateFrom(row("claude-code", "abc", "/repo/neutron"))
+	if !ok {
+		t.Fatal("claude row was not adoptable")
+	}
+	if c.SessionID != "" {
+		t.Errorf("session = %q, want empty (a live claude session can't be resumed)", c.SessionID)
+	}
+	if c.Tool != "claude" || c.Name() != "neutron" {
+		t.Errorf("candidate = %+v", c)
+	}
+}
+
+func TestCandidateFromRejectsUndrivableRows(t *testing.T) {
+	// A deploy has no driver behind it.
+	if _, ok := candidateFrom(row("teploy-ship", "1", "/repo/a")); ok {
+		t.Error("a non-agent source was offered as a project")
+	}
+	// A session that never said where it lives cannot be adopted.
+	if _, ok := candidateFrom(row("opencode", "1", "")); ok {
+		t.Error("a row with no cwd was offered as a project")
+	}
+}
+
+func TestCandidateNameFallsBackToDir(t *testing.T) {
+	if got := (candidate{Dir: "/"}).Name(); got != "/" {
+		t.Errorf("Name() = %q, want /", got)
+	}
+}

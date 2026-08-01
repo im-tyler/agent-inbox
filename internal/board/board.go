@@ -92,6 +92,11 @@ type Model struct {
 	sent string
 	// showHelp expands the key list.
 	showHelp bool
+
+	// embedded means the board is hosted inside the supervisor rather than
+	// run as its own program. The host owns leaving and adopting, so the
+	// board only has to describe those keys, not implement them.
+	embedded bool
 }
 
 func New(srcs []sources.Source) Model {
@@ -103,6 +108,19 @@ func New(srcs []sources.Source) Model {
 
 // SetShowAll starts the board with everything visible.
 func (m Model) SetShowAll(all bool) Model { m.showAll = all; return m }
+
+// SetEmbedded marks the board as hosted inside the supervisor.
+func (m Model) SetEmbedded(b bool) Model { m.embedded = b; return m }
+
+// Selected is the row under the cursor, for a host that wants to act on it.
+func (m Model) Selected() (feed.Item, bool) { return m.selected() }
+
+// Reload refetches every source. The host calls this after a change it knows
+// the sources cannot see yet.
+func (m Model) Reload() (Model, tea.Cmd) {
+	m.loading = true
+	return m, m.load()
+}
 
 // visible is what the list renders: only what wants something from you,
 // unless you ask for the rest.
@@ -649,8 +667,14 @@ func (m Model) View() string {
 	hidden := len(m.items) - len(items)
 	var help string
 	switch {
+	case m.showHelp && m.embedded:
+		help = "j/k move · enter detail · n add as project · space mark · b broadcast · 1-5 act · a show/hide running · r refresh · ? less · esc back"
 	case m.showHelp:
 		help = "j/k move · enter detail · space mark · b broadcast · 1-5 act · a show/hide running · r refresh · ? less · q quit"
+	case m.embedded && hidden > 0:
+		help = fmt.Sprintf("n add as project · enter detail · a show %d running · ? keys", hidden)
+	case m.embedded:
+		help = "n add as project · enter detail · ? keys"
 	case hidden > 0:
 		help = fmt.Sprintf("enter detail · b broadcast · a show %d running · ? keys", hidden)
 	default:
@@ -722,3 +746,7 @@ func Run(srcs []sources.Source, showAll bool) error {
 	_, err := tea.NewProgram(New(srcs).SetShowAll(showAll), tea.WithAltScreen()).Run()
 	return err
 }
+
+// InDetail reports whether the board has a detail pane open, so a host can
+// tell "close the detail" from "leave the inbox".
+func (m Model) InDetail() bool { return m.mode == modeDetail }
