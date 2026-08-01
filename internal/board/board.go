@@ -90,6 +90,8 @@ type Model struct {
 	marked map[string]bool
 	// sent reports the outcome of the last broadcast.
 	sent string
+	// showHelp expands the key list.
+	showHelp bool
 }
 
 func New(srcs []sources.Source) Model {
@@ -409,6 +411,8 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		m.quitting = true
 		return m, tea.Quit
+	case "?":
+		m.showHelp = !m.showHelp
 	case "a":
 		m.showAll = !m.showAll
 		m.cursor = 0
@@ -468,6 +472,37 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// genericAsks are the placeholder prompts a source emits when it has nothing
+// real to report. They stay in the feed because the contract wants a prompt on
+// every blocked item, but repeating "Finished its turn — waiting on you." down
+// five rows is noise wearing the shape of information.
+var genericAsks = map[string]bool{
+	"finished its turn — waiting on you.":                  true,
+	"background agent finished its turn — waiting on you.": true,
+	"this run is parked waiting for approval.":             true,
+	"waiting on you.": true,
+}
+
+func realAsk(item feed.Item) string {
+	if item.Needs == nil {
+		return ""
+	}
+	ask := strings.TrimSpace(item.Needs.Prompt)
+	if ask == "" || genericAsks[strings.ToLower(ask)] {
+		return ""
+	}
+	return ask
+}
+
+// project is the orienting fact — which repo is this? — so it earns a column
+// rather than being buried in the detail pane.
+func project(item feed.Item) string {
+	if p := item.Context["project"]; p != "" {
+		return p
+	}
+	return item.Origin
+}
+
 func tag(a feed.Attention) string {
 	switch a {
 	case feed.AttentionDecision:
@@ -487,7 +522,9 @@ func age(item feed.Item) string {
 	d := time.Since(t)
 	switch {
 	case d < time.Minute:
-		return "just now"
+		// "just now" is eight characters in a five-wide column and shunts
+		// every following column out of line.
+		return "now"
 	case d < time.Hour:
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	case d < 24*time.Hour:
@@ -538,28 +575,53 @@ func (m Model) View() string {
 	}
 
 	width := maxWidth(m.width)
+
+	// The attention column only earns its space when the list is mixed. In
+	// the default view every row is a decision, so the word repeats down the
+	// screen carrying nothing.
+	mixed := false
+	for _, item := range items {
+		if item.Attention != items[0].Attention {
+			mixed = true
+			break
+		}
+	}
+
+	projWidth := 0
+	for _, item := range items {
+		if n := len([]rune(project(item))); n > projWidth {
+			projWidth = n
+		}
+	}
+	if projWidth > 18 {
+		projWidth = 18
+	}
+
 	for i, item := range items {
-		line := fmt.Sprintf("%s  %-4s  %s", tag(item.Attention), age(item), clip(item.Title, width-34))
-		suffix := mutedStyle.Render("  " + item.Origin)
+		row := fmt.Sprintf("%-5s %-*s %s", age(item), projWidth,
+			clip(project(item), projWidth), clip(item.Title, width-projWidth-24))
+		if mixed {
+			row = tag(item.Attention) + "  " + row
+		}
+
 		mark := " "
 		if m.marked[item.Key()] {
 			if _, ok := sendable(item); ok {
 				mark = "*"
 			} else {
-				// Marked but unreachable: shown so it is obvious why the
-				// broadcast count is lower than the number of marks.
+				// Marked but unreachable: shown so the delivery count being
+				// lower than the number of marks is not a mystery.
 				mark = "-"
 			}
 		}
 		if i == m.cursor {
-			b.WriteString(selectedStyle.Render(mark+"> "+line) + suffix + "\n")
+			b.WriteString(selectedStyle.Render(mark+"> "+row) + "\n")
 		} else {
-			b.WriteString(mark + "  " + line + suffix + "\n")
+			b.WriteString(mark + "  " + row + "\n")
 		}
-		// The ask, inline. A list that only says "blocked" still costs you a
-		// context switch per row to find out what each one wants.
-		if item.Attention == feed.AttentionDecision && item.Needs != nil && item.Needs.Prompt != "" {
-			b.WriteString(mutedStyle.Render("            "+clip(item.Needs.Prompt, width-16)) + "\n")
+		// Only a real question earns a second line.
+		if ask := realAsk(item); ask != "" {
+			b.WriteString(mutedStyle.Render("     "+clip(ask, width-8)) + "\n")
 		}
 	}
 
@@ -582,12 +644,17 @@ func (m Model) View() string {
 	if m.sent != "" {
 		b.WriteString("\n" + titleStyle.Render(m.sent) + "\n")
 	}
+	// Seven keys on one line reads as clutter and gets skipped. Show the
+	// three that matter and put the rest behind ?.
 	hidden := len(m.items) - len(items)
-	help := "j/k move · space mark · b broadcast · enter detail · 1-5 act · r refresh · q quit"
-	if hidden > 0 {
-		help = fmt.Sprintf("a show %d running · %s", hidden, help)
-	} else if m.showAll {
-		help = "a hide running · " + help
+	var help string
+	switch {
+	case m.showHelp:
+		help = "j/k move · enter detail · space mark · b broadcast · 1-5 act · a show/hide running · r refresh · ? less · q quit"
+	case hidden > 0:
+		help = fmt.Sprintf("enter detail · b broadcast · a show %d running · ? keys", hidden)
+	default:
+		help = "enter detail · b broadcast · ? keys"
 	}
 	b.WriteString("\n" + mutedStyle.Render(help) + "\n")
 	return b.String()

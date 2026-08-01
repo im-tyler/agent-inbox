@@ -102,7 +102,7 @@ func populated() Model {
 					{Label: "deny", Run: []string{"teploy-ship", "deny", "run-parked01", "{reason}"}},
 				},
 			},
-			Context: map[string]string{"model": "claude-opus-5", "ran_on": "worker-02"},
+			Context: map[string]string{"model": "claude-opus-5", "ran_on": "worker-02", "project": "decor-arbor"},
 			Link:    "http://box:7460/runs/run-parked01",
 		},
 		{
@@ -125,8 +125,10 @@ func TestListViewLeadsWithTheCountThatMattersAndMarksTheCursor(t *testing.T) {
 	if !strings.Contains(out, "2 waiting on you") {
 		t.Fatalf("header should lead with the decision count:\n%s", out)
 	}
-	if !strings.Contains(out, "decision") {
-		t.Fatalf("rows should carry their attention band:\n%s", out)
+	// The attention word is suppressed when every visible row shares it —
+	// repeating "decision" down the screen carries no information.
+	if strings.Contains(out, "decision") {
+		t.Fatalf("a uniform list should not repeat the band:\n%s", out)
 	}
 	// Sessions that want nothing are hidden by default — a list of twelve
 	// running things is the pane-switching problem wearing a list.
@@ -185,13 +187,61 @@ type errTest struct{}
 
 func (errTest) Error() string { return "dash is unreachable" }
 
+func TestAUniformListDropsTheBandButAMixedOneKeepsIt(t *testing.T) {
+	// With a running item revealed the list is mixed, so the band becomes
+	// the thing that distinguishes rows and has to come back.
+	out := populated().SetShowAll(true).View()
+	if !strings.Contains(out, "decision") || !strings.Contains(out, "info") {
+		t.Fatalf("a mixed list needs its bands:\n%s", out)
+	}
+}
+
+func TestOnlyARealQuestionGetsASecondLine(t *testing.T) {
+	m := New(nil)
+	m.loading, m.width = false, 100
+	m.items = []feed.Item{
+		{Origin: "opencode", ID: "a", Title: "real", State: feed.StateBlocked,
+			Attention: feed.AttentionDecision,
+			Needs:     &feed.Needs{Prompt: "Promote to production now?"}},
+		{Origin: "opencode", ID: "b", Title: "filler", State: feed.StateBlocked,
+			Attention: feed.AttentionDecision,
+			Needs:     &feed.Needs{Prompt: "Finished its turn — waiting on you."}},
+	}
+	out := m.View()
+	if !strings.Contains(out, "Promote to production now?") {
+		t.Fatalf("a real ask must show:\n%s", out)
+	}
+	// Placeholder prompts stay in the feed for contract consumers, but
+	// repeating them down the screen is noise, not information.
+	if strings.Contains(out, "Finished its turn") {
+		t.Fatalf("a placeholder ask must not render:\n%s", out)
+	}
+}
+
+func TestTheProjectIsVisibleWithoutOpeningTheDetailPane(t *testing.T) {
+	// "which repo is this?" is the orienting question; burying it one
+	// keypress away was the main thing wrong with the first layout.
+	if !strings.Contains(populated().View(), "decor-arbor") {
+		t.Fatalf("project should be a column:\n%s", populated().View())
+	}
+}
+
 func TestShowAllRevealsRunningSessionsAndTheHelpFlips(t *testing.T) {
 	out := populated().SetShowAll(true).View()
 	if !strings.Contains(out, "Engine performance instrumentation") {
 		t.Fatalf("--all should reveal running sessions:\n%s", out)
 	}
-	if !strings.Contains(out, "a hide running") {
-		t.Fatalf("the toggle should offer the way back:\n%s", out)
+}
+
+func TestTheKeyListStaysShortUntilAskedFor(t *testing.T) {
+	// Seven keys on one line reads as clutter and gets skipped.
+	m := populated()
+	if strings.Contains(m.View(), "j/k move") {
+		t.Fatalf("the full key list should be behind ?:\n%s", m.View())
+	}
+	updated, _ := m.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if !strings.Contains(updated.(Model).View(), "j/k move") {
+		t.Fatal("? should expand the keys")
 	}
 }
 
@@ -318,5 +368,20 @@ func TestRefreshIsSuspendedWhileComposingABroadcast(t *testing.T) {
 	_, cmd := m.Update(tickMsg(time.Now()))
 	if cmd == nil {
 		t.Fatal("the tick should still be rescheduled")
+	}
+}
+
+func TestEveryAgeFitsTheColumnSoRowsStayAligned(t *testing.T) {
+	// A single over-wide value shunts the project and title columns out of
+	// line for that row only, which reads as a rendering glitch.
+	now := time.Now()
+	for _, since := range []time.Time{
+		now, now.Add(-30 * time.Second), now.Add(-5 * time.Minute),
+		now.Add(-3 * time.Hour), now.Add(-2 * 24 * time.Hour), now.Add(-400 * 24 * time.Hour),
+	} {
+		item := feed.Item{Since: since.Format(time.RFC3339)}
+		if got := age(item); len([]rune(got)) > 5 {
+			t.Fatalf("age %q is %d wide, column is 5", got, len([]rune(got)))
+		}
 	}
 }
