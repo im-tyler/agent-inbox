@@ -25,6 +25,13 @@ type Project struct {
 	UpdatedAt   time.Time     `json:"updated_at"`
 	History     []Message     `json:"history,omitempty"`
 
+	// ForkFrom names a session belonging to something else — the live agent
+	// this project was adopted from. The first send seeds a new session with
+	// its history rather than resuming it, and clears this once it has a
+	// session of its own. Persisted, because an adoption that is never sent
+	// to before a restart should still inherit its context afterwards.
+	ForkFrom string `json:"fork_from,omitempty"`
+
 	// Activity carries the current live status label while Status == Working:
 	// e.g. "typing", "Bash", "Edit". Transient — not persisted; reset on
 	// restart. Populated only when the driver implements StreamingDriver.
@@ -58,6 +65,11 @@ type Inbox struct {
 	// pollEvery overrides how often a king round checks its targets. Zero
 	// means the default; set before any turn starts, never during one.
 	pollEvery time.Duration
+
+	// rounds is how many dispatch rounds one king turn may spend. Zero means
+	// the default. Read under mu — a watcher reads it minutes after the turn
+	// that started it.
+	rounds int
 
 	// notes are the supervisor's durable facts about the fleet.
 	notes []Note
@@ -137,6 +149,16 @@ func (in *Inbox) pause() bool {
 	}
 }
 
+// WithKingRounds sets how many dispatch rounds a single king turn may spend
+// before it has to report back and wait for the user. Zero keeps the default
+// of one; values above maxKingRounds are clamped.
+func (in *Inbox) WithKingRounds(n int) *Inbox {
+	in.mu.Lock()
+	in.rounds = n
+	in.mu.Unlock()
+	return in
+}
+
 // WithConfigPath enables runtime project addition via AddProject; the path
 // is rewritten on each AddProject call so new projects persist alongside
 // the original configuration.
@@ -156,22 +178,23 @@ func (in *Inbox) WithConfigPath(p string) *Inbox {
 // Returns an error only for validation failures: duplicate name/dir,
 // or unknown tool.
 func (in *Inbox) AddProject(name, tool, dir string) error {
-	return in.addProject(name, tool, dir, "")
+	return in.addProject(name, tool, dir, "", "")
 }
 
 // AdoptProject registers a project already backed by an existing agent
-// session, so the first send resumes that conversation instead of starting a
-// fresh one. The session id is persisted in state.json, not config.json —
-// config describes which projects exist, state describes where they are.
+// session, so its first send continues that conversation instead of starting
+// blank. Both ids are persisted in state.json, not config.json — config
+// describes which projects exist, state describes where they are.
 //
-// Only pass a session id the driver can actually resume. A Claude Code session
-// that is live right now cannot be: the CLI refuses with "currently running as
-// a background agent". Adopt the folder alone in that case.
-func (in *Inbox) AdoptProject(name, tool, dir, sessionID string) error {
-	return in.addProject(name, tool, dir, sessionID)
+// Exactly one of the two is normally set. sessionID is a session this project
+// owns and can resume. forkFrom is somebody else's — a live agent's — and the
+// first send forks it instead, which works while that agent runs and leaves it
+// alone. Pass sessionID only when the driver can genuinely resume it.
+func (in *Inbox) AdoptProject(name, tool, dir, sessionID, forkFrom string) error {
+	return in.addProject(name, tool, dir, sessionID, forkFrom)
 }
 
-func (in *Inbox) addProject(name, tool, dir, sessionID string) error {
+func (in *Inbox) addProject(name, tool, dir, sessionID, forkFrom string) error {
 	in.mu.Lock()
 	for _, p := range in.projects {
 		if p.Name == name {
@@ -192,6 +215,7 @@ func (in *Inbox) addProject(name, tool, dir, sessionID string) error {
 		Tool:      tool,
 		Dir:       dir,
 		SessionID: sessionID,
+		ForkFrom:  forkFrom,
 		Status:    driver.StatusIdle,
 	})
 	in.mu.Unlock()
@@ -314,7 +338,7 @@ func (in *Inbox) sendResolved(resolve func() (*Project, error), displayText, dri
 	if record {
 		p.appendHistory(Message{Role: "user", Content: displayText, Timestamp: time.Now()})
 	}
-	dir, sid := p.Dir, p.SessionID
+	dir, sid, forkFrom := p.Dir, p.SessionID, p.ForkFrom
 	// Cancellable context with a 5-minute timeout so a stuck CLI
 	// (rate-limited API, hung model) doesn't hang the project forever.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -324,10 +348,24 @@ func (in *Inbox) sendResolved(resolve func() (*Project, error), displayText, dri
 
 	in.track(func() {
 		// Send the DRIVER text (may include injected state) to the CLI.
-		if sd, ok := d.(driver.StreamingDriver); ok {
+		fd, canFork := d.(driver.ForkingDriver)
+		sd, canStream := d.(driver.StreamingDriver)
+		switch {
+		case forkFrom != "" && canFork:
+			// The fork turn does not stream. It is one turn, it happens once
+			// per adoption, and giving it a second code path through the
+			// streaming interface would double the surface for a spinner.
+			in.blockingSend(p, func() driver.Result {
+				return fd.SendForked(ctx, dir, forkFrom, driverText)
+			})
+		case forkFrom != "":
+			// Nothing to fork with: start clean rather than resuming an id
+			// this driver has no claim to.
+			in.blockingSend(p, func() driver.Result { return d.Send(ctx, dir, "", driverText) })
+		case canStream:
 			in.streamSend(ctx, sd, p, dir, sid, driverText)
-		} else {
-			in.blockingSend(ctx, d, p, dir, sid, driverText)
+		default:
+			in.blockingSend(p, func() driver.Result { return d.Send(ctx, dir, sid, driverText) })
 		}
 		in.mu.Lock()
 		delete(in.cancels, p.Name)
@@ -341,20 +379,27 @@ func (in *Inbox) sendResolved(resolve func() (*Project, error), displayText, dri
 	return nil
 }
 
-// blockingSend is the non-streaming send path. Extracted from Send so the
-// streaming path can share the same cleanup logic.
-func (in *Inbox) blockingSend(ctx context.Context, d driver.Driver, p *Project, dir, sid, prompt string) {
-	res := d.Send(ctx, dir, sid, prompt)
+// blockingSend runs a non-streaming turn and files its outcome. run is what
+// actually talks to the CLI — an ordinary send, or a fork of somebody else's
+// session — so the three ways to start a turn share one way to end it.
+func (in *Inbox) blockingSend(p *Project, run func() driver.Result) {
+	res := run()
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	// If the project was cancelled, the underlying subprocess was killed
-	// and d.Send returned with a killed-process error. We've already set
+	// and the driver returned with a killed-process error. We've already set
 	// the status to Idle in Cancel(); skip the overwrite.
 	if p.Status != driver.StatusWorking {
 		return
 	}
 	if res.SessionID != "" {
 		p.SessionID = res.SessionID
+	}
+	// A turn that got through has given this project a session of its own,
+	// so the borrowed one it was seeded from is spent. A turn that failed
+	// keeps it: the next attempt should still inherit the context.
+	if res.Err == nil {
+		p.ForkFrom = ""
 	}
 	p.Status = res.Status
 	p.Activity = ""

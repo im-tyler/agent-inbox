@@ -16,7 +16,8 @@ import (
 type candidate struct {
 	Tool      string // driver name: claude | opencode | codex
 	Dir       string
-	SessionID string // empty when the supervisor must start its own session
+	SessionID string // a session this project can resume as its own
+	ForkFrom  string // a live session to seed from; the fork becomes ours
 }
 
 // Name is the project name a candidate defaults to.
@@ -43,20 +44,24 @@ func toolFor(source string) string {
 	return ""
 }
 
-// resumableSessionID returns the session id worth adopting, or "" when the
-// supervisor has to start its own session in that folder instead.
+// adoptSession decides how the supervisor picks a discovered session up:
+// resume it, fork it, or start clean.
 //
-// Claude Code refuses to resume a session that is running right now
-// ("currently running as a background agent"), and the claude source reports
-// nothing but live agents — `claude agents --json` lists processes, each with
-// a pid. So every claude row is unresumable by construction, and adopting its
-// id would produce a project whose first send always fails. opencode and codex
-// resume from disk and are unaffected.
-func resumableSessionID(source, id string) string {
+// opencode and codex sessions are read back from disk and are nobody else's
+// while we use them, so their id is adopted directly.
+//
+// Every claude row is a live process — `claude agents --json` lists agents
+// with pids, and the source filters out the dead ones — so resuming in place
+// would put two writers on one transcript. Forking is the answer instead of
+// starting blank: `--fork-session` seeds a new session from the original's
+// history, works while the original is mid-turn, and leaves it untouched. The
+// supervisor gets the context, which was the entire point of adopting rather
+// than adding a folder.
+func adoptSession(source, id string) (sessionID, forkFrom string) {
 	if toolFor(source) == "claude" {
-		return ""
+		return "", id
 	}
-	return id
+	return id, ""
 }
 
 // candidateFrom derives an adoptable project from an inbox row, reporting
@@ -71,10 +76,12 @@ func candidateFrom(item feed.Item) (candidate, bool) {
 	if dir == "" {
 		return candidate{}, false
 	}
+	sessionID, forkFrom := adoptSession(item.Source, item.ID)
 	return candidate{
 		Tool:      tool,
 		Dir:       dir,
-		SessionID: resumableSessionID(item.Source, item.ID),
+		SessionID: sessionID,
+		ForkFrom:  forkFrom,
 	}, true
 }
 

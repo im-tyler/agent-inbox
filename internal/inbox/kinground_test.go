@@ -267,7 +267,7 @@ func TestKingNotesAnUnknownTarget(t *testing.T) {
 }
 
 func TestSummaryPromptForbidsFurtherDirectives(t *testing.T) {
-	got := summaryPrompt([]fleetReply{{name: "omni", content: "all good"}})
+	got := summaryPrompt([]fleetReply{{name: "omni", content: "all good"}}, 0)
 	if !strings.Contains(got, "all good") || !strings.Contains(got, "omni") {
 		t.Errorf("reply missing from prompt:\n%s", got)
 	}
@@ -275,6 +275,22 @@ func TestSummaryPromptForbidsFurtherDirectives(t *testing.T) {
 	// it would be silently dropped. Say so rather than let the model try.
 	if !strings.Contains(got, "[send to ...]") {
 		t.Errorf("prompt does not warn against directives:\n%s", got)
+	}
+	if !strings.Contains(got, "will not be dispatched") {
+		t.Errorf("prompt does not say the directives are inert:\n%s", got)
+	}
+}
+
+// With rounds left the summary invites a follow-up instead of forbidding one,
+// and says how many are left — a model that is not told its limit either stops
+// early or keeps asking after the answer stopped being dispatched.
+func TestSummaryPromptOffersRemainingRounds(t *testing.T) {
+	got := summaryPrompt([]fleetReply{{name: "omni", content: "all good"}}, 2)
+	if strings.Contains(got, "will not be dispatched") {
+		t.Errorf("prompt forbids directives despite budget:\n%s", got)
+	}
+	if !strings.Contains(got, "2 further round(s)") {
+		t.Errorf("prompt does not state the remaining budget:\n%s", got)
 	}
 }
 
@@ -316,7 +332,7 @@ func TestKingStateForbidsReachingIntoOtherProjects(t *testing.T) {
 
 // With nothing connected the king is a plain chat session; injecting fleet
 // rules would have it refusing to read its own files.
-func TestKingStateEmptyWithoutFleet(t *testing.T) {
+func TestKingStateOmitsFleetRulesWithoutFleet(t *testing.T) {
 	d := newScriptDriver()
 	in := kingFixture(t, d)
 	if got := in.formatKingState(nil); strings.Contains(got, "cannot read") {

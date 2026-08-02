@@ -69,15 +69,18 @@ func (m Model) adoptSelected() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	name := c.Name()
-	if err := m.inbox.AdoptProject(name, c.Tool, c.Dir, c.SessionID); err != nil {
+	if err := m.inbox.AdoptProject(name, c.Tool, c.Dir, c.SessionID, c.ForkFrom); err != nil {
 		m.toast = err.Error()
 		m.toastAt = time.Now()
 		return m, nil
 	}
 	m.selected = len(m.inbox.Snapshot())
-	if c.SessionID != "" {
+	switch {
+	case c.ForkFrom != "":
+		m.toast = fmt.Sprintf("added %s (%s, forks that session's history)", name, c.Tool)
+	case c.SessionID != "":
 		m.toast = fmt.Sprintf("added %s (%s, resumes its session)", name, c.Tool)
-	} else {
+	default:
 		m.toast = fmt.Sprintf("added %s (%s, starts a new session)", name, c.Tool)
 	}
 	m.toastAt = time.Now()

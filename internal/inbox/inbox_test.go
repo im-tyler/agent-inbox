@@ -165,7 +165,7 @@ func TestAdoptProjectCarriesSessionID(t *testing.T) {
 	statePath := filepath.Join(tmp, "state.json")
 	in := New(nil, map[string]driver.Driver{"mock": driver.Mock{}}, statePath)
 
-	if err := in.AdoptProject("neutron", "mock", "/repo/neutron", "sess-1"); err != nil {
+	if err := in.AdoptProject("neutron", "mock", "/repo/neutron", "sess-1", ""); err != nil {
 		t.Fatalf("AdoptProject: %v", err)
 	}
 	snap := in.Snapshot()
@@ -185,6 +185,30 @@ func TestAdoptProjectCarriesSessionID(t *testing.T) {
 	}
 	if len(saved) != 1 || saved[0].SessionID != "sess-1" {
 		t.Errorf("persisted = %+v, want session sess-1", saved)
+	}
+}
+
+// A forked adoption carries the source session across a restart too. Without
+// that, quitting between adopting and the first send loses the history the
+// adoption existed to inherit.
+func TestAdoptProjectPersistsForkSource(t *testing.T) {
+	tmp := t.TempDir()
+	statePath := filepath.Join(tmp, "state.json")
+	in := New(nil, map[string]driver.Driver{"mock": driver.Mock{}}, statePath)
+
+	if err := in.AdoptProject("neutron", "mock", "/repo/neutron", "", "live-1"); err != nil {
+		t.Fatalf("AdoptProject: %v", err)
+	}
+	b, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("state not written: %v", err)
+	}
+	var saved []Project
+	if err := json.Unmarshal(b, &saved); err != nil {
+		t.Fatalf("state unreadable: %v", err)
+	}
+	if len(saved) != 1 || saved[0].ForkFrom != "live-1" || saved[0].SessionID != "" {
+		t.Errorf("persisted = %+v, want fork source live-1 and no session", saved)
 	}
 }
 

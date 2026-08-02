@@ -36,6 +36,20 @@ type Driver interface {
 	AttachArgs(dir, sessionID string) []string
 }
 
+// ForkingDriver is an optional interface a Driver may implement when the
+// underlying CLI can start a new session seeded with an existing one's
+// history, without disturbing that session.
+//
+// This is what makes adopting a live session useful. A session another
+// process is currently writing cannot be resumed in place — that would put
+// two writers on one transcript — but it can be forked, and the fork carries
+// the context that made adoption worth doing. The returned Result names the
+// NEW session, which the caller persists and resumes normally from then on.
+type ForkingDriver interface {
+	Driver
+	SendForked(ctx context.Context, dir, sourceSessionID, prompt string) Result
+}
+
 // StreamEventKind classifies what's happening in a streaming turn.
 type StreamEventKind int
 

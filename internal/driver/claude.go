@@ -30,14 +30,39 @@ type claudeResult struct {
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 }
 
-func (c Claude) Send(ctx context.Context, dir, sessionID, prompt string) Result {
-	args := []string{"-p", prompt, "--output-format", "json"}
+// sessionArgs is how a turn addresses its conversation: a fresh session with
+// an id we choose, or a resume of one that exists. Shared by both the
+// blocking and streaming paths so they cannot drift.
+func (c Claude) sessionArgs(sessionID string) (args []string, id string) {
 	if sessionID == "" {
-		sessionID = newUUID()
-		args = append(args, "--session-id", sessionID)
-	} else {
-		args = append(args, "--resume", sessionID)
+		id = newUUID()
+		return []string{"--session-id", id}, id
 	}
+	return []string{"--resume", sessionID}, sessionID
+}
+
+// SendForked starts a NEW session seeded with sourceSessionID's history,
+// leaving that session untouched. This is how an adopted Claude Code session
+// is picked up: the source is a live process, and resuming it in place would
+// put two writers on one transcript. Verified against claude 2.1.220 — the
+// fork answers from the original's context and reports a new session id,
+// which the caller persists and resumes normally from then on.
+func (c Claude) SendForked(ctx context.Context, dir, sourceSessionID, prompt string) Result {
+	if sourceSessionID == "" {
+		return c.Send(ctx, dir, "", prompt)
+	}
+	return c.send(ctx, dir, sourceSessionID, prompt, []string{"--resume", sourceSessionID, "--fork-session"})
+}
+
+func (c Claude) Send(ctx context.Context, dir, sessionID, prompt string) Result {
+	sessArgs, id := c.sessionArgs(sessionID)
+	return c.send(ctx, dir, id, prompt, sessArgs)
+}
+
+// send runs one blocking turn. sessionID is what to report back if the CLI
+// does not name one itself.
+func (c Claude) send(ctx context.Context, dir, sessionID, prompt string, sessArgs []string) Result {
+	args := append([]string{"-p", prompt, "--output-format", "json"}, sessArgs...)
 	if c.PermissionMode != "" {
 		args = append(args, "--permission-mode", c.PermissionMode)
 	}
@@ -46,6 +71,9 @@ func (c Claude) Send(ctx context.Context, dir, sessionID, prompt string) Result 
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return Result{SessionID: sessionID, Status: StatusError, Err: turnError(ctx, "claude", err, "")}
+		}
 		return Result{SessionID: sessionID, Status: StatusError, Err: wrapExec(err)}
 	}
 
@@ -86,13 +114,9 @@ func (c Claude) StreamSend(ctx context.Context, dir, sessionID, prompt string) <
 	go func() {
 		defer close(ch)
 
-		args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
-		if sessionID == "" {
-			sessionID = newUUID()
-			args = append(args, "--session-id", sessionID)
-		} else {
-			args = append(args, "--resume", sessionID)
-		}
+		var sessArgs []string
+		sessArgs, sessionID = c.sessionArgs(sessionID)
+		args := append([]string{"-p", prompt, "--output-format", "stream-json", "--verbose"}, sessArgs...)
 		if c.PermissionMode != "" {
 			args = append(args, "--permission-mode", c.PermissionMode)
 		}
@@ -113,6 +137,7 @@ func (c Claude) StreamSend(ctx context.Context, dir, sessionID, prompt string) <
 		ch <- StreamEvent{Kind: StreamStarted, Activity: "init", SessionID: sessionID}
 
 		var finalText strings.Builder
+		sawTerminal := false
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for sc.Scan() {
@@ -120,22 +145,36 @@ func (c Claude) StreamSend(ctx context.Context, dir, sessionID, prompt string) <
 			if line == "" {
 				continue
 			}
-			classifyClaudeStreamLine(line, ch, &finalText, &sessionID)
+			if classifyClaudeStreamLine(line, ch, &finalText, &sessionID) {
+				sawTerminal = true
+			}
 		}
 
 		waitErr := cmd.Wait()
-		// If we already got a result event, the wait error is benign.
-		// Otherwise it's a real failure.
-		select {
-		case ch <- StreamEvent{Kind: StreamDone, Content: finalText.String(), SessionID: sessionID}:
-			_ = waitErr // already classified via result event
-		default:
-			if waitErr != nil {
-				ch <- StreamEvent{Kind: StreamError, Err: wrapExec(waitErr)}
-			} else {
-				ch <- StreamEvent{Kind: StreamDone, Content: finalText.String(), SessionID: sessionID}
-			}
+
+		// A result event is the turn's own account of how it went, and it
+		// has already been emitted. Anything after it would be a second
+		// terminal event on a channel that promises exactly one.
+		if sawTerminal {
+			return
 		}
+
+		// No result event means the CLI died mid-turn — a crash, or the
+		// context's deadline killing it. Either way this is a failure, and
+		// reporting it as a completed turn (which an earlier version did,
+		// because it tested the channel buffer instead of what had been
+		// sent) files a truncated answer as though the agent had finished.
+		if waitErr != nil {
+			ch <- StreamEvent{Kind: StreamError, Content: finalText.String(), SessionID: sessionID,
+				Err: turnError(ctx, "claude", waitErr, "")}
+			return
+		}
+		if strings.TrimSpace(finalText.String()) == "" {
+			ch <- StreamEvent{Kind: StreamError, SessionID: sessionID,
+				Err: fmt.Errorf("claude: stream ended without a result")}
+			return
+		}
+		ch <- StreamEvent{Kind: StreamDone, Content: finalText.String(), SessionID: sessionID}
 	}()
 
 	return ch
@@ -143,15 +182,17 @@ func (c Claude) StreamSend(ctx context.Context, dir, sessionID, prompt string) <
 
 // classifyClaudeStreamLine parses one NDJSON line from stream-json output
 // and emits zero or more StreamEvents. finalText accumulates the assistant's
-// text chunks for the terminal Done event.
-func classifyClaudeStreamLine(line string, ch chan<- StreamEvent, finalText *strings.Builder, sessionID *string) {
+// text chunks for the terminal Done event. Reports whether this line produced
+// a terminal event, which is what tells the caller the turn accounted for
+// itself and needs no epilogue.
+func classifyClaudeStreamLine(line string, ch chan<- StreamEvent, finalText *strings.Builder, sessionID *string) bool {
 	// Top-level shape: every line has a "type" field.
 	var head struct {
 		Type    string `json:"type"`
 		Subtype string `json:"subtype"`
 	}
 	if json.Unmarshal([]byte(line), &head) != nil {
-		return
+		return false
 	}
 
 	switch head.Type {
@@ -164,7 +205,7 @@ func classifyClaudeStreamLine(line string, ch chan<- StreamEvent, finalText *str
 		if sys.SessionID != "" {
 			*sessionID = sys.SessionID
 		}
-		return
+		return false
 
 	case "assistant":
 		// Content array may contain text, tool_use, etc.
@@ -179,7 +220,7 @@ func classifyClaudeStreamLine(line string, ch chan<- StreamEvent, finalText *str
 			} `json:"message"`
 		}
 		if json.Unmarshal([]byte(line), &asst) != nil {
-			return
+			return false
 		}
 		for _, c := range asst.Message.Content {
 			switch c.Type {
@@ -192,12 +233,12 @@ func classifyClaudeStreamLine(line string, ch chan<- StreamEvent, finalText *str
 				ch <- StreamEvent{Kind: StreamToolCall, Activity: c.Name, SessionID: *sessionID}
 			}
 		}
-		return
+		return false
 
 	case "result":
 		var res claudeResult
 		if json.Unmarshal([]byte(line), &res) != nil {
-			return
+			return false
 		}
 		if res.SessionID != "" {
 			*sessionID = res.SessionID
@@ -209,7 +250,7 @@ func classifyClaudeStreamLine(line string, ch chan<- StreamEvent, finalText *str
 				Content:   res.Result,
 				SessionID: *sessionID,
 			}
-			return
+			return true
 		}
 		// Use the result text as the authoritative final; overwrite accumulated.
 		final := strings.TrimSpace(res.Result)
@@ -217,8 +258,13 @@ func classifyClaudeStreamLine(line string, ch chan<- StreamEvent, finalText *str
 			finalText.Reset()
 			finalText.WriteString(final)
 		}
+		if n := len(res.PermissionDenials); n > 0 {
+			finalText.WriteString(fmt.Sprintf("\n\n(blocked on %d permission request(s) this turn)", n))
+		}
 		ch <- StreamEvent{Kind: StreamDone, Content: finalText.String(), SessionID: *sessionID}
+		return true
 	}
+	return false
 }
 
 func (Claude) AttachArgs(dir, sessionID string) []string {

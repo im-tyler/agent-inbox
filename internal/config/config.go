@@ -20,6 +20,14 @@ type Settings struct {
 		Sandbox       string `json:"sandbox"`
 		SkipApprovals bool   `json:"skip_approvals"`
 	} `json:"codex"`
+	King struct {
+		// Rounds is how many dispatch rounds one king turn may spend before
+		// it must report back. 0 or 1 means the king dispatches once, reads
+		// the replies and answers — the default. Higher lets it act on what a
+		// reply revealed (ask B about what A just said) at the cost of that
+		// many more agent turns per message, unattended. Clamped internally.
+		Rounds int `json:"rounds"`
+	} `json:"king"`
 	Projects []Project `json:"projects"`
 }
 

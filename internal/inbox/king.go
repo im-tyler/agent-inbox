@@ -26,17 +26,6 @@ type KingDirective struct {
 // This is the Layer 1 king: state-injected prompts, directive-based dispatch,
 // no persistent event loop. The king sees fresh state on every turn.
 func (in *Inbox) KingSend(kingIdx int, prompt string, connectedNames []string) error {
-	// If there are no connected projects, this is just a normal chat —
-	// no state injection, no directive parsing. The king is a regular
-	// project session.
-	if len(connectedNames) == 0 {
-		return in.sendRaw(kingIdx, prompt, prompt)
-	}
-
-	// Build compact fleet state (one line per project, no verbose instructions).
-	stateCtx := in.formatKingState(connectedNames)
-	driverPrompt := prompt + "\n\n---\n\n" + stateCtx
-
 	in.mu.Lock()
 	king, err := in.project(kingIdx)
 	if err != nil {
@@ -46,6 +35,17 @@ func (in *Inbox) KingSend(kingIdx int, prompt string, connectedNames []string) e
 	kingName := king.Name
 	in.mu.Unlock()
 
+	// A king with no fleet still gets its notes and the syntax for writing
+	// them. Memory is not a property of having projects connected: the
+	// cross-cutting facts are exactly the ones that outlive any single
+	// project, and switching them off when the last one disconnects means
+	// the king forgets what it knew and starts printing [note: ...] at the
+	// user as literal text.
+	driverPrompt := prompt
+	if stateCtx := in.formatKingState(connectedNames); stateCtx != "" {
+		driverPrompt = prompt + "\n\n---\n\n" + stateCtx
+	}
+
 	if err := in.sendRaw(kingIdx, prompt, driverPrompt); err != nil {
 		return err
 	}
@@ -53,7 +53,8 @@ func (in *Inbox) KingSend(kingIdx int, prompt string, connectedNames []string) e
 	// From here on the king is identified by name. A watcher lives for
 	// minutes, and RemoveProject shifts every index after the one it drops —
 	// an index held that long eventually names a different project.
-	in.track(func() { in.kingDispatchWatcher(kingName) })
+	dispatch := len(connectedNames) > 0
+	in.track(func() { in.kingDispatchWatcher(kingName, dispatch) })
 	return nil
 }
 
@@ -84,16 +85,57 @@ func (in *Inbox) awaitKing(kingName string, deadline time.Time) (string, bool) {
 }
 
 // kingDispatchWatcher waits for the king's turn, records any notes it took,
-// then parses the response for [send to X: Y] directives and dispatches them.
-func (in *Inbox) kingDispatchWatcher(kingName string) {
+// then dispatches the [send to X: Y] directives in its response.
+//
+// dispatch is false for a king with no fleet. Its notes are still harvested —
+// that is a conversation with the user, and facts come out of those — but a
+// directive naming a project nobody connected is not a dispatch it was
+// invited to make.
+func (in *Inbox) kingDispatchWatcher(kingName string, dispatch bool) {
 	response, ok := in.awaitKing(kingName, time.Now().Add(kingRoundTimeout))
 	if !ok {
 		return
 	}
 	in.applyNoteDirectives(response)
+	if dispatch {
+		in.dispatchDirectives(kingName, response, in.kingRounds(), nil)
+	}
+}
+
+// dispatchDirectives sends every [send to X: Y] in a response and, when any
+// landed, starts the round that waits for the replies.
+//
+// budget is how many dispatch rounds this user turn has left. prev is the last
+// round's dispatch set, or nil on the first — it is what a repeat is measured
+// against.
+func (in *Inbox) dispatchDirectives(kingName, response string, budget int, prev map[string]string) {
+	dirs := ParseKingDirectives(response)
+	if len(dirs) == 0 {
+		return
+	}
+	if budget <= 0 {
+		// Silence here reads as the king deciding not to follow up. It did
+		// decide to; the budget stopped it, and only this line says so.
+		in.noteToKing(kingName, fmt.Sprintf(
+			"%d more dispatch(es) requested but this turn's round budget is spent — ask again to continue (king.rounds = %d)",
+			len(dirs), in.kingRounds()))
+		return
+	}
+
+	current := make(map[string]string, len(dirs))
+	for _, d := range dirs {
+		current[strings.ToLower(d.Target)] = d.Message
+	}
+	// A king that asks the same projects the same thing twice running is not
+	// making progress, it is looping — and the budget alone would let it burn
+	// every remaining round doing so.
+	if prev != nil && sameDispatch(prev, current) {
+		in.noteToKing(kingName, "round stopped: the king repeated its previous dispatch verbatim")
+		return
+	}
 
 	var sent []string
-	for _, d := range ParseKingDirectives(response) {
+	for _, d := range dirs {
 		// A failed dispatch must not get a watcher. Otherwise the watcher
 		// waits out whatever that project was already doing and files its
 		// unrelated answer as the reply to this question — confident,
@@ -105,9 +147,28 @@ func (in *Inbox) kingDispatchWatcher(kingName string) {
 		}
 		sent = append(sent, d.Target)
 	}
-	if len(sent) > 0 {
-		in.track(func() { in.kingRoundWatcher(kingName, sent) })
+	if len(sent) == 0 {
+		return
 	}
+	if prev != nil {
+		in.noteToKing(kingName, fmt.Sprintf("follow-up round: %s (%d left after this)",
+			strings.Join(sent, ", "), budget-1))
+	}
+	in.track(func() { in.kingRoundWatcher(kingName, sent, budget-1, current) })
+}
+
+// sameDispatch reports whether two rounds asked the same projects the same
+// questions.
+func sameDispatch(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for target, msg := range a {
+		if b[target] != msg {
+			return false
+		}
+	}
+	return true
 }
 
 // applyNoteDirectives records what the king chose to remember and retracts
@@ -118,9 +179,13 @@ func (in *Inbox) applyNoteDirectives(response string) {
 	in.AddNotes(ParseKingNotes(response))
 }
 
-// formatKingState builds compact fleet context for the king's prompt.
-// Includes a concrete directive example using a real project name so
-// weaker models can copy the format instead of guessing.
+// formatKingState builds the context injected into a king turn: what it has
+// noted, who its fleet is, and the syntax for acting on either. Includes a
+// concrete directive example using a real project name so weaker models can
+// copy the format instead of guessing.
+//
+// With no fleet connected it degrades to notes alone, which is still worth
+// injecting — see KingSend.
 func (in *Inbox) formatKingState(connectedNames []string) string {
 	snap := in.Snapshot()
 
@@ -135,42 +200,50 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 	// Notes lead. They are what you knew before this turn, and a fact you
 	// already established should not be re-derived from a status line. Only
 	// the ones about this fleet: a note naming a project you are not talking
-	// to is context spent on nothing.
+	// to is context spent on nothing. With no fleet that filter leaves the
+	// untagged notes, which is the right answer for a conversation that is
+	// not about any one project.
 	lowerNames := make(map[string]bool, len(nameSet))
 	for n := range nameSet {
 		lowerNames[strings.ToLower(n)] = true
 	}
 	if notes := in.NotesFor(lowerNames); len(notes) > 0 {
-		b.WriteString("What you have noted about this fleet:\n")
+		if len(nameSet) == 0 {
+			b.WriteString("What you have noted:\n")
+		} else {
+			b.WriteString("What you have noted about this fleet:\n")
+		}
 		for _, n := range notes {
 			b.WriteString("- " + n.Text + "\n")
 		}
 		b.WriteString("\n")
 	}
 
-	b.WriteString("Your fleet:\n")
 	found := false
-	for _, p := range snap {
-		if !nameSet[p.Name] {
-			continue
-		}
-		found = true
-		if firstProject == "" {
-			firstProject = p.Name
-		}
-		status := string(p.Status)
-		if p.Activity != "" {
-			status += ":" + p.Activity
-		}
-		lastMsg := truncateForKing(p.LastMessage, 80)
-		if lastMsg == "" {
-			if p.LastErr != "" {
-				lastMsg = "error: " + truncateForKing(p.LastErr, 60)
-			} else {
-				lastMsg = "no recent activity"
+	if len(nameSet) > 0 {
+		b.WriteString("Your fleet:\n")
+		for _, p := range snap {
+			if !nameSet[p.Name] {
+				continue
 			}
+			found = true
+			if firstProject == "" {
+				firstProject = p.Name
+			}
+			status := string(p.Status)
+			if p.Activity != "" {
+				status += ":" + p.Activity
+			}
+			lastMsg := truncateForKing(p.LastMessage, 80)
+			if lastMsg == "" {
+				if p.LastErr != "" {
+					lastMsg = "error: " + truncateForKing(p.LastErr, 60)
+				} else {
+					lastMsg = "no recent activity"
+				}
+			}
+			b.WriteString(fmt.Sprintf("- %s (%s) [%s]: %s\n", p.Name, p.Tool, status, lastMsg))
 		}
-		b.WriteString(fmt.Sprintf("- %s (%s) [%s]: %s\n", p.Name, p.Tool, status, lastMsg))
 	}
 	if found && firstProject != "" {
 		// Stating the format was not enough. Asked about another project, a
@@ -185,15 +258,21 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 		b.WriteString(fmt.Sprintf("[send to %s: describe the task here]\n\n", firstProject))
 		b.WriteString(fmt.Sprintf("Example: [send to %s: what are you working on?]\n", firstProject))
 		b.WriteString("You can include multiple [send to ...] lines — they run in parallel, and you get every reply back before you answer the user.\n")
-		b.WriteString("\nTo remember something across turns, output a line of its own:\n")
-		b.WriteString("[note: teploy depends on Neutron's DB layer]\n\n")
-		b.WriteString("Note only durable facts that span projects or would cost a round-trip to rediscover.")
-		b.WriteString(" Not status — you are given that fresh every turn.\n")
-		b.WriteString("When a note above turns out to be wrong or out of date, retract it:\n")
-		b.WriteString("[note drop: teploy depends on Neutron]\n")
-		b.WriteString("The text just has to match part of the note. Retract and restate to correct one.\n")
-		b.WriteString("Everything else in your response is shown to the user.\n")
 	}
+
+	// The note syntax is not conditional on having a fleet. A supervisor
+	// talking to nobody but the user is still learning things worth keeping.
+	b.WriteString("\nTo remember something across turns, output a line of its own:\n")
+	b.WriteString("[note: teploy depends on Neutron's DB layer]\n\n")
+	b.WriteString("Note only durable facts that span projects or would cost a round-trip to rediscover.")
+	if found {
+		b.WriteString(" Not status — you are given that fresh every turn.")
+	}
+	b.WriteString("\n")
+	b.WriteString("When a note above turns out to be wrong or out of date, retract it:\n")
+	b.WriteString("[note drop: teploy depends on Neutron]\n")
+	b.WriteString("The text just has to match part of the note. Retract and restate to correct one.\n")
+	b.WriteString("Everything else in your response is shown to the user.\n")
 	return b.String()
 }
 
@@ -236,6 +315,16 @@ type fleetReply struct {
 }
 
 const (
+	// defaultKingRounds is how many dispatch rounds one user turn may spend.
+	// One means: the king dispatches, reads the replies, and reports back —
+	// which is the whole behaviour this supervisor had, and the safe default,
+	// because every extra round is another N agent turns of real money spent
+	// without anyone being asked.
+	defaultKingRounds = 1
+	// maxKingRounds caps what a config file can ask for. The budget exists to
+	// stop a loop; a budget large enough to be indistinguishable from no
+	// budget would not.
+	maxKingRounds = 5
 	// kingRoundTimeout bounds a round. A project whose driver never returns
 	// would otherwise hold the summary — and this goroutine — forever.
 	kingRoundTimeout = 15 * time.Minute
@@ -251,6 +340,19 @@ const (
 // goroutine still read it.
 const defaultPollEvery = 500 * time.Millisecond
 
+// kingRounds is the dispatch budget for one user turn.
+func (in *Inbox) kingRounds() int {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.rounds <= 0 {
+		return defaultKingRounds
+	}
+	if in.rounds > maxKingRounds {
+		return maxKingRounds
+	}
+	return in.rounds
+}
+
 func (in *Inbox) pollInterval() time.Duration {
 	if in.pollEvery > 0 {
 		return in.pollEvery
@@ -262,10 +364,12 @@ func (in *Inbox) pollInterval() time.Duration {
 // receipt for each in the king's thread, then hands the full replies back to
 // the king so it can report to the user.
 //
-// The summary turn is sent directly rather than through KingSend, so any
-// directives in it are not dispatched. That is deliberate: it is what stops a
-// king from answering its own summary with more work, forever.
-func (in *Inbox) kingRoundWatcher(kingName string, targets []string) {
+// budget is how many further dispatch rounds this user turn may spend. At zero
+// the summary is terminal, which is the default and was once the only
+// behaviour. Above zero the king may act on what it just learned — the case
+// where a project answers "that depends on what B is doing" and the supervisor
+// can go and ask B instead of telling the user to.
+func (in *Inbox) kingRoundWatcher(kingName string, targets []string, budget int, prev map[string]string) {
 	deadline := time.Now().Add(kingRoundTimeout)
 
 	replies := make([]fleetReply, 0, len(targets))
@@ -296,7 +400,7 @@ func (in *Inbox) kingRoundWatcher(kingName string, targets []string) {
 	in.mu.Unlock()
 	in.save()
 
-	if err := in.sendNamed(kingName, "", summaryPrompt(replies), false); err != nil {
+	if err := in.sendNamed(kingName, "", summaryPrompt(replies, budget), false); err != nil {
 		in.noteToKing(kingName, fmt.Sprintf("fleet replies arrived but the summary could not start: %v", err))
 		return
 	}
@@ -304,6 +408,7 @@ func (in *Inbox) kingRoundWatcher(kingName string, targets []string) {
 	// the turn most worth harvesting notes from.
 	if response, ok := in.awaitKing(kingName, time.Now().Add(kingRoundTimeout)); ok {
 		in.applyNoteDirectives(response)
+		in.dispatchDirectives(kingName, response, budget, prev)
 	}
 }
 
@@ -336,8 +441,11 @@ func (in *Inbox) awaitReply(name string, deadline time.Time) (fleetReply, bool) 
 	return fleetReply{}, false
 }
 
-// summaryPrompt hands the king the full replies it dispatched for.
-func summaryPrompt(replies []fleetReply) string {
+// summaryPrompt hands the king the full replies it dispatched for. budget is
+// how many further rounds it may spend; the king is told, because a model that
+// does not know its limit either stops when it should not have or keeps asking
+// after the answer has stopped being dispatched.
+func summaryPrompt(replies []fleetReply, budget int) string {
 	var b strings.Builder
 	b.WriteString("The projects you dispatched have replied. Their full responses:\n\n")
 	for _, r := range replies {
@@ -345,8 +453,15 @@ func summaryPrompt(replies []fleetReply) string {
 		b.WriteString(r.content)
 		b.WriteString("\n\n")
 	}
-	b.WriteString("Report back to the user: what each project found, and what it means taken together. ")
-	b.WriteString("Do not emit [send to ...] directives in this reply — they will not be dispatched.\n")
+	b.WriteString("Report back to the user: what each project found, and what it means taken together.\n")
+	if budget > 0 {
+		b.WriteString(fmt.Sprintf(
+			"\nIf answering properly needs one more question to a project, you may emit [send to ...] again — %d further round(s) will be dispatched. ",
+			budget))
+		b.WriteString("Only do that if a reply left something genuinely unresolved; otherwise just answer.\n")
+	} else {
+		b.WriteString("Do not emit [send to ...] directives in this reply — they will not be dispatched.\n")
+	}
 	return b.String()
 }
 

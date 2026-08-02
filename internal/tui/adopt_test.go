@@ -33,18 +33,21 @@ func TestToolFor(t *testing.T) {
 	}
 }
 
-// A live Claude Code session cannot be resumed — the CLI refuses. Adopting its
-// id would build a project whose every send fails, so the id is dropped and
-// the supervisor starts its own session in that folder.
-func TestResumableSessionIDDropsClaude(t *testing.T) {
-	if got := resumableSessionID("claude-code", "abc"); got != "" {
-		t.Errorf("claude session id survived: %q", got)
+// A live Claude Code session is somebody else's to write to, so it is forked
+// rather than resumed. opencode and codex come off disk and are adopted whole.
+func TestAdoptSessionForksClaude(t *testing.T) {
+	sess, fork := adoptSession("claude-code", "abc")
+	if sess != "" {
+		t.Errorf("claude id adopted for resume: %q", sess)
 	}
-	if got := resumableSessionID("opencode", "abc"); got != "abc" {
-		t.Errorf("opencode id = %q, want abc", got)
+	if fork != "abc" {
+		t.Errorf("fork source = %q, want abc", fork)
 	}
-	if got := resumableSessionID("codex", "abc"); got != "abc" {
-		t.Errorf("codex id = %q, want abc", got)
+	for _, source := range []string{"opencode", "codex"} {
+		sess, fork := adoptSession(source, "abc")
+		if sess != "abc" || fork != "" {
+			t.Errorf("%s: session = %q, fork = %q, want abc/empty", source, sess, fork)
+		}
 	}
 }
 
@@ -53,7 +56,7 @@ func TestCandidateFromDrivableRow(t *testing.T) {
 	if !ok {
 		t.Fatal("opencode row was not adoptable")
 	}
-	if c.Tool != "opencode" || c.Dir != "/repo/lab" || c.SessionID != "ses_1" {
+	if c.Tool != "opencode" || c.Dir != "/repo/lab" || c.SessionID != "ses_1" || c.ForkFrom != "" {
 		t.Errorf("candidate = %+v", c)
 	}
 	if c.Name() != "lab" {
@@ -61,13 +64,18 @@ func TestCandidateFromDrivableRow(t *testing.T) {
 	}
 }
 
-func TestCandidateFromClaudeDropsSession(t *testing.T) {
+func TestCandidateFromClaudeForksSession(t *testing.T) {
 	c, ok := candidateFrom(row("claude-code", "abc", "/repo/neutron"))
 	if !ok {
 		t.Fatal("claude row was not adoptable")
 	}
 	if c.SessionID != "" {
 		t.Errorf("session = %q, want empty (a live claude session can't be resumed)", c.SessionID)
+	}
+	// Dropping the id entirely was the old behaviour and it threw away the
+	// context that made adoption worth doing.
+	if c.ForkFrom != "abc" {
+		t.Errorf("fork source = %q, want abc", c.ForkFrom)
 	}
 	if c.Tool != "claude" || c.Name() != "neutron" {
 		t.Errorf("candidate = %+v", c)

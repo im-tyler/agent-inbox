@@ -25,11 +25,11 @@ Working name. Phase 1 = Claude + OpenCode.
 | OpenCode adapter | **done, live-verified** (new session + resume + export-based reply, free model) |
 | Codex adapter | done, CLI-surface-verified against `codex exec --help`; pending live-run |
 | Inbox state model + background sends | done, restart persistence verified |
-| StreamingDriver interface (live activity) | done — Claude adapter streams; UI shows `working:Bash` / `working:typing` |
+| StreamingDriver interface (live activity) | done — Claude and Codex adapters stream; UI shows `working:Bash` / `working:typing`. OpenCode has no event stream on `run`, so it shows the spinner only |
 | Per-project message history (last 100 turns) | done |
 | TUI dashboard (Bubble Tea) | done — list view, detail view with history, interactive attach |
 | Session inbox (`i`) | done — every session on the machine in one list; `n` adopts a row as a project. Also headless via `agent-inbox inbox [--json]` |
-| King round loop | done — one instruction fans out, every reply comes back, the king summarizes |
+| King round loop | done — one instruction fans out, every reply comes back, the king summarizes. `king.rounds` lets it follow up on what a reply revealed |
 | Legacy REPL | done, available via `--repl` flag |
 | Stop-hook bridge + live notify | **done, live-verified** (Claude only — OpenCode has no Stop hook; Codex hook system exists but not wired) |
 | CI + goreleaser + GitHub releases | done |
@@ -170,6 +170,7 @@ Config:
   "claude":   { "permission_mode": "default" },
   "opencode": { "skip_permissions": false },
   "codex":    { "sandbox": "workspace-write" },
+  "king":     { "rounds": 1 },
   "projects": [
     { "name": "tebian",  "tool": "claude",   "dir": "/path/to/tebian" },
     { "name": "neutron", "tool": "opencode", "dir": "/path/to/neutron" },
@@ -239,6 +240,7 @@ The king is just a regular project (Claude, Codex, or OpenCode). What makes it a
 
 1. **State injection**: when you send a message to the king, agent-inbox prepends the current status and last message of each connected project to the prompt. The king sees the fleet's state without you typing it.
 2. **Directive dispatch**: the king's response is parsed for `[send to PROJECT: message]` lines. Each directive is automatically dispatched to the target project via normal `Send`.
+3. **Notes**: `[note: ...]` records a durable cross-project fact, `[note drop: ...]` retracts one. Notes are injected into later turns, including turns with no fleet connected — a supervisor with nothing attached is still learning things worth keeping.
 
 ```
 ┌─ king: supervisor (claude) ──────────────────┐
@@ -258,6 +260,10 @@ The king is just a regular project (Claude, Codex, or OpenCode). What makes it a
 ```
 
 The king doesn't auto-act — it only dispatches when you send it a message. For autonomous event-driven supervision (king acts when projects finish on their own), see the v0.2 roadmap.
+
+**Round budget.** By default the king gets one dispatch round per message: it asks, reads every reply, and answers you. Set `king.rounds` higher (max 5) to let it act on what a reply revealed — the case where a project answers "that depends what B is doing" and the supervisor can go ask B instead of telling you to. Each extra round is another N agent turns spent unattended, which is why the default is 1. A round that repeats the previous round's dispatch verbatim is stopped as a loop, and a request that runs out of budget is recorded in the king's thread rather than silently dropped.
+
+**Adoption.** `n` on an inbox row turns that session into a project. OpenCode and Codex sessions resume directly. A Claude Code row is always a live process, so it is *forked* instead (`--fork-session`): the new session inherits the original's history, and the original is left alone.
 
 ### Legacy REPL
 

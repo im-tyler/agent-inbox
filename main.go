@@ -70,7 +70,10 @@ func main() {
 	}
 	inbox.LoadState(*statePath, projects)
 
-	in := inbox.New(projects, drivers, *statePath).WithConfigPath(*cfgPath).WithNotesPath(filepath.Join(dd, "notes.json"))
+	in := inbox.New(projects, drivers, *statePath).
+		WithConfigPath(*cfgPath).
+		WithNotesPath(filepath.Join(dd, "notes.json")).
+		WithKingRounds(cfg.King.Rounds)
 	defer in.Close()
 	eventsDir := filepath.Join(dd, "events")
 
