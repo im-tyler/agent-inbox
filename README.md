@@ -1,107 +1,161 @@
 # agent-inbox
 
-![CI](https://img.shields.io/github/actions/workflow/status/im-tyler/agent-inbox/ci.yml?branch=main) ![License: MIT](https://img.shields.io/badge/license-MIT-blue) ![Go](https://img.shields.io/badge/Go-single_binary-00ADD8) ![Status](https://img.shields.io/badge/status-alpha-orange)
+[![CI](https://img.shields.io/github/actions/workflow/status/im-tyler/agent-inbox/ci.yml?branch=main)](https://github.com/im-tyler/agent-inbox/actions)
+[![Release](https://img.shields.io/github/v/release/im-tyler/agent-inbox)](https://github.com/im-tyler/agent-inbox/releases/latest)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+![Go](https://img.shields.io/badge/Go-single%20binary-00ADD8)
+![Status](https://img.shields.io/badge/status-alpha-orange)
 
-A federated supervisor for CLI coding agents. One terminal that holds N
-independent projects — each backed by its own long-lived **Claude Code** or
-**OpenCode** session — and surfaces them through a single inbox: see who's
-`waiting` on you, `send` a project a message, `view` its last reply, or
-`attach` to drop into the live session.
+**One terminal for every coding agent you have running.**
 
-This is the inverse of the existing tools (Agent Teams, Claude Squad, CAO),
-which decompose *one* project into parallel workers. Here each project is an
-independent peer with its own context; the value is reducing the cost of
-context-switching across a portfolio.
+You have a Claude Code session in one repo, an OpenCode session in another, a
+Codex run in a third. Each holds context you cannot see without switching to it,
+and each stops to ask you something you will not notice until you do.
 
-Working name. Phase 1 = Claude + OpenCode.
-
-## Status
-
-| Piece | State |
-|---|---|
-| Driver interface + abstraction | done |
-| Mock driver | done, exercised |
-| Claude adapter | **done, live-verified** (send / resume / session persistence) |
-| OpenCode adapter | **done, live-verified** (new session + resume + export-based reply, free model) |
-| Codex adapter | done, CLI-surface-verified against `codex exec --help`; pending live-run |
-| Inbox state model + background sends | done, restart persistence verified |
-| StreamingDriver interface (live activity) | done — Claude and Codex adapters stream; UI shows `working:Bash` / `working:typing`. OpenCode has no event stream on `run`, so it shows the spinner only |
-| Per-project message history (last 100 turns) | done |
-| TUI dashboard (Bubble Tea) | done — list view, detail view with history, interactive attach |
-| Session inbox (`i`) | done — every session on the machine in one list; `n` adopts a row as a project. Also headless via `agent-inbox inbox [--json]` |
-| King round loop | done — one instruction fans out, every reply comes back, the king summarizes. `king.rounds` lets it follow up on what a reply revealed |
-| Legacy REPL | done, available via `--repl` flag |
-| Stop-hook bridge + live notify | **done, live-verified** (Claude only — OpenCode has no Stop hook; Codex hook system exists but not wired) |
-| CI + goreleaser + GitHub releases | done |
-| Tagged releases | done — [latest](https://github.com/im-tyler/agent-inbox/releases/latest) |
-
-### OpenCode notes
-- Default model is a **free, no-key** model (`opencode/deepseek-v4-flash-free`),
-  so OpenCode projects work without configuring a paid provider. Override per
-  install with `opencode.model` in config.
-- `opencode run --format json` is **empty on success**, so the adapter ignores
-  run output and reads the reply via `opencode export <id>`. A new session's id
-  is recovered by set-difference of `session list` around the run (serialized).
-- Your paid providers were failing independently of this tool: Z.AI `401`
-  (stored api key rejected — `opencode auth login` to refresh) and GitHub
-  Copilot `403 not licensed`. Not required for the free default.
-
-## Architecture
+agent-inbox puts all of them in one screen, and puts a supervisor in front of
+them that can ask them things on your behalf.
 
 ```
-main.go                 entry: dispatches to TUI (default), legacy REPL (--repl), or hook
-inbox_cmd.go            `agent-inbox inbox` — the reader headless, or as --json
-internal/config         config.json (projects + per-tool settings)
-internal/inbox          project state, mutex-guarded; background Send; persistence
-internal/driver         Driver interface + adapters (mock, claude, opencode, codex)
-internal/feed           the teploy.inbox/v1 item shape, merge and sort
-internal/sources        session discovery per tool (claude, opencode, codex)
-internal/mux            zellij/tmux pane detection and injection
-internal/board          the inbox reader UI — standalone, or hosted by the TUI
-internal/tui            Bubble Tea dashboard (model/view/update, styles, run)
+╭────────────────────────────────────────────────────────────────────╮
+│ agent-inbox                                                        │
+│                                                                    │
+│ king  claude                              fleet                    │
+│                                                                    │
+│ › you                             2:30PM  ★ supervisor           · │
+│   is anything blocked on neutron?                                  │
+│                                           ▸ neutron              ● │
+│ ▸ neutron                         2:31PM    api frozen until the   │
+│   api frozen until the db layer lands       db layer lands         │
+│                                                                    │
+│ ▸ teploy                          2:31PM    teploy               ⠹ │
+│   waiting on neutron's client                ⠹ Bash                │
+│                                                                    │
+│ ● claude                          2:32PM    tebian               ● │
+│   teploy is blocked on neutron's client      no commits today      │
+│   package. tebian is unaffected.                                   │
+│                                           3 projects               │
+│                                           1 working  2 waiting     │
+│                                                                    │
+│ type to talk to king...                                            │
+│ enter send  alt+enter newline  tab fleet  ? help  ctrl+c quit      │
+╰────────────────────────────────────────────────────────────────────╯
 ```
 
-The reader is one UI with two entry points, not two programs: `i` inside the
-dashboard hosts `internal/board` as a view, and `agent-inbox inbox` runs the
-same model standalone for a terminal or a pipe. A second list of the same
-sessions would only have drifted from the first.
+One message went out. The supervisor asked two projects, read both replies, and
+answered. You never left the screen.
 
-The only vendor-specific code lives in `internal/driver/*.go`. Each adapter
-implements:
+## Why this is not Claude Squad
 
-```go
-Send(ctx, dir, sessionID, prompt) Result   // empty sessionID = new session
-AttachArgs(dir, sessionID) []string          // argv for interactive drop-in
-```
+The existing multi-agent tools decompose **one** project into parallel workers —
+a lead agent splits a task and fans it out to short-lived subagents, usually in
+one repo, usually over an API.
 
-A key v1 simplification: in headless one-shot mode, the process **returns when
-the turn is done**, so the normalized status is simply `waiting` on success —
-sidestepping the fuzzy "blocked vs done vs working" classification until we move
-to streaming mode.
+This is the inverse. Each project is an **independent peer** with its own
+long-lived session, its own repo, and its own context that outlives any single
+question. Nothing is decomposed. The value is not parallelism, it is not having
+to hold six projects in your head at once.
 
-### Verified CLI surfaces
-- **Claude 2.1.167:** `claude -p --output-format json` returns a single result
-  object with `result`, `session_id`, `is_error`, `permission_denials`.
-- **OpenCode 1.15.11:** `opencode run --format json` is **empty on success**, so
-  the adapter ignores run output and reads the reply via `opencode export <id>`.
-  A new session's id is recovered by set-difference of `session list` around
-  the run (serialized). `opencode serve` exists for a future persistent-server
-  adapter.
-- **Codex CLI** (`codex exec --help` surface-verified): `codex exec --json
-  --output-last-message <file>` streams JSONL events and writes the final
-  assistant message to the given file. Resume: `codex exec resume <session-id>
-  <prompt>`. Interactive attach: `codex resume <session-id>`. Sandbox modes:
-  `read-only` / `workspace-write` / `danger-full-access` (or
-  `--dangerously-bypass-approvals-and-sandbox` for full autonomy).
+Three things follow from that, and together they are what this tool is:
 
-## Reader mode — `agent-inbox inbox`
+- **Cross-vendor.** Claude Code, OpenCode and Codex sit behind one driver
+  interface, so one supervisor can talk to all three. Vendor-specific code lives
+  in `internal/driver/*.go` and nowhere else.
+- **Real CLIs, not APIs.** Each project is driven through the actual tool, so it
+  inherits that tool's agent loop, permission model and session persistence
+  rather than a reimplementation of them.
+- **Memory that spans repos.** The supervisor keeps durable cross-project facts
+  — the things no single session can know — and curates them itself.
 
-The dashboard described above *drives* agent sessions by parsing their terminal
-output. Reader mode does the opposite: it only reads state that tools already
-wrote down, and merges it into one list of what is waiting on you.
+## Install
 
 ```sh
-agent-inbox inbox          # the reader
+go install github.com/im-tyler/agent-inbox@latest
+```
+
+Or download a binary for darwin/linux × amd64/arm64 from
+[releases](https://github.com/im-tyler/agent-inbox/releases/latest), extract, and
+put `agent-inbox` on your `$PATH`.
+
+> `go install` puts binaries in `$(go env GOPATH)/bin`. If the command is not
+> found afterwards, that directory is not on your `PATH`.
+
+From source:
+
+```sh
+git clone https://github.com/im-tyler/agent-inbox.git
+cd agent-inbox && go build -o agent-inbox .
+```
+
+`agent-inbox version` works out what it is without being told: a release binary
+carries the tag goreleaser stamped, a `go install` binary reads its module
+version from build info, and a working-tree build reports the tag it is ahead of
+plus `+dirty`.
+
+## Quickstart
+
+```sh
+agent-inbox
+```
+
+On first run you get a supervisor and nothing to supervise. Add projects without
+touching JSON:
+
+- Press `Tab` to focus the fleet, then `i` for the **session inbox** — every
+  agent session on your machine, whatever tool started it. `n` on a row adopts
+  it as a project.
+- Or `Tab` then `n` to point at a folder directly.
+
+Then type in the box at the bottom. That goes to the supervisor, which can reach
+every project you added.
+
+Data lives in `~/.agent-inbox/` — `config.json`, `state.json`, `notes.json` and
+`supervisor/`, plus an `events/` directory once the Stop hook starts firing.
+Override the location with `AGENT_INBOX_DIR`.
+
+## The supervisor
+
+The supervisor — "the king" in the code — is a session of its own, in a folder
+of its own, provisioned at `~/.agent-inbox/supervisor/` on first run. It is not
+one of your projects and cannot be removed. Every project you add joins its
+fleet.
+
+That folder gets a starter `AGENTS.md` describing the job, which is yours to
+edit and is never rewritten. It is the supervisor's only context: it has no
+repository, and it cannot read the fleet's files.
+
+**What makes it a king**, mechanically:
+
+1. **State injection.** Each turn is prefixed with the live status and last
+   message of every fleet project, so it never has to ask you what is going on.
+2. **Directive dispatch.** `[send to PROJECT: message]` lines in its reply are
+   parsed out and dispatched. Replies come back as one-line receipts in its
+   thread, and the full text goes back to the supervisor to summarize.
+3. **Notes.** `[note: ...]` records a durable cross-project fact; `[note drop:
+   ...]` retracts one. Notes are injected into later turns and evicted by
+   relevance rather than age — the oldest note is usually the most load-bearing
+   one, so plain FIFO discards exactly the wrong end.
+
+**Round budget.** By default the supervisor gets one dispatch round per message:
+ask, read every reply, answer you. `king.rounds` (max 5) lets it act on what a
+reply revealed — the case where a project answers "that depends what B is doing"
+and it can go ask B instead of telling you to. Each extra round is another N
+agent turns spent unattended, which is why the default is 1. A round that
+repeats the previous round's dispatch verbatim is stopped as a loop, and a
+request that runs out of budget is recorded in the thread rather than dropped in
+silence.
+
+**Adoption.** OpenCode and Codex sessions are resumed directly. A Claude Code
+row is always a live process, so it is *forked* (`--fork-session`): the new
+session inherits the original's history and the original is left untouched.
+
+## Session inbox — `i`, or headless
+
+The dashboard *drives* sessions. The inbox does the opposite: it only reads
+state the tools already wrote down, and merges it into one list of what is
+waiting on you.
+
+```sh
+agent-inbox inbox          # the reader, standalone
 agent-inbox inbox --json   # the merged feed, for scripts and agents
 ```
 
@@ -109,69 +163,37 @@ With no configuration it picks up whichever agent CLIs are installed:
 
 | Source | State signal | Reply from the inbox |
 |---|---|---|
-| **Claude Code** | `claude agents --json` reports `state: blocked` outright, with a one-line `needs` from `~/.claude/jobs/` | no — a live session cannot be written into |
+| **Claude Code** | `claude agents --json` reports `state: blocked`, with a one-line `needs` from `~/.claude/jobs/` | no — a live session cannot be written into |
 | **opencode** | last message's `finish` is `stop` | yes, `opencode run -s <id>` |
 | **codex** | rollout ends on a `task_complete` event | yes, `codex exec resume <id>` |
 | **teploy-ship** | parked durable runs | yes, approve/deny |
 
-An opencode fork such as **fylun-code** works through the `opencode` kind by
-pointing `opencode_db` at that build's own database.
-
 Only sessions whose process is actually running are listed. Claude Code keeps
 reporting agents whose process is long gone, still carrying whatever state they
 last recorded, and opencode's database holds every session ever created with
-almost all of them ended on `stop` — without a liveness check the list fills
-with months of finished work that all looks like it is waiting on you.
+almost all of them ended on `stop`. Without a liveness check the list fills with
+months of finished work that all looks like it is waiting on you.
 
-Sources are configured in `~/.config/agent-inbox/sources.json` — see
-[`sources.example.json`](sources.example.json). Any producer speaking the
-`teploy.inbox/v1` shape works, over a command or `GET /inbox`; add one and the
-UI needs no change, because items carry their own resolve commands.
+Add your own sources in `~/.config/agent-inbox/sources.json` — see
+[`sources.example.json`](sources.example.json). Anything speaking the
+`teploy.inbox/v1` shape works, over a command or `GET /inbox`; the UI needs no
+change, because items carry their own resolve commands. An opencode fork such as
+fylun-code works through the `opencode` kind by pointing `opencode_db` at that
+build's database.
 
-Actions are executed as **argv, never through a shell**, so a denial reason
-full of shell metacharacters is one argument and can never become another
-command. A `{placeholder}` in an action prompts you and is substituted as a
-single whole argument.
+Actions run as **argv, never through a shell**, so a denial reason full of shell
+metacharacters is one argument and can never become another command. A
+`{placeholder}` prompts you and is substituted as a single whole argument. An
+unreachable source reports itself and never blanks the rest of the list.
 
-An unreachable source reports itself and never blanks the rest of the list.
+## Config
 
-## Run
-
-### From a release binary
-
-Download the latest archive from [releases](https://github.com/im-tyler/agent-inbox/releases) for your platform (darwin/linux × amd64/arm64), extract, and put `agent-inbox` on your `$PATH`.
-
-### Build from source
-
-```sh
-go install github.com/im-tyler/agent-inbox@latest
-# or, to build the current main:
-git clone https://github.com/im-tyler/agent-inbox.git
-cd agent-inbox
-go build -o agent-inbox .
-```
-
-`agent-inbox version` works out what it is without being told. A release binary
-carries the tag goreleaser stamped; a `go install ...@latest` binary reads its
-module version from build info; a working-tree build reports the tag it is
-ahead of plus `+dirty`. Only a build with nothing to derive from — outside a
-repo, or `-buildvcs=false` — falls back to `dev`.
-
-```sh
-./agent-inbox version
-```
-
-The default UI is a **Bubble Tea TUI dashboard** showing all federated projects
-on one screen with live status updates. Pass `--repl` for the legacy
-line-oriented REPL. Projects can be added at runtime via `n` — no JSON editing
-required (config.json is rewritten on add).
-
-Config:
+`~/.agent-inbox/config.json`:
 
 ```json
 {
   "claude":   { "permission_mode": "default" },
-  "opencode": { "skip_permissions": false },
+  "opencode": { "model": "opencode/deepseek-v4-flash-free", "skip_permissions": false },
   "codex":    { "sandbox": "workspace-write" },
   "king":     { "rounds": 1 },
   "projects": [
@@ -182,133 +204,49 @@ Config:
 }
 ```
 
-`projects` may be empty — you get a supervisor with nothing to supervise, which
-is a usable state you can add to with `n`. Under `king`, `rounds` is the
-dispatch budget and the optional `name`, `tool` and `dir` override the
-supervisor described below.
+`projects` may be empty — a supervisor with nothing to supervise is a usable
+state you add to with `n`. Under `king`, `rounds` is the dispatch budget and the
+optional `name`, `tool` and `dir` override the supervisor. OpenCode defaults to a
+**free, no-key** model so those projects work without configuring a provider.
 
-### TUI keybindings
+## Keybindings
 
-**Dashboard** (default view):
+The main view has two focus modes and `Tab` swaps between them. The footer
+always shows the keys for whichever one you are in.
 
-| Key | Action |
-|---|---|
-| `j` / `k` or `↑` / `↓` | navigate project list |
-| `1` – `9` | select project by index |
-| `s` | send a message to the selected project (inline prompt) |
-| `v` or `Enter` | open detail view (full message, metadata, session id, live streaming text) |
-| `x` | cancel in-flight send, or dismiss a waiting/error notification |
-| `:` | open the more-actions menu |
-| `q` or `Ctrl+C` | quit |
-
-**More actions** (press `:`):
+**Composer focused** (the default) — you are talking to the supervisor:
 
 | Key | Action |
 |---|---|
-| `n` | add a new project (folder + agent picker modal) |
-| `d` | delete the selected project (with confirmation) |
-| `t` | change the selected project's tool |
-| `a` | attach interactively — exits TUI, hands terminal to the agent, re-launches TUI |
-| `K` | enter king mode for the selected project (supervisor panel) |
-| `?` | toggle keybindings help |
-| `Esc` | close the actions menu |
+| `Enter` | send |
+| `Alt+Enter` | newline |
+| `PgUp` / `PgDn` | scroll the conversation |
+| `Tab` | focus the fleet |
+| `?` | help |
+| `Ctrl+C` | quit |
 
-**Detail view** (press `v`):
-
-| Key | Action |
-|---|---|
-| `j` / `k` or `↑` / `↓` | scroll through history |
-| `PgDn` / `PgUp` | jump 10 lines |
-| `g` / `G` | jump to top / bottom |
-| `s` | send a follow-up message |
-| `a` | attach to the live session |
-| `Esc` | back to dashboard |
-| `q` | quit |
-
-**King mode** (press `:` then `K`):
+**Fleet focused** (`Tab`) — the sidebar owns the keys:
 
 | Key | Action |
 |---|---|
-| `s` | send to king (fleet state is auto-injected into the prompt) |
-| `+` | add a project to the connected set |
-| `-` | remove a project from the connected set |
-| `x` | cancel the king's in-flight send |
-| `Esc` | back to dashboard |
-| `q` | quit |
+| `j` / `k` | move through the fleet |
+| `Enter` | open the selected project's detail view |
+| `i` | session inbox |
+| `n` | new project |
+| `d` | delete · `t` change tool |
+| `a` | attach — hands the terminal to the agent, relaunches on exit |
+| `x` | cancel an in-flight send, or dismiss a waiting/error badge |
+| `Tab` / `Esc` | back to the composer |
 
-While in send mode: `Enter` dispatches, `Esc` cancels. On error, the input text is preserved so you can edit and retry.
-While in delete-confirm: `y` confirms, any other key cancels.
-While in king mode: `s` sends to king, `+` adds connected project, `-` removes, `x` cancels king's send, `Esc` returns to list.
-
-## King mode
-
-Press `K` on any project to enter **king mode** — a supervisor panel where one agent (the "king") coordinates other projects.
-
-The king is a session of its own, in a folder of its own — provisioned on
-first run at `~/.agent-inbox/supervisor/`, not something you add. It is not one
-of your projects and cannot be removed; every project you *do* add becomes part
-of its fleet.
-
-That folder gets a starter `AGENTS.md` describing the supervisor's job, which is
-yours to edit and is never rewritten. Override the name, tool or location with
-`king.name` / `king.tool` / `king.dir`; define a project under the supervisor's
-name and that one is used instead.
-
-It used to be whichever project came first in `config.json`, which made a real
-code repo the supervisor by accident. Three things were wrong with that, none of
-them visible from the UI: the injected prompt told it that it could not read the
-fleet's files while it sat inside one of their working directories; that project
-was excluded from its own fleet, so it could never be asked about itself; and
-supervision receipts interleaved with that project's own work in one thread.
-
-What makes it a king:
-
-1. **State injection**: when you send a message to the king, agent-inbox prepends the current status and last message of each connected project to the prompt. The king sees the fleet's state without you typing it.
-2. **Directive dispatch**: the king's response is parsed for `[send to PROJECT: message]` lines. Each directive is automatically dispatched to the target project via normal `Send`.
-3. **Notes**: `[note: ...]` records a durable cross-project fact, `[note drop: ...]` retracts one. Notes are injected into later turns, including turns with no fleet connected — a supervisor with nothing attached is still learning things worth keeping.
-
-```
-┌─ king: supervisor (claude) ──────────────────┐
-│                                               │
-│ connected:                                    │
-│   maccel    codex    waiting   wrote 3 tests  │
-│   haven     claude   working:typing           │
-│                                               │
-│ conversation:                                 │
-│   [you 2:30pm] make sure maccel's tests pass │
-│   [claude 2:31pm] maccel is waiting with 3   │
-│     tests. I'll start tebian on docs.         │
-│     [send to tebian: draft security tile docs]│
-│                                               │
-│ s send  + add  - remove  x cancel  esc back  │
-└───────────────────────────────────────────────┘
-```
-
-The king doesn't auto-act — it only dispatches when you send it a message. For autonomous event-driven supervision (king acts when projects finish on their own), see the v0.2 roadmap.
-
-**Round budget.** By default the king gets one dispatch round per message: it asks, reads every reply, and answers you. Set `king.rounds` higher (max 5) to let it act on what a reply revealed — the case where a project answers "that depends what B is doing" and the supervisor can go ask B instead of telling you to. Each extra round is another N agent turns spent unattended, which is why the default is 1. A round that repeats the previous round's dispatch verbatim is stopped as a loop, and a request that runs out of budget is recorded in the king's thread rather than silently dropped.
-
-**Adoption.** `n` on an inbox row turns that session into a project. OpenCode and Codex sessions resume directly. A Claude Code row is always a live process, so it is *forked* instead (`--fork-session`): the new session inherits the original's history, and the original is left alone.
-
-### Legacy REPL
-
-```sh
-./agent-inbox --repl
-```
-
-Commands: `ls`, `send <n> <msg>`, `view <n>`, `attach <n>`, `quit`.
-
-Data dir defaults to `~/.agent-inbox/` (config.json, state.json, events/).
-Override with `AGENT_INBOX_DIR`.
+**Detail view**: `j`/`k` scroll · `PgDn`/`PgUp` jump 10 · `g`/`G` top/bottom ·
+`s` follow-up · `a` attach · `Esc` back.
 
 ## Stop hook — push instead of poll
 
-Register `agent-inbox hook` as a Claude `Stop` hook so any Claude session in a
-federated project reports "I'm waiting" into the inbox — **including sessions
-you run by hand**, not just inbox-spawned ones. The hook no-ops for any cwd that
-isn't a configured project, so it's safe to register globally.
-
-Add to `~/.claude/settings.json` (use the absolute path to the built binary):
+Register `agent-inbox hook` as a Claude `Stop` hook and any Claude session in a
+configured project reports "I'm waiting" into the inbox — **including sessions
+you run by hand**. It no-ops for any cwd that is not a configured project, so it
+is safe to register globally.
 
 ```json
 {
@@ -320,21 +258,76 @@ Add to `~/.claude/settings.json` (use the absolute path to the built binary):
 }
 ```
 
-Flow: session stops -> hook reads the Stop payload, matches cwd to a project
-(symlink-tolerant), extracts the last assistant turn from the transcript, drops
-an event file in `events/` -> the running inbox's 1s poller ingests it, flips the
-project to `waiting`, and prints a live `[notify]`.
+Session stops → the hook matches cwd to a project (symlink-tolerant), extracts
+the last assistant turn, drops an event file in `events/` → the running inbox
+ingests it within a second, flips the project to `waiting`, and notifies.
 
-## Not yet built (deliberately deferred)
+## Architecture
+
+```
+main.go            entry: TUI (default), legacy REPL (--repl), or hook
+supervisor.go      provisions the supervisor's folder, brief and project
+inbox_cmd.go       `agent-inbox inbox` — the reader, headless or --json
+internal/config    config.json (projects + per-tool settings)
+internal/inbox     project state, mutex-guarded; background sends; persistence
+internal/driver    Driver interface + adapters (mock, claude, opencode, codex)
+internal/feed      the teploy.inbox/v1 item shape, merge and sort
+internal/sources   session discovery per tool
+internal/mux       zellij/tmux pane detection and injection
+internal/board     the inbox reader UI — standalone, or hosted by the TUI
+internal/tui       Bubble Tea dashboard (model/view/update, styles, run)
+```
+
+The reader is one UI with two entry points, not two programs: `i` hosts
+`internal/board` as a view, and `agent-inbox inbox` runs the same model
+standalone. A second list of the same sessions would only have drifted from the
+first.
+
+Every adapter implements:
+
+```go
+Send(ctx, dir, sessionID, prompt) Result   // empty sessionID = new session
+AttachArgs(dir, sessionID) []string        // argv for interactive drop-in
+```
+
+Two optional interfaces refine that. `StreamingDriver` reports live activity as
+a turn runs, so the UI shows `working · Bash` instead of a silent spinner.
+`ForkingDriver` starts a session seeded from another's history, which is how a
+live Claude session is adopted without two writers landing on one transcript.
+
+### Verified CLI surfaces
+
+Every claim here was checked by running the tool, not by reading its docs.
+
+- **Claude Code 2.1.220** — `claude -p --output-format json` returns one result
+  object (`result`, `session_id`, `is_error`, `permission_denials`).
+  `--output-format stream-json` emits NDJSON `system` / `assistant` / `result`
+  events. `--resume <id> --fork-session` seeds a new session from a live one and
+  returns the new id.
+- **OpenCode 1.18.11** — `opencode run --format json` is **empty on success**, so
+  the adapter ignores run output and reads the reply via `opencode export <id>`.
+  A new session's id is recovered by set-difference of `session list` around the
+  run, serialized so concurrent projects cannot claim each other's. There is no
+  event stream on `run`; `opencode serve` exists for a future adapter.
+- **Codex CLI 0.146.0** — `codex exec --json` emits `thread.started` /
+  `item.started` / `item.completed` / `turn.completed`. The conversation id is
+  **`thread_id`**, not `session_id`; resume with `codex exec resume <thread_id>`.
+  The final message comes from `--output-last-message`, which is the only part
+  the CLI guarantees.
+
+## Not yet built
+
 - **Permission policy** — the decision that determines whether this reduces load
-  or just relocates it. Currently passes through each tool's own mode.
-- **`sharpen`** — optional LLM rewrite of a rough reply before sending.
-- **OpenCode Stop-equivalent** — OpenCode's CLI has no Stop hook, so hand-run
-  OpenCode sessions don't self-report. No path to fix without upstream CLI
-  support.
-- **Codex Stop-equivalent** — Codex has a hooks system (config-file-driven,
-  not CLI-subcommand-driven) but the bridge into agent-inbox isn't wired yet.
-- **OpenCode/Codex streaming** — they don't implement StreamingDriver because
-  their CLIs don't expose useful streaming events (OpenCode's `--format json`
-  is empty on success; Codex's JSONL is parsed only for session-id recovery).
-- **Multi-host** — projects on different machines via Tailscale.
+  or relocates it. Currently passes through each tool's own mode.
+- **OpenCode streaming** — no event stream exists on `run`; real streaming means
+  driving `opencode serve` over SSE, which is a different transport.
+- **OpenCode / Codex stop-equivalents** — OpenCode's CLI has no Stop hook.
+  Codex has a config-driven hooks system, not yet wired.
+- **Autonomous supervision** — the supervisor acts only when you message it. An
+  event-driven king that reacts when a project finishes on its own is the next
+  real feature.
+- **Multi-host** — projects on other machines over Tailscale.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
