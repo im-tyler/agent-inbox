@@ -110,14 +110,23 @@ func (m *Model) handleActionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "K":
-		snap := m.inbox.Snapshot()
-		if m.selected < 1 || m.selected > len(snap) {
+		// Opens the supervisor's panel. It used to promote whatever was
+		// selected, which is why the panel and the dashboard could disagree
+		// about who the king was — there is one supervisor now, and it is not
+		// one of the projects in this list.
+		if m.kingIndex() == 0 {
 			m.view = viewMain
-			m.toast = "no project selected"
+			m.toast = "no supervisor configured"
 			m.toastAt = time.Now()
 			return m, nil
 		}
-		m.kingIdx = m.selected
+		// The panel opens on the whole fleet, matching the dashboard. It used
+		// to open on nothing, so the first thing it showed was "(none — press
+		// + to add)" for projects that were already there. Narrowing with
+		// +/- still works; it is now a filter rather than a setup step.
+		if len(m.connected) == 0 {
+			m.connected = m.inbox.FleetNames()
+		}
 		m.kingInput = textinput.New()
 		m.kingInput.CharLimit = 0
 		m.kingInput.Width = 60

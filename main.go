@@ -68,11 +68,17 @@ func main() {
 	for i, p := range cfg.Projects {
 		projects[i] = &inbox.Project{Name: p.Name, Tool: p.Tool, Dir: p.Dir, Status: driver.StatusIdle}
 	}
+	// The supervisor is provisioned, not configured. It is prepended rather
+	// than written into config.json's projects: it is not one of the user's
+	// projects, and it should not be removable by editing that list.
+	king := supervisorProject(dd, cfg)
+	projects = withSupervisor(king, projects)
 	inbox.LoadState(*statePath, projects)
 
 	in := inbox.New(projects, drivers, *statePath).
 		WithConfigPath(*cfgPath).
 		WithNotesPath(filepath.Join(dd, "notes.json")).
+		WithKing(king.Name).
 		WithKingRounds(cfg.King.Rounds)
 	defer in.Close()
 	eventsDir := filepath.Join(dd, "events")

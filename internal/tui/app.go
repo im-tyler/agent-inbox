@@ -162,10 +162,11 @@ func clampWidth(s string, w int) string {
 
 // buildConversationLines returns all conversation lines for the king project.
 func (m Model) buildConversationLines(snap []inbox.Project, width int) []string {
-	if m.kingProjectIdx < 1 || m.kingProjectIdx > len(snap) {
-		return []string{"(no king project)"}
+	ki := m.kingIndex()
+	if ki < 1 || ki > len(snap) {
+		return []string{"(no supervisor)"}
 	}
-	king := snap[m.kingProjectIdx-1]
+	king := snap[ki-1]
 	maxW := width - 2
 	if maxW < 10 {
 		maxW = 10
@@ -323,8 +324,9 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	// the names share a left edge. The per-row index that used to sit here
 	// selected nothing — the sidebar navigates with j/k — and it pushed the
 	// fleet's names two columns right of the king's.
+	ki := m.kingIndex()
 	for i, p := range snap {
-		isKing := i+1 == m.kingProjectIdx
+		isKing := i+1 == ki
 		if !isKing {
 			fleetCount++
 		}
@@ -421,14 +423,10 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.mainInput.Reset()
 		m.syncInputHeight()
-		snap := m.inbox.Snapshot()
-		var connected []string
-		for i, p := range snap {
-			if i+1 != m.kingProjectIdx {
-				connected = append(connected, p.Name)
-			}
-		}
-		err := m.inbox.KingSend(m.kingProjectIdx, text, connected)
+		// Everything but the supervisor. Asked of the inbox rather than
+		// derived from indices here, so one definition of "the fleet" serves
+		// the dashboard, the king panel and the dispatcher.
+		err := m.inbox.KingSend(m.kingIndex(), text, m.inbox.FleetNames())
 		if err != nil {
 			m.toast = err.Error()
 			m.toastAt = time.Now()
@@ -445,9 +443,10 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mainInput.Blur()
 		// Ensure sidebarCursor points to a valid non-king project.
 		snap := m.inbox.Snapshot()
-		if m.sidebarCursor < 1 || m.sidebarCursor > len(snap) || m.sidebarCursor == m.kingProjectIdx {
+		ki := m.kingIndex()
+		if m.sidebarCursor < 1 || m.sidebarCursor > len(snap) || m.sidebarCursor == ki {
 			for i := 1; i <= len(snap); i++ {
-				if i != m.kingProjectIdx {
+				if i != ki {
 					m.sidebarCursor = i
 					break
 				}
@@ -564,8 +563,9 @@ func (m Model) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "j", "down":
 		// Next non-king project.
+		ki := m.kingIndex()
 		for i := m.sidebarCursor + 1; i <= len(snap); i++ {
-			if i != m.kingProjectIdx {
+			if i != ki {
 				m.sidebarCursor = i
 				break
 			}
@@ -574,8 +574,9 @@ func (m Model) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "k", "up":
 		// Previous non-king project.
+		ki := m.kingIndex()
 		for i := m.sidebarCursor - 1; i >= 1; i-- {
-			if i != m.kingProjectIdx {
+			if i != ki {
 				m.sidebarCursor = i
 				break
 			}

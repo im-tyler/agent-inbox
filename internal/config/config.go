@@ -27,6 +27,20 @@ type Settings struct {
 		// reply revealed (ask B about what A just said) at the cost of that
 		// many more agent turns per message, unattended. Clamped internally.
 		Rounds int `json:"rounds"`
+		// Name is what the supervisor is called. Defaults to "supervisor".
+		Name string `json:"name"`
+		// Tool is the driver it runs on. Defaults to "claude".
+		Tool string `json:"tool"`
+		// Dir is the folder its session lives in. Defaults to a "supervisor"
+		// directory beside config.json, created on first run.
+		//
+		// The supervisor gets a folder of its own rather than borrowing a
+		// project's for a reason that is not tidiness: an agent session is
+		// anchored to a working directory, and pointing it at one of the
+		// repos it supervises gives it file access to that repo, excludes
+		// that repo from its own fleet, and interleaves supervision with
+		// whatever else that project is doing.
+		Dir string `json:"dir"`
 	} `json:"king"`
 	Projects []Project `json:"projects"`
 }
@@ -49,13 +63,17 @@ func Load(path string) (*Settings, error) {
 	return &s, nil
 }
 
-// Validate checks that the settings are usable. Called at startup only —
-// internal callers (appendConfig, removeProjectConfig, etc.) use Load
-// without validation so they can operate on configs that temporarily
-// have zero projects during a removal.
+// Validate checks that the settings are usable.
+//
+// Zero projects is no longer an error. The supervisor is provisioned rather
+// than configured, so an empty list means a supervisor and nothing to
+// supervise — a usable state you can add to with `n` from inside the TUI.
+// Refusing to start sent a first-run user to a text editor instead.
 func Validate(s *Settings) error {
-	if len(s.Projects) == 0 {
-		return fmt.Errorf("no projects defined")
+	for i, p := range s.Projects {
+		if p.Name == "" || p.Dir == "" {
+			return fmt.Errorf("project %d: name and dir are required", i+1)
+		}
 	}
 	return nil
 }

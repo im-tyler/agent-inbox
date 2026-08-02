@@ -57,8 +57,7 @@ type Model struct {
 	spinning bool
 
 	// King mode state.
-	kingIdx        int             // 1-based index of the project acting as king
-	connected      []string        // names of connected projects
+	connected      []string        // names of connected projects (king panel)
 	kingSendMode   bool            // when true, kingInput is active
 	kingAddMode    bool            // when true, showing add-connected picker
 	kingRemoveMode bool            // when true, showing remove-connected picker
@@ -72,7 +71,6 @@ type Model struct {
 	mainInput            textarea.Model
 	mainScrollFromBottom int  // lines scrolled up from bottom (0 = at bottom)
 	mainAutoScroll       bool // when true, auto-pins to bottom on each tick
-	kingProjectIdx       int  // 1-based, defaults to 1 (first project is king)
 
 	// Tab-focus state: false = chat focused (default), true = sidebar focused.
 	focusSidebar  bool
@@ -123,7 +121,6 @@ func New(in *inbox.Inbox, eventsDir string) Model {
 		selected:       1,
 		sendInput:      ti,
 		mainInput:      mi,
-		kingProjectIdx: 1,
 		mainAutoScroll: true,
 		sidebarCursor:  2, // first non-king project
 	}
@@ -173,8 +170,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Clamp scroll to prevent blank conversation.
 		if m.mainScrollFromBottom > 0 {
 			snap := m.inbox.Snapshot()
-			if m.kingProjectIdx >= 1 && m.kingProjectIdx <= len(snap) {
-				king := snap[m.kingProjectIdx-1]
+			if m.kingIndex() >= 1 && m.kingIndex() <= len(snap) {
+				king := snap[m.kingIndex()-1]
 				lineCount := 2
 				for _, msg := range king.History {
 					lineCount += 1 + strings.Count(msg.Content, "\n") + 1 + 1
@@ -811,3 +808,15 @@ func helpText() string {
 const footerText = "s send  v view  x cancel  : more  q quit"
 
 // (max is the Go 1.21+ builtin — no local definition needed.)
+
+// kingIndex resolves the supervisor's position in the current project list.
+//
+// Resolved on each use rather than stored. The old code kept two integers —
+// one hardcoded to 1 for the dashboard, one set by pressing K — which could
+// name different projects, and either could start naming the wrong one as
+// soon as a removal shifted the list. Identity is the supervisor's name, and
+// the inbox owns it.
+//
+// Returns 0 when there is no supervisor, which callers must treat as "no
+// conversation to show" rather than as an index.
+func (m Model) kingIndex() int { return m.inbox.KingIndex() }

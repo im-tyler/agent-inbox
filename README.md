@@ -182,6 +182,11 @@ Config:
 }
 ```
 
+`projects` may be empty — you get a supervisor with nothing to supervise, which
+is a usable state you can add to with `n`. Under `king`, `rounds` is the
+dispatch budget and the optional `name`, `tool` and `dir` override the
+supervisor described below.
+
 ### TUI keybindings
 
 **Dashboard** (default view):
@@ -239,7 +244,24 @@ While in king mode: `s` sends to king, `+` adds connected project, `-` removes, 
 
 Press `K` on any project to enter **king mode** — a supervisor panel where one agent (the "king") coordinates other projects.
 
-The king is just a regular project (Claude, Codex, or OpenCode). What makes it a king is:
+The king is a session of its own, in a folder of its own — provisioned on
+first run at `~/.agent-inbox/supervisor/`, not something you add. It is not one
+of your projects and cannot be removed; every project you *do* add becomes part
+of its fleet.
+
+That folder gets a starter `AGENTS.md` describing the supervisor's job, which is
+yours to edit and is never rewritten. Override the name, tool or location with
+`king.name` / `king.tool` / `king.dir`; define a project under the supervisor's
+name and that one is used instead.
+
+It used to be whichever project came first in `config.json`, which made a real
+code repo the supervisor by accident. Three things were wrong with that, none of
+them visible from the UI: the injected prompt told it that it could not read the
+fleet's files while it sat inside one of their working directories; that project
+was excluded from its own fleet, so it could never be asked about itself; and
+supervision receipts interleaved with that project's own work in one thread.
+
+What makes it a king:
 
 1. **State injection**: when you send a message to the king, agent-inbox prepends the current status and last message of each connected project to the prompt. The king sees the fleet's state without you typing it.
 2. **Directive dispatch**: the king's response is parsed for `[send to PROJECT: message]` lines. Each directive is automatically dispatched to the target project via normal `Send`.

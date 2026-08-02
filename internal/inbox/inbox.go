@@ -71,6 +71,13 @@ type Inbox struct {
 	// that started it.
 	rounds int
 
+	// kingName identifies the supervisor. It is a name and not an index
+	// because the supervisor has to survive the list moving: adding and
+	// removing projects reorders indices, and the king was previously
+	// "whichever project happens to be first", which made the supervisor an
+	// accident of config ordering.
+	kingName string
+
 	// notes are the supervisor's durable facts about the fleet.
 	notes []Note
 
@@ -157,6 +164,58 @@ func (in *Inbox) WithKingRounds(n int) *Inbox {
 	in.rounds = n
 	in.mu.Unlock()
 	return in
+}
+
+// WithKing names the project that acts as supervisor. Set once at startup.
+func (in *Inbox) WithKing(name string) *Inbox {
+	in.mu.Lock()
+	in.kingName = name
+	in.mu.Unlock()
+	return in
+}
+
+// KingName is the supervisor's project name, empty when none is configured.
+func (in *Inbox) KingName() string {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return in.kingName
+}
+
+// KingIndex resolves the supervisor to a 1-based index, or 0 when it is not in
+// the list. Callers that hold an index across time must re-resolve: a removal
+// shifts everything after it.
+func (in *Inbox) KingIndex() int {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	for i, p := range in.projects {
+		if strings.EqualFold(p.Name, in.kingName) {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// IsKing reports whether a project name is the supervisor's.
+func (in *Inbox) IsKing(name string) bool {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return in.kingName != "" && strings.EqualFold(name, in.kingName)
+}
+
+// FleetNames is every project the supervisor can dispatch to: all of them
+// except itself. A king that could send to itself would wait for a reply from
+// the session that is waiting to send it.
+func (in *Inbox) FleetNames() []string {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	out := make([]string, 0, len(in.projects))
+	for _, p := range in.projects {
+		if in.kingName != "" && strings.EqualFold(p.Name, in.kingName) {
+			continue
+		}
+		out = append(out, p.Name)
+	}
+	return out
 }
 
 // WithConfigPath enables runtime project addition via AddProject; the path
@@ -579,6 +638,13 @@ func (in *Inbox) RemoveProject(idx int) error {
 		return err
 	}
 	name := p.Name
+	// The supervisor is not one of the projects you manage — it is the thing
+	// managing them. Removing it would leave a UI whose main view has no
+	// conversation to show and no way to get one back.
+	if in.kingName != "" && strings.EqualFold(name, in.kingName) {
+		in.mu.Unlock()
+		return fmt.Errorf("%s is the supervisor — it cannot be removed", name)
+	}
 	// Cancel any in-flight send before removing.
 	if cancel, ok := in.cancels[name]; ok {
 		delete(in.cancels, name)
@@ -745,6 +811,10 @@ func LoadState(path string, projects []*Project) {
 			continue
 		}
 		p.SessionID = s.SessionID
+		// Without this an adoption that was never sent to before a restart
+		// comes back as a blank project, which is the one case the field was
+		// persisted for.
+		p.ForkFrom = s.ForkFrom
 		p.Status = s.Status
 		p.LastMessage = s.LastMessage
 		p.LastErr = s.LastErr

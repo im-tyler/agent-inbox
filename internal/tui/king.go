@@ -22,11 +22,11 @@ import (
 
 func (m *Model) renderKing() string {
 	snap := m.inbox.Snapshot()
-	if m.kingIdx < 1 || m.kingIdx > len(snap) {
+	if m.kingIndex() < 1 || m.kingIndex() > len(snap) {
 		m.view = viewMain
 		return m.viewList()
 	}
-	king := snap[m.kingIdx-1]
+	king := snap[m.kingIndex()-1]
 
 	var b strings.Builder
 
@@ -120,7 +120,7 @@ func (m *Model) renderKingAddPicker(snap []inbox.Project) string {
 	}
 	idx := 0
 	for i, p := range snap {
-		if i+1 == m.kingIdx {
+		if i+1 == m.kingIndex() {
 			continue // skip king itself
 		}
 		if connSet[p.Name] {
@@ -171,10 +171,10 @@ func (m *Model) handleKingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "s":
 		snap := m.inbox.Snapshot()
-		if m.kingIdx < 1 || m.kingIdx > len(snap) {
+		if m.kingIndex() < 1 || m.kingIndex() > len(snap) {
 			return m, nil
 		}
-		if snap[m.kingIdx-1].Status == driver.StatusWorking {
+		if snap[m.kingIndex()-1].Status == driver.StatusWorking {
 			m.toast = "king is already working — wait or press x to cancel"
 			m.toastAt = time.Now()
 			return m, nil
@@ -204,7 +204,7 @@ func (m *Model) handleKingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "x":
 		// Cancel king's in-flight send.
-		if err := m.inbox.Cancel(m.kingIdx); err != nil {
+		if err := m.inbox.Cancel(m.kingIndex()); err != nil {
 			m.toast = err.Error()
 		} else {
 			m.toast = "cancelled king"
@@ -225,7 +225,7 @@ func (m *Model) handleKingSendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		err := m.inbox.KingSend(m.kingIdx, text, m.connected)
+		err := m.inbox.KingSend(m.kingIndex(), text, m.connected)
 		if err != nil {
 			m.toast = err.Error()
 		} else {
@@ -266,7 +266,7 @@ func (m *Model) handleKingAddKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		var candidates []string
 		for i, p := range snap {
-			if i+1 == m.kingIdx || connSet[p.Name] {
+			if i+1 == m.kingIndex() || connSet[p.Name] {
 				continue
 			}
 			candidates = append(candidates, p.Name)
