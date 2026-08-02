@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"agentinbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/feed"
 )
 
 // rollout writes a codex session file the way codex lays them out:

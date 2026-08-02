@@ -8,8 +8,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"agentinbox/internal/driver"
-	"agentinbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/inbox"
 )
 
 // King view state on the Model:

@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"agentinbox/internal/config"
+	"github.com/im-tyler/agent-inbox/internal/config"
 )
 
 // renderDeleteConfirm draws the delete-confirmation prompt.

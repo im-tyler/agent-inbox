@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"agentinbox/internal/config"
-	"agentinbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/config"
+	"github.com/im-tyler/agent-inbox/internal/driver"
 )
 
 type Project struct {

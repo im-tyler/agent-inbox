@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"agentinbox/internal/feed"
-	"agentinbox/internal/sources"
+	"github.com/im-tyler/agent-inbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/sources"
 )
 
 func join(argv []string) string { return strings.Join(argv, "\x00") }

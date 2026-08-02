@@ -18,9 +18,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"agentinbox/internal/feed"
-	"agentinbox/internal/mux"
-	"agentinbox/internal/sources"
+	"github.com/im-tyler/agent-inbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/mux"
+	"github.com/im-tyler/agent-inbox/internal/sources"
 )
 
 var (

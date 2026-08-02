@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"agentinbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/driver"
 )
 
 func TestParseKingNotes(t *testing.T) {

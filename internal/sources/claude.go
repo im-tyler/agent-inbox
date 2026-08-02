@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"agentinbox/internal/feed"
-	"agentinbox/internal/mux"
+	"github.com/im-tyler/agent-inbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/mux"
 )
 
 // Claude reports your live Claude Code sessions.

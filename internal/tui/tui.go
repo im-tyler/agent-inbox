@@ -16,9 +16,9 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"agentinbox/internal/board"
-	"agentinbox/internal/driver"
-	"agentinbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/board"
+	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/inbox"
 )
 
 // viewMode controls which screen the TUI is rendering.

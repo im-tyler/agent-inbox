@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"agentinbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/driver"
 )
 
 // forkDriver records which of the two entry points a turn came through, so a

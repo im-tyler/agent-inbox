@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"agentinbox/internal/config"
-	"agentinbox/internal/driver"
-	"agentinbox/internal/inbox"
-	"agentinbox/internal/tui"
+	"github.com/im-tyler/agent-inbox/internal/config"
+	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/tui"
 )
 
 func dataDir() string {

@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"agentinbox/internal/config"
+	"github.com/im-tyler/agent-inbox/internal/config"
 )
 
 // newProjectStep tracks where we are in the new-project modal.

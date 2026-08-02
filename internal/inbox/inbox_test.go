@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"agentinbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/driver"
 )
 
 // Helper: build an inbox with N idle projects, no drivers registered.

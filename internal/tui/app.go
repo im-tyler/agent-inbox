@@ -12,8 +12,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
 
-	"agentinbox/internal/driver"
-	"agentinbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/inbox"
 )
 
 // renderMain draws the split-pane king-first layout with EXACT width/height

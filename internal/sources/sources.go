@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"agentinbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/feed"
 )
 
 // Source is anything that can produce a teploy.inbox/v1 feed. The consumer

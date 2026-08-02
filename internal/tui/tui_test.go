@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"agentinbox/internal/driver"
-	"agentinbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/inbox"
 )
 
 func TestAgeHuman(t *testing.T) {

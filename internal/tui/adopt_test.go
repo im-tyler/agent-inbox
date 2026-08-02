@@ -8,9 +8,9 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"agentinbox/internal/driver"
-	"agentinbox/internal/feed"
-	"agentinbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/inbox"
 )
 
 func row(source, id, cwd string) feed.Item {

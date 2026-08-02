@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"agentinbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/driver"
 )
 
 // scriptDriver answers with a queued reply per directory and records every

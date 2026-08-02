@@ -1,4 +1,4 @@
-module agentinbox
+module github.com/im-tyler/agent-inbox
 
 go 1.26
 

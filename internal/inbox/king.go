@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"agentinbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/driver"
 )
 
 // KingDirective is a parsed [send to X: Y] line from the king's response.

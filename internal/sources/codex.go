@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"agentinbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/feed"
 )
 
 // Codex reports your live codex sessions.

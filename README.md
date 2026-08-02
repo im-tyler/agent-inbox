@@ -33,7 +33,7 @@ Working name. Phase 1 = Claude + OpenCode.
 | Legacy REPL | done, available via `--repl` flag |
 | Stop-hook bridge + live notify | **done, live-verified** (Claude only — OpenCode has no Stop hook; Codex hook system exists but not wired) |
 | CI + goreleaser + GitHub releases | done |
-| Tagged v0.1.0 | done — https://github.com/im-tyler/agent-inbox/releases/tag/v0.1.0 |
+| Tagged releases | done — [latest](https://github.com/im-tyler/agent-inbox/releases/latest) |
 
 ### OpenCode notes
 - Default model is a **free, no-key** model (`opencode/deepseek-v4-flash-free`),
@@ -145,16 +145,18 @@ Download the latest archive from [releases](https://github.com/im-tyler/agent-in
 
 ```sh
 go install github.com/im-tyler/agent-inbox@latest
-# or
+# or, to build the current main:
 git clone https://github.com/im-tyler/agent-inbox.git
 cd agent-inbox
 go build -o agent-inbox .
 ```
 
-For a release-tagged build (embeds the version string):
+A plain `go build` leaves the version string as `dev`, which is correct — it is
+not a release. Releases embed the real one via goreleaser; to reproduce that
+locally, pass the tag you built from:
 
 ```sh
-go build -ldflags "-X main.version=v0.1.0" -o agent-inbox .
+go build -ldflags "-X main.version=$(git describe --tags)" -o agent-inbox .
 ./agent-inbox version
 ```
 

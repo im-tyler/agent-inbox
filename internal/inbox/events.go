@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"agentinbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/driver"
 )
 
 // Event is what a Stop hook drops on disk for the inbox to ingest. It lets

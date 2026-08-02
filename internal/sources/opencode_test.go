@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"agentinbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/feed"
 )
 
 // ocFixture builds a throwaway opencode.db with the real schema and given

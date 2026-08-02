@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"agentinbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/feed"
 )
 
 // Adoption turns a row in the inbox into a project. The inbox already knows

@@ -5,7 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"agentinbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/inbox"
 )
 
 // Run launches the Bubble Tea dashboard and blocks until the user quits

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"agentinbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/feed"
 )
 
 var fixedNow = time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)

@@ -6,8 +6,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"agentinbox/internal/board"
-	"agentinbox/internal/sources"
+	"github.com/im-tyler/agent-inbox/internal/board"
+	"github.com/im-tyler/agent-inbox/internal/sources"
 )
 
 // The inbox is a view inside the supervisor, not a second program. It is the

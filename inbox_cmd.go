@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"agentinbox/internal/board"
-	"agentinbox/internal/feed"
-	"agentinbox/internal/sources"
+	"github.com/im-tyler/agent-inbox/internal/board"
+	"github.com/im-tyler/agent-inbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/sources"
 )
 
 // runInbox is the reader: one list of everything waiting on you, merged from
