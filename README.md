@@ -151,12 +151,13 @@ cd agent-inbox
 go build -o agent-inbox .
 ```
 
-A plain `go build` leaves the version string as `dev`, which is correct — it is
-not a release. Releases embed the real one via goreleaser; to reproduce that
-locally, pass the tag you built from:
+`agent-inbox version` works out what it is without being told. A release binary
+carries the tag goreleaser stamped; a `go install ...@latest` binary reads its
+module version from build info; a working-tree build reports the tag it is
+ahead of plus `+dirty`. Only a build with nothing to derive from — outside a
+repo, or `-buildvcs=false` — falls back to `dev`.
 
 ```sh
-go build -ldflags "-X main.version=$(git describe --tags)" -o agent-inbox .
 ./agent-inbox version
 ```
 
