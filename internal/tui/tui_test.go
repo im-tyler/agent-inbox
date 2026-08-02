@@ -4,9 +4,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/im-tyler/agent-inbox/internal/driver"
-	"github.com/im-tyler/agent-inbox/internal/inbox"
 )
 
 func TestAgeHuman(t *testing.T) {
@@ -46,37 +43,24 @@ func TestTruncateOneLine(t *testing.T) {
 	}
 }
 
-func TestRenderRowContainsFields(t *testing.T) {
-	p := inbox.Project{
-		Name:        "my-project",
-		Tool:        "claude",
-		Dir:         "/tmp",
-		Status:      driver.StatusWaiting,
-		LastMessage: "I need help with the foo",
-	}
-	row := renderRow(1, p, false, 80, "⠋")
-	for _, want := range []string{"[1]", "my-project", "claude", "waiting", "I need help"} {
-		if !strings.Contains(row, want) {
-			t.Errorf("renderRow output missing %q; got %q", want, row)
-		}
-	}
-}
-
-func TestRenderRowSelectedDoesNotPanic(t *testing.T) {
-	p := inbox.Project{Name: "x", Tool: "mock", Status: driver.StatusIdle}
-	row := renderRow(2, p, true, 80, "⠋")
-	if row == "" {
-		t.Fatal("selected renderRow returned empty string")
-	}
-}
+// (renderRow tests removed with the list view they exercised — the sidebar
+// rows the main view actually draws are covered by the sidebar tests.)
 
 // (statusStyle test removed — function was dead code, now deleted.)
 
-func TestHelpTextMentionsKeys(t *testing.T) {
+// The overlay has to describe the view you are in when you open it. It used
+// to document index selection and a ":" menu belonging to a screen the program
+// could no longer reach.
+func TestHelpTextDescribesTheMainView(t *testing.T) {
 	h := helpText()
-	for _, key := range []string{"navigate", "send", "view", "attach", "quit"} {
-		if !strings.Contains(h, key) {
-			t.Errorf("helpText missing %q", key)
+	for _, want := range []string{"chat focused", "fleet focused", "tab", "send", "attach", "quit"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("helpText missing %q", want)
+		}
+	}
+	for _, gone := range []string{"more actions", "select by index", "king mode"} {
+		if strings.Contains(h, gone) {
+			t.Errorf("helpText still documents the removed list view: %q", gone)
 		}
 	}
 }

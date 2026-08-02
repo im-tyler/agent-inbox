@@ -25,13 +25,10 @@ import (
 type viewMode int
 
 const (
-	viewList viewMode = iota
-	viewDetail
+	viewDetail viewMode = iota
 	viewNewProject
 	viewDeleteConfirm
 	viewToolPicker
-	viewKing
-	viewActions
 	viewMain  // king-first split-pane layout (default)
 	viewInbox // the session inbox, hosted rather than run as its own program
 )
@@ -55,13 +52,6 @@ type Model struct {
 	// Spinner animation state; runs only while a turn is in flight.
 	spin     int
 	spinning bool
-
-	// King mode state.
-	connected      []string        // names of connected projects (king panel)
-	kingSendMode   bool            // when true, kingInput is active
-	kingAddMode    bool            // when true, showing add-connected picker
-	kingRemoveMode bool            // when true, showing remove-connected picker
-	kingInput      textinput.Model // shared input for king send/add/remove
 
 	// Detail view scroll: number of lines from the top of the body.
 	// Set to a large number when entering detail view to pin to bottom.
@@ -229,8 +219,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.view {
 	case viewMain:
 		return m.handleMainKey(msg)
-	case viewList:
-		return m.handleListKey(msg)
 	case viewDetail:
 		return m.handleDetailKey(msg)
 	case viewNewProject:
@@ -239,91 +227,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDeleteConfirmKey(msg)
 	case viewToolPicker:
 		return m.handleToolPickerKey(msg)
-	case viewKing:
-		return m.handleKingKey(msg)
-	case viewActions:
-		return m.handleActionsKey(msg)
 	case viewInbox:
 		return m.handleInboxKey(msg)
 	}
-	return m, nil
-}
-
-func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q":
-		return m, tea.Quit
-
-	case "?":
-		m.helpMode = !m.helpMode
-
-	case "up", "k":
-		if m.selected > 1 {
-			m.selected--
-		}
-	case "down", "j":
-		snap := m.inbox.Snapshot()
-		if m.selected < len(snap) {
-			m.selected++
-		}
-
-	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		var n int
-		fmt.Sscanf(msg.String(), "%d", &n)
-		snap := m.inbox.Snapshot()
-		if n >= 1 && n <= len(snap) {
-			m.selected = n
-		}
-
-	case "s":
-		// Enter send mode for the selected project.
-		snap := m.inbox.Snapshot()
-		if m.selected < 1 || m.selected > len(snap) {
-			return m, nil
-		}
-		if snap[m.selected-1].Status == driver.StatusWorking {
-			m.toast = fmt.Sprintf("%s is already working", snap[m.selected-1].Name)
-			m.toastAt = time.Now()
-			return m, nil
-		}
-		m.sendMode = true
-		m.sendInput.Focus()
-		return m, textinput.Blink
-
-	case "v", "enter":
-		// Switch to full-screen detail view.
-		snap := m.inbox.Snapshot()
-		if m.selected >= 1 && m.selected <= len(snap) {
-			m.view = viewDetail
-			// Pin to bottom: compute the actual max scroll instead of
-			// using a sentinel value that viewDetail (value receiver)
-			// can't persist.
-			m.detailScroll = m.detailMaxScroll()
-		}
-
-	case "x":
-		// Cancel the in-flight send or dismiss a waiting/error state.
-		if err := m.inbox.Cancel(m.selected); err != nil {
-			m.toast = err.Error()
-		} else {
-			snap := m.inbox.Snapshot()
-			if m.selected >= 1 && m.selected <= len(snap) {
-				m.toast = "dismissed " + snap[m.selected-1].Name
-			} else {
-				m.toast = "dismissed"
-			}
-		}
-		m.toastAt = time.Now()
-
-	case ":":
-		// Open the actions menu.
-		m.view = viewActions
-
-	case "r":
-		m.toast = "refreshed"
-		m.toastAt = time.Now()
-	}
-
 	return m, nil
 }
 
@@ -450,59 +356,18 @@ func (m Model) View() string {
 		return m.renderDeleteConfirm()
 	case viewToolPicker:
 		return m.renderToolPicker()
-	case viewKing:
-		return m.renderKing()
-	case viewActions:
-		return m.renderActions()
 	case viewInbox:
 		return m.board.View()
 	default:
-		return m.viewList()
+		return m.renderMain()
 	}
-}
-
-func (m Model) viewList() string {
-	snap := m.inbox.Snapshot()
-	waiting := m.inbox.WaitingCount()
-
-	var b strings.Builder
-
-	// Header line with counts.
-	header := fmt.Sprintf("%d projects  %d waiting", len(snap), waiting)
-	b.WriteString(headerStyle.Render(header))
-	b.WriteString("\n\n")
-
-	if len(snap) == 0 {
-		b.WriteString(mutedStyle.Render("no projects configured — press n to add one"))
-		b.WriteString("\n")
-	} else {
-		// Content width for adaptive truncation (frame border + padding).
-		contentW := m.width - 4
-		if contentW < 30 {
-			contentW = 30
-		}
-		for i, p := range snap {
-			row := renderRow(i+1, p, m.selected == i+1, contentW, m.frame())
-			b.WriteString(row)
-			b.WriteString("\n")
-		}
-	}
-
-	if m.toast != "" && time.Since(m.toastAt) < 6*time.Second {
-		b.WriteString("\n")
-		b.WriteString(wrapToast(m.toast, m.width-4))
-		b.WriteString("\n")
-	}
-
-	footer := m.footer()
-	return renderFrame(m.width, m.height, "agent-inbox", b.String(), footer)
 }
 
 func (m Model) viewDetail() string {
 	snap := m.inbox.Snapshot()
 	if m.selected < 1 || m.selected > len(snap) {
 		m.view = viewMain
-		return m.viewList()
+		return m.renderMain()
 	}
 	p := snap[m.selected-1]
 
@@ -650,69 +515,6 @@ func (m *Model) clampDetailScroll() {
 	}
 }
 
-// footer renders the bottom-of-screen prompt area: send input or keybindings.
-func (m Model) footer() string {
-	if m.sendMode {
-		snap := m.inbox.Snapshot()
-		name := ""
-		if m.selected >= 1 && m.selected <= len(snap) {
-			name = snap[m.selected-1].Name
-		}
-		return fmt.Sprintf("send to %s: %s\n%s",
-			name,
-			m.sendInput.View(),
-			mutedStyle.Render("enter to send  esc to cancel"),
-		)
-	}
-	if m.helpMode {
-		return helpText()
-	}
-	return mutedStyle.Render(footerText)
-}
-
-func renderRow(idx int, p inbox.Project, selected bool, contentW int, frame string) string {
-	idxStr := fmt.Sprintf("[%d]", idx)
-	ageStr := ageHuman(time.Since(p.UpdatedAt))
-	msgStr := p.LastMessage
-	if msgStr == "" && p.LastErr != "" {
-		msgStr = "error: " + p.LastErr
-	}
-
-	// Use a badge for the status column.
-	badge := statusBadge(p.Status, p.Activity, frame)
-
-	// Fixed columns: "[N] " = 4, name = 21, tool = 11, age = 7, badge ~14, spaces ~6 = ~63
-	// Message gets the rest.
-	fixedW := 4 + 21 + 11 + 7 + 14 + 6
-	msgW := contentW - fixedW
-	if msgW < 10 {
-		msgW = 10
-	}
-	msgStr = truncateOneLine(previewText(msgStr), msgW)
-
-	// Build the row with proper spacing.
-	nameStr := p.Name
-	if len(nameStr) > 20 {
-		nameStr = nameStr[:19] + "…"
-	}
-	toolStr := p.Tool
-	if len(toolStr) > 10 {
-		toolStr = toolStr[:9] + "…"
-	}
-
-	row := fmt.Sprintf(
-		"%s %-20s %-10s %6s  %s",
-		idxStr, nameStr, toolStr, ageStr, badge,
-	)
-	if msgStr != "" {
-		row += "  " + mutedStyle.Render(msgStr)
-	}
-	if selected {
-		row = selectedStyle.Render(row)
-	}
-	return row
-}
-
 func ageHuman(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int(d.Seconds()))
@@ -745,67 +547,41 @@ func shortSession(id string) string {
 	return id
 }
 
-// indent prepends prefix to every line of s.
-func indent(s, prefix string) string {
-	if s == "" {
-		return ""
-	}
-	lines := strings.Split(s, "\n")
-	for i, ln := range lines {
-		lines[i] = prefix + ln
-	}
-	return strings.Join(lines, "\n")
-}
-
-func wrapToast(s string, width int) string {
-	if width <= 0 {
-		return s
-	}
-	var b strings.Builder
-	col := 0
-	for _, r := range s {
-		b.WriteRune(r)
-		if r == '\n' {
-			col = 0
-			continue
-		}
-		col++
-		if col >= width-2 {
-			b.WriteRune('\n')
-			col = 0
-		}
-	}
-	return b.String()
-}
-
+// helpText is the ? overlay. It describes the two focus modes of the main
+// view, because that is the only view you can be in when you press ?.
+//
+// It used to document a flat list with index selection and a ":" actions menu.
+// That view had already become unreachable, so the help was a map of a screen
+// the program could not open.
 func helpText() string {
 	lines := []string{
-		"  daily:",
-		"    j/k or ↑↓     navigate",
-		"    1-9           select by index",
-		"    s             send message",
-		"    v or enter    view detail",
-		"    x             cancel / dismiss",
-		"    :             more actions",
-		"    q             quit",
+		"  chat focused:",
+		"    enter         send to the supervisor",
+		"    alt+enter     newline",
+		"    pgup/pgdn     scroll the conversation",
+		"    tab           focus the fleet",
+		"    ?             close this help",
+		"    ctrl+c        quit",
 		"",
-		"  more actions (press :):",
+		"  fleet focused (tab):",
+		"    j/k or ↑↓     move through the fleet",
+		"    enter         open the project's detail view",
+		"    i             session inbox",
 		"    n             new project",
 		"    d             delete project",
 		"    t             change tool",
-		"    a             attach to session",
-		"    K             king mode (supervisor)",
-		"    ?             this help",
+		"    a             attach to the session",
+		"    x             cancel a send / dismiss a badge",
+		"    tab or esc    back to chat",
 		"",
 		"  in detail view:",
-		"    s             send",
+		"    j/k, pgup/pgdn, g/G   scroll",
+		"    s             send a follow-up",
 		"    a             attach",
 		"    esc           back",
 	}
 	return strings.Join(lines, "\n")
 }
-
-const footerText = "s send  v view  x cancel  : more  q quit"
 
 // (max is the Go 1.21+ builtin — no local definition needed.)
 
