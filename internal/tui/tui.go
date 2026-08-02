@@ -10,8 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/charmbracelet/lipgloss"
 
 	"agentinbox/internal/board"
 	"agentinbox/internal/driver"
@@ -66,7 +69,7 @@ type Model struct {
 	detailScroll int
 
 	// King-first main view state.
-	mainInput            textinput.Model
+	mainInput            textarea.Model
 	mainScrollFromBottom int  // lines scrolled up from bottom (0 = at bottom)
 	mainAutoScroll       bool // when true, auto-pins to bottom on each tick
 	kingProjectIdx       int  // 1-based, defaults to 1 (first project is king)
@@ -100,10 +103,17 @@ func New(in *inbox.Inbox, eventsDir string) Model {
 	ti.CharLimit = 0
 	ti.Width = 60
 
-	mi := textinput.New()
+	// A textarea, not a single line: a prompt worth sending to a fleet is
+	// often several sentences, and typing it into a one-line box that scrolls
+	// sideways means never seeing what you wrote.
+	mi := textarea.New()
 	mi.Placeholder = "type to talk to king..."
 	mi.CharLimit = 0
-	mi.Width = 80
+	mi.SetWidth(80)
+	mi.SetHeight(1)
+	mi.ShowLineNumbers = false
+	mi.Prompt = ""
+	mi.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	mi.Focus()
 
 	return Model{
@@ -145,7 +155,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.sendInput.Width = max(60, msg.Width-30)
-		m.mainInput.Width = max(40, msg.Width-8)
+		m.mainInput.SetWidth(max(40, msg.Width-8))
 		if m.view == viewInbox {
 			return m.forwardToBoard(msg)
 		}

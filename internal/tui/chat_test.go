@@ -149,3 +149,37 @@ func TestFleetSummaryCountsTheKing(t *testing.T) {
 		t.Errorf("got %v, want just the total", got)
 	}
 }
+
+// Agents answer in markdown and a terminal cannot render it, so the markers
+// come off and the structure they carried is expressed in ways a terminal has.
+func TestWrapBodyStripsMarkdownNoise(t *testing.T) {
+	got := strings.Join(wrapBody("## Akiroo — Recent Activity\n**No commits** in 2 days\n- modules untouched\n* 12 commits", 60), "\n")
+	for _, unwanted := range []string{"##", "**"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("%q survived:\n%s", unwanted, got)
+		}
+	}
+	for _, want := range []string{"Akiroo — Recent Activity", "No commits in 2 days", "• modules untouched", "• 12 commits"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// A heading is bolded after wrapping, never before — styling first would put
+// escape codes through the wrapper's width arithmetic.
+func TestDemarkdownReportsHeadings(t *testing.T) {
+	text, heading := demarkdown("### Summary")
+	if text != "Summary" || !heading {
+		t.Errorf("got %q heading=%v", text, heading)
+	}
+	if text, heading := demarkdown("not # a heading"); heading || text != "not # a heading" {
+		t.Errorf("got %q heading=%v", text, heading)
+	}
+}
+
+func TestPlural(t *testing.T) {
+	if got := fleetSummary(1, 0, 0, 40); got[0] != "1 project" {
+		t.Errorf("got %q, want 1 project", got[0])
+	}
+}

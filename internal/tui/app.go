@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,8 +33,13 @@ func (m Model) renderMain() string {
 		contentW = 20
 	}
 
-	// Body height: 7 non-body lines (top, title, blank, blank, input, hint, bottom)
-	bodyH := H - 7
+	// Body height: 6 fixed non-body lines (top, title, blank, blank, hint,
+	// bottom) plus however many rows the input currently occupies.
+	inputH := m.mainInput.Height()
+	if inputH < 1 {
+		inputH = 1
+	}
+	bodyH := H - 6 - inputH
 	if bodyH < 3 {
 		bodyH = 3
 	}
@@ -96,24 +102,35 @@ func (m Model) renderMain() string {
 		bodyLines = append(bodyLines, clampWidth(line, contentW))
 	}
 
-	// Build input line.
-	inputText := m.mainInput.View()
-	inputPrefix := "  "
-	if m.focusSidebar {
-		inputPrefix = "  " + mutedStyle.Render("(chat not focused — press Tab) ")
+	// Build input rows. The textarea grows with what you type and scrolls
+	// inside itself past maxInputLines, so a long prompt never pushes the
+	// conversation off the screen.
+	var inputLines []string
+	for i, ln := range strings.Split(m.mainInput.View(), "\n") {
+		prefix := "  "
+		if i == 0 && m.focusSidebar {
+			prefix = "  " + mutedStyle.Render("(chat not focused — press Tab) ")
+		}
+		inputLines = append(inputLines, clampWidth(prefix+ln, contentW))
 	}
-	inputLine := clampWidth(inputPrefix+inputText, contentW)
+	for len(inputLines) < inputH {
+		inputLines = append(inputLines, clampWidth("", contentW))
+	}
+	inputLines = inputLines[:inputH]
 
 	// Contextual footer based on focus.
 	var footerText string
 	if m.focusSidebar {
-		footerText = "  ↑↓ navigate  enter detail  i inbox  n new  d delete  t tool  a attach  x cancel  tab chat"
+		footerText = "  ↑↓ move  enter detail  i inbox  n new  d del  t tool  a attach  x cancel  tab chat"
 	} else if m.helpMode {
 		footerText = "  ? close help"
 	} else {
-		footerText = "  enter send  tab fleet  ↑↓ scroll  ? help  ctrl+c quit"
+		footerText = "  enter send  alt+enter newline  tab fleet  ? help  ctrl+c quit"
 	}
-	hintLine := clampWidth(mutedStyle.Render(footerText), contentW)
+	// Truncate before styling: lipgloss's Width wraps rather than cuts, so a
+	// footer longer than the frame would spill onto a second line and break
+	// the border.
+	hintLine := clampWidth(mutedStyle.Render(truncateOneLine(footerText, contentW)), contentW)
 
 	// Assemble the frame.
 	var b strings.Builder
@@ -125,7 +142,9 @@ func (m Model) renderMain() string {
 		b.WriteString("│ " + ln + " │\n")
 	}
 	b.WriteString("│" + strings.Repeat(" ", contentW+2) + "│\n")
-	b.WriteString("│ " + inputLine + " │\n")
+	for _, ln := range inputLines {
+		b.WriteString("│ " + ln + " │\n")
+	}
 	b.WriteString("│ " + hintLine + " │\n")
 	b.WriteString("╰" + dash + "╯")
 	return b.String()
@@ -221,18 +240,59 @@ func workingLabel(activity string) string {
 }
 
 // wrapBody word-wraps message content and indents it under its speaker line.
+//
+// Agents answer in markdown. A terminal cannot render it, so "## Akiroo —
+// Recent Activity" and "**No commits**" arrive as punctuation the reader has
+// to look past. The markers are removed and the structure they carried is
+// expressed the way a terminal can: headings in bold, bullets as one glyph.
 func wrapBody(content string, width int) []string {
 	inner := width - 2
 	if inner < 10 {
 		inner = 10
 	}
 	var out []string
-	for _, ln := range strings.Split(content, "\n") {
-		for _, w := range strings.Split(wordwrap.String(ln, inner), "\n") {
+	for _, raw := range strings.Split(content, "\n") {
+		text, heading := demarkdown(raw)
+		for _, w := range strings.Split(wordwrap.String(text, inner), "\n") {
+			if heading && strings.TrimSpace(w) != "" {
+				w = headerStyle.Render(w)
+			}
 			out = append(out, "  "+w)
 		}
 	}
 	return out
+}
+
+// plural is the laziest correct pluraliser: every word this file counts takes
+// a bare "s". "1 projects" is the kind of thing that makes a UI feel unfinished.
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
+}
+
+// headingPattern matches an ATX heading: one to six hashes then a space.
+var headingPattern = regexp.MustCompile(`^\s{0,3}#{1,6}\s+`)
+
+// bulletPattern matches a list marker, capturing the indent so nesting shows.
+var bulletPattern = regexp.MustCompile(`^(\s*)[-*+]\s+`)
+
+// emphasis matches the paired markers around bold or italic text.
+var emphasis = regexp.MustCompile(`\*\*|__`)
+
+// demarkdown turns one markdown line into terminal text, reporting whether it
+// was a heading so the caller can bold it after wrapping — styling first would
+// put escape codes through the wrapper's width arithmetic.
+func demarkdown(line string) (string, bool) {
+	heading := false
+	if headingPattern.MatchString(line) {
+		line = headingPattern.ReplaceAllString(line, "")
+		heading = true
+	}
+	line = bulletPattern.ReplaceAllString(line, "$1• ")
+	line = emphasis.ReplaceAllString(line, "")
+	return strings.TrimRight(line, " "), heading
 }
 
 // buildSidebarLines returns the fleet sidebar as a slice of lines.
@@ -308,7 +368,7 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	}
 
 	if fleetCount == 0 {
-		lines = append(lines, trunc.Render(mutedStyle.Render("(no projects —")))
+		lines = append(lines, trunc.Render(mutedStyle.Render("(no fleet yet —")))
 		lines = append(lines, trunc.Render(mutedStyle.Render(" tab, then i to")))
 		lines = append(lines, trunc.Render(mutedStyle.Render(" add from the inbox)")))
 	}
@@ -326,7 +386,7 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 // twenty columns at its narrowest, where "3 projects  2 waiting" was cut to
 // "3 projects  2 wait".
 func fleetSummary(total, working, waiting, width int) []string {
-	out := []string{fmt.Sprintf("%d projects", total)}
+	out := []string{fmt.Sprintf("%d %s", total, plural(total, "project"))}
 	var parts []string
 	if working > 0 {
 		parts = append(parts, fmt.Sprintf("%d working", working))
@@ -360,6 +420,7 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.mainInput.Reset()
+		m.syncInputHeight()
 		snap := m.inbox.Snapshot()
 		var connected []string
 		for i, p := range snap {
@@ -396,6 +457,7 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "esc":
 		m.mainInput.Reset()
+		m.syncInputHeight()
 		return m, nil
 
 	case "ctrl+c":
@@ -414,12 +476,32 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "alt+enter", "ctrl+j":
+		// Newline in the draft. Enter sends, so composing needs its own key —
+		// terminals cannot tell shift+enter from enter.
+		var cmd tea.Cmd
+		m.mainInput, cmd = m.mainInput.Update(msg)
+		m.syncInputHeight()
+		return m, cmd
+
 	case "up":
+		// A multi-line draft owns the arrows: moving the cursor through what
+		// you are writing beats scrolling away from it.
+		if m.draftLines() > 1 {
+			var cmd tea.Cmd
+			m.mainInput, cmd = m.mainInput.Update(msg)
+			return m, cmd
+		}
 		m.mainAutoScroll = false
 		m.mainScrollFromBottom++
 		return m, nil
 
 	case "down":
+		if m.draftLines() > 1 {
+			var cmd tea.Cmd
+			m.mainInput, cmd = m.mainInput.Update(msg)
+			return m, cmd
+		}
 		if m.mainScrollFromBottom > 0 {
 			m.mainScrollFromBottom--
 		}
@@ -439,7 +521,31 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Forward printable characters to the text input.
 	var cmd tea.Cmd
 	m.mainInput, cmd = m.mainInput.Update(msg)
+	m.syncInputHeight()
 	return m, cmd
+}
+
+// maxInputLines is how tall the composer grows before it scrolls inside
+// itself. Past this the draft would be eating the conversation it is about.
+const maxInputLines = 6
+
+// draftLines is how many lines the current draft occupies.
+func (m Model) draftLines() int {
+	return strings.Count(m.mainInput.Value(), "\n") + 1
+}
+
+// syncInputHeight grows and shrinks the composer with its content.
+func (m *Model) syncInputHeight() {
+	h := m.draftLines()
+	if h > maxInputLines {
+		h = maxInputLines
+	}
+	if h < 1 {
+		h = 1
+	}
+	if h != m.mainInput.Height() {
+		m.mainInput.SetHeight(h)
+	}
 }
 
 // handleSidebarKey processes keys when the sidebar (fleet list) is focused.

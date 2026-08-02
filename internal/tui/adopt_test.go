@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"agentinbox/internal/driver"
 	"agentinbox/internal/feed"
 	"agentinbox/internal/inbox"
@@ -131,5 +133,46 @@ func TestSidebarShowsTheErrorReason(t *testing.T) {
 	joined := strings.Join(m.buildSidebarLines(m.inbox.Snapshot(), 24), "\n")
 	if !strings.Contains(joined, "boom") {
 		t.Errorf("the error reason never appears:\n%s", joined)
+	}
+}
+
+// The composer grows with the draft and stops at maxInputLines, so a long
+// prompt scrolls inside itself instead of eating the conversation.
+func TestComposerGrowsThenStops(t *testing.T) {
+	m := sidebarFixture(t)
+	if got := m.mainInput.Height(); got != 1 {
+		t.Errorf("empty composer is %d rows, want 1", got)
+	}
+	m.mainInput.SetValue("one\ntwo\nthree")
+	m.syncInputHeight()
+	if got := m.mainInput.Height(); got != 3 {
+		t.Errorf("3-line draft gave %d rows", got)
+	}
+	m.mainInput.SetValue(strings.Repeat("line\n", 40))
+	m.syncInputHeight()
+	if got := m.mainInput.Height(); got != maxInputLines {
+		t.Errorf("long draft gave %d rows, want the cap of %d", got, maxInputLines)
+	}
+	// Sending clears it and the box shrinks back.
+	m.mainInput.Reset()
+	m.syncInputHeight()
+	if got := m.mainInput.Height(); got != 1 {
+		t.Errorf("composer stayed %d rows after reset", got)
+	}
+}
+
+// The frame must not be broken by a footer wider than the terminal.
+func TestFooterNeverWrapsTheFrame(t *testing.T) {
+	for _, w := range []int{40, 62, 76, 100} {
+		m := sidebarFixture(t)
+		m.width, m.height = w, 24
+		for _, focus := range []bool{false, true} {
+			m.focusSidebar = focus
+			for _, ln := range strings.Split(m.renderMain(), "\n") {
+				if lipgloss.Width(ln) > w {
+					t.Errorf("width %d focus=%v: line overflows (%d cols): %q", w, focus, lipgloss.Width(ln), ln)
+				}
+			}
+		}
 	}
 }
