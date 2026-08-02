@@ -53,7 +53,7 @@ func (in *Inbox) KingSend(kingIdx int, prompt string, connectedNames []string) e
 	// From here on the king is identified by name. A watcher lives for
 	// minutes, and RemoveProject shifts every index after the one it drops —
 	// an index held that long eventually names a different project.
-	go in.kingDispatchWatcher(kingName)
+	in.track(func() { in.kingDispatchWatcher(kingName) })
 	return nil
 }
 
@@ -62,7 +62,9 @@ func (in *Inbox) KingSend(kingIdx int, prompt string, connectedNames []string) e
 // mean dispatching work off a failure.
 func (in *Inbox) awaitKing(kingName string, deadline time.Time) (string, bool) {
 	for time.Now().Before(deadline) {
-		time.Sleep(in.pollInterval())
+		if !in.pause() {
+			return "", false
+		}
 		in.mu.Lock()
 		p, err := in.projectByName(kingName)
 		if err != nil {
@@ -88,7 +90,7 @@ func (in *Inbox) kingDispatchWatcher(kingName string) {
 	if !ok {
 		return
 	}
-	in.AddNotes(ParseKingNotes(response))
+	in.applyNoteDirectives(response)
 
 	var sent []string
 	for _, d := range ParseKingDirectives(response) {
@@ -104,8 +106,16 @@ func (in *Inbox) kingDispatchWatcher(kingName string) {
 		sent = append(sent, d.Target)
 	}
 	if len(sent) > 0 {
-		go in.kingRoundWatcher(kingName, sent)
+		in.track(func() { in.kingRoundWatcher(kingName, sent) })
 	}
+}
+
+// applyNoteDirectives records what the king chose to remember and retracts
+// what it chose to forget. Drops run first: retracting and restating a fact in
+// one turn is how a correction is phrased.
+func (in *Inbox) applyNoteDirectives(response string) {
+	in.DropNotes(ParseKingNoteDrops(response))
+	in.AddNotes(ParseKingNotes(response))
 }
 
 // formatKingState builds compact fleet context for the king's prompt.
@@ -123,8 +133,14 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 	var firstProject string
 
 	// Notes lead. They are what you knew before this turn, and a fact you
-	// already established should not be re-derived from a status line.
-	if notes := in.Notes(); len(notes) > 0 {
+	// already established should not be re-derived from a status line. Only
+	// the ones about this fleet: a note naming a project you are not talking
+	// to is context spent on nothing.
+	lowerNames := make(map[string]bool, len(nameSet))
+	for n := range nameSet {
+		lowerNames[strings.ToLower(n)] = true
+	}
+	if notes := in.NotesFor(lowerNames); len(notes) > 0 {
 		b.WriteString("What you have noted about this fleet:\n")
 		for _, n := range notes {
 			b.WriteString("- " + n.Text + "\n")
@@ -173,6 +189,9 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 		b.WriteString("[note: teploy depends on Neutron's DB layer]\n\n")
 		b.WriteString("Note only durable facts that span projects or would cost a round-trip to rediscover.")
 		b.WriteString(" Not status — you are given that fresh every turn.\n")
+		b.WriteString("When a note above turns out to be wrong or out of date, retract it:\n")
+		b.WriteString("[note drop: teploy depends on Neutron]\n")
+		b.WriteString("The text just has to match part of the note. Retract and restate to correct one.\n")
 		b.WriteString("Everything else in your response is shown to the user.\n")
 	}
 	return b.String()
@@ -283,14 +302,16 @@ func (in *Inbox) kingRoundWatcher(kingName string, targets []string) {
 	// The summary is where the cross-project facts actually surface, so it is
 	// the turn most worth harvesting notes from.
 	if response, ok := in.awaitKing(kingName, time.Now().Add(kingRoundTimeout)); ok {
-		in.AddNotes(ParseKingNotes(response))
+		in.applyNoteDirectives(response)
 	}
 }
 
 // awaitReply polls one target until its turn ends or the round runs out.
 func (in *Inbox) awaitReply(name string, deadline time.Time) (fleetReply, bool) {
 	for time.Now().Before(deadline) {
-		time.Sleep(in.pollInterval())
+		if !in.pause() {
+			return fleetReply{}, false
+		}
 		in.mu.Lock()
 		target, err := in.projectByName(name)
 		if err != nil {

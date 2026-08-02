@@ -71,6 +71,7 @@ func main() {
 	inbox.LoadState(*statePath, projects)
 
 	in := inbox.New(projects, drivers, *statePath).WithConfigPath(*cfgPath).WithNotesPath(filepath.Join(dd, "notes.json"))
+	defer in.Close()
 	eventsDir := filepath.Join(dd, "events")
 
 	if *replMode {

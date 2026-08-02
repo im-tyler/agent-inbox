@@ -65,6 +65,16 @@ type Inbox struct {
 	// cancels maps project Name -> the cancel function for its in-flight
 	// send goroutine. Empty when no send is active for that project.
 	cancels map[string]context.CancelFunc
+
+	// done is closed by Close. Watchers poll for minutes; without a stop
+	// signal they outlive whatever started them and go on writing state
+	// after the thing that owns it has gone.
+	done      chan struct{}
+	closeOnce sync.Once
+	// wg tracks every background goroutine so Close can wait for them.
+	// Signalling alone is not enough: a send goroutine already past the
+	// stop check still has a write to make.
+	wg sync.WaitGroup
 }
 
 func New(projects []*Project, drivers map[string]driver.Driver, statePath string) *Inbox {
@@ -73,6 +83,57 @@ func New(projects []*Project, drivers map[string]driver.Driver, statePath string
 		drivers:   drivers,
 		statePath: statePath,
 		cancels:   make(map[string]context.CancelFunc),
+		done:      make(chan struct{}),
+	}
+}
+
+// Close stops the background watchers and waits for them, so nothing writes
+// state after it returns. In-flight sends are cancelled rather than waited
+// out — a turn can take five minutes, and quitting should not.
+//
+// Safe to call more than once, and safe to call during a round.
+func (in *Inbox) Close() {
+	in.closeOnce.Do(func() {
+		close(in.done)
+		in.mu.Lock()
+		for name, cancel := range in.cancels {
+			delete(in.cancels, name)
+			cancel()
+		}
+		in.mu.Unlock()
+	})
+	in.wg.Wait()
+}
+
+// track runs fn in a goroutine Close will wait for.
+func (in *Inbox) track(fn func()) {
+	in.wg.Add(1)
+	go func() {
+		defer in.wg.Done()
+		fn()
+	}()
+}
+
+// closed reports whether Close has been called.
+func (in *Inbox) closed() bool {
+	select {
+	case <-in.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// pause waits out one poll interval, reporting false if the inbox closed
+// first so a watcher stops instead of finishing a round nobody will read.
+func (in *Inbox) pause() bool {
+	t := time.NewTimer(in.pollInterval())
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-in.done:
+		return false
 	}
 }
 
@@ -261,7 +322,7 @@ func (in *Inbox) sendResolved(resolve func() (*Project, error), displayText, dri
 	in.mu.Unlock()
 	in.save()
 
-	go func() {
+	in.track(func() {
 		// Send the DRIVER text (may include injected state) to the CLI.
 		if sd, ok := d.(driver.StreamingDriver); ok {
 			in.streamSend(ctx, sd, p, dir, sid, driverText)
@@ -271,7 +332,12 @@ func (in *Inbox) sendResolved(resolve func() (*Project, error), displayText, dri
 		in.mu.Lock()
 		delete(in.cancels, p.Name)
 		in.mu.Unlock()
-	}()
+		// Persist the finished turn. streamSend saves as events arrive, but
+		// blockingSend — every non-streaming driver, which is opencode, codex
+		// and mock — only mutated memory. Its reply reached the screen and
+		// then vanished on the next restart.
+		in.save()
+	})
 	return nil
 }
 
@@ -477,6 +543,7 @@ func (in *Inbox) RemoveProject(idx int) error {
 	in.projects = append(in.projects[:idx-1], in.projects[idx:]...)
 	in.mu.Unlock()
 	in.save()
+	in.forgetProject(name)
 
 	// Persist removal to config.json best-effort (non-fatal — matches AddProject).
 	if in.configPath != "" {
@@ -586,6 +653,9 @@ func (in *Inbox) AttachArgs(idx int) ([]string, string, error) {
 // save writes state.json atomically (temp file + rename) so a crash
 // during write can't corrupt the existing state file.
 func (in *Inbox) save() {
+	if in.closed() {
+		return
+	}
 	in.mu.Lock()
 	b, err := json.MarshalIndent(in.projects, "", "  ")
 	in.mu.Unlock()

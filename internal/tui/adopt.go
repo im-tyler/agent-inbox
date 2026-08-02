@@ -90,7 +90,7 @@ func stripDirectives(content string) string {
 	kept := make([]string, 0, len(lines))
 	for _, ln := range lines {
 		t := strings.ToLower(strings.TrimSpace(ln))
-		if strings.HasSuffix(t, "]") && (strings.HasPrefix(t, "[send to ") || strings.HasPrefix(t, "[note:")) {
+		if strings.HasSuffix(t, "]") && (strings.HasPrefix(t, "[send to ") || strings.HasPrefix(t, "[note")) {
 			continue
 		}
 		kept = append(kept, ln)

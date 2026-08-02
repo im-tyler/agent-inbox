@@ -2,6 +2,7 @@ package inbox
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -84,6 +85,9 @@ func kingFixture(t *testing.T, d *scriptDriver) *Inbox {
 	in := New(projects, map[string]driver.Driver{"script": d}, filepath.Join(t.TempDir(), "state.json"))
 	// Set before any turn starts: watchers read this and outlive the test.
 	in.pollEvery = time.Millisecond
+	// Without this the watchers keep writing state after the temp dir is
+	// removed, which fails cleanup rather than the assertion.
+	t.Cleanup(in.Close)
 	return in
 }
 
@@ -371,4 +375,91 @@ func TestRoundSurvivesAProjectRemovedMidFlight(t *testing.T) {
 	if !strings.Contains(receipts[0], "akiroo's own findings") {
 		t.Errorf("receipt content came from the wrong project: %v", receipts)
 	}
+}
+
+// A non-streaming driver's reply reached the screen and then vanished on the
+// next restart: blockingSend appended to history but never persisted it, and
+// only the streaming path (Claude) saved as it went. opencode, codex and mock
+// all take the blocking path.
+func TestBlockingReplySurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	d := newScriptDriver()
+	d.replies["/omni"] = []string{"the reply that used to disappear"}
+	projects := []*Project{{Name: "omni", Tool: "script", Dir: "/omni", Status: driver.StatusIdle}}
+	in := New(projects, map[string]driver.Driver{"script": d}, statePath)
+	in.pollEvery = time.Millisecond
+	t.Cleanup(in.Close)
+
+	if err := in.Send(1, "ask something"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitFor(t, "the turn to finish", func() bool {
+		return in.Snapshot()[0].Status != driver.StatusWorking
+	})
+	// The save happens just after the status flips; give it its moment.
+	waitFor(t, "the reply to reach disk", func() bool {
+		b, err := os.ReadFile(statePath)
+		return err == nil && strings.Contains(string(b), "the reply that used to disappear")
+	})
+
+	// Reopen exactly as main.go does.
+	reopened := []*Project{{Name: "omni", Tool: "script", Dir: "/omni"}}
+	LoadState(statePath, reopened)
+	if reopened[0].LastMessage != "the reply that used to disappear" {
+		t.Errorf("last message lost on restart: %q", reopened[0].LastMessage)
+	}
+	var sawAssistant bool
+	for _, m := range reopened[0].History {
+		if m.Role == "assistant" && strings.Contains(m.Content, "used to disappear") {
+			sawAssistant = true
+		}
+	}
+	if !sawAssistant {
+		t.Errorf("the assistant turn is missing from restored history: %+v", reopened[0].History)
+	}
+}
+
+// Close must drain, not just signal. A watcher already past its stop check
+// still has a write to make, and a caller that deletes the state directory
+// the moment Close returns would race it.
+func TestCloseWaitsForBackgroundWork(t *testing.T) {
+	dir := t.TempDir()
+	d := newScriptDriver()
+	d.replies["/king"] = []string{"[send to omni: go]", "done"}
+	d.replies["/omni"] = []string{"reply"}
+	projects := []*Project{
+		{Name: "king", Tool: "script", Dir: "/king", Status: driver.StatusIdle},
+		{Name: "omni", Tool: "script", Dir: "/omni", Status: driver.StatusIdle},
+	}
+	in := New(projects, map[string]driver.Driver{"script": d}, filepath.Join(dir, "state.json"))
+	in.pollEvery = time.Millisecond
+
+	if err := in.KingSend(1, "go", []string{"omni"}); err != nil {
+		t.Fatalf("KingSend: %v", err)
+	}
+	in.Close()
+
+	// Everything has stopped: the directory can be emptied and stays empty.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(80 * time.Millisecond)
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		t.Errorf("something wrote after Close returned: %v", left)
+	}
+}
+
+// Close is safe twice, and safe when nothing ever ran.
+func TestCloseIsIdempotent(t *testing.T) {
+	in := New(nil, map[string]driver.Driver{}, filepath.Join(t.TempDir(), "s.json"))
+	in.Close()
+	in.Close()
 }
