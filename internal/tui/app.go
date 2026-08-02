@@ -310,8 +310,18 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	lines = append(lines, trunc.Render(headerStyle.Render("fleet")))
 	lines = append(lines, "")
 
+	ki := m.kingIndex()
+
+	// The counts under a heading that says "fleet" are the fleet's. The
+	// supervisor was included in all three, so a fleet of two read as "3
+	// projects" and the supervisor thinking read as one of them working. Its
+	// own status is on its own row, next to the star.
 	waiting, working, fleetCount := 0, 0, 0
-	for _, p := range snap {
+	for i, p := range snap {
+		if i+1 == ki {
+			continue
+		}
+		fleetCount++
 		switch p.Status {
 		case driver.StatusWaiting, driver.StatusError:
 			waiting++
@@ -324,12 +334,8 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	// the names share a left edge. The per-row index that used to sit here
 	// selected nothing — the sidebar navigates with j/k — and it pushed the
 	// fleet's names two columns right of the king's.
-	ki := m.kingIndex()
 	for i, p := range snap {
 		isKing := i+1 == ki
-		if !isKing {
-			fleetCount++
-		}
 		var marker string
 		switch {
 		case isKing:
@@ -376,7 +382,7 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	}
 
 	lines = append(lines, "")
-	for _, s := range fleetSummary(len(snap), working, waiting, maxW) {
+	for _, s := range fleetSummary(fleetCount, working, waiting, maxW) {
 		lines = append(lines, trunc.Render(mutedStyle.Render(s)))
 	}
 	return lines
