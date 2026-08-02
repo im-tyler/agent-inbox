@@ -509,6 +509,12 @@ func (m Model) viewDetail() string {
 	}
 	p := snap[m.selected-1]
 
+	// Frame borders and padding take four columns.
+	detailW := m.width - 6
+	if detailW < 20 {
+		detailW = 20
+	}
+
 	var b strings.Builder
 
 	// Metadata block (compact, 2 lines).
@@ -521,40 +527,30 @@ func (m Model) viewDetail() string {
 		b.WriteString(mutedStyle.Render("(no messages yet)"))
 		b.WriteString("\n")
 	} else {
+		// Same rendering as the king's thread. This view is where the full
+		// replies live, so it is the last place that should hand back the
+		// raw "## Heading" and "[send to ...]" the other one strips.
 		for _, msg := range p.History {
-			label := msg.Role
-			style := mutedStyle
-			switch msg.Role {
-			case "user":
-				label = "you"
-				style = workingStyle
-			case "assistant":
-				label = p.Tool
-				style = waitingStyle
-			case "error":
-				label = "error"
-				style = errorStyle
-			case "system":
-				label = "system"
-				style = mutedStyle
+			body := stripDirectives(msg.Content)
+			if body == "" {
+				continue
 			}
-			ts := msg.Timestamp.Format(time.Kitchen)
-			b.WriteString(style.Render(fmt.Sprintf("[%s %s]", label, ts)))
+			glyph, label, style := speaker(msg.Role, p.Tool)
+			b.WriteString(speakerLine(glyph, label, msg.Timestamp.Format(time.Kitchen), style, detailW))
 			b.WriteString("\n")
-			b.WriteString(indent(msg.Content, "  "))
+			b.WriteString(strings.Join(wrapBody(body, detailW), "\n"))
 			b.WriteString("\n\n")
 		}
 	}
 
 	// Live streaming text (if currently working).
-	if p.Status == driver.StatusWorking && p.StreamingText != "" {
-		b.WriteString(workingStyle.Render("─ currently generating ─"))
+	if p.Status == driver.StatusWorking {
+		b.WriteString(speakerLine(m.frame(), p.Tool, workingLabel(p.Activity), workingStyle, detailW))
 		b.WriteString("\n")
-		b.WriteString(indent(p.StreamingText, "  "))
-		b.WriteString("\n")
-	} else if p.Status == driver.StatusWorking {
-		b.WriteString(mutedStyle.Render(fmt.Sprintf("(working: %s...)", p.Activity)))
-		b.WriteString("\n")
+		if p.StreamingText != "" {
+			b.WriteString(strings.Join(wrapBody(p.StreamingText, detailW), "\n"))
+			b.WriteString("\n")
+		}
 	}
 
 	// Build full body and apply scroll.
@@ -695,7 +691,7 @@ func renderRow(idx int, p inbox.Project, selected bool, contentW int, frame stri
 	if msgW < 10 {
 		msgW = 10
 	}
-	msgStr = truncateOneLine(msgStr, msgW)
+	msgStr = truncateOneLine(previewText(msgStr), msgW)
 
 	// Build the row with proper spacing.
 	nameStr := p.Name

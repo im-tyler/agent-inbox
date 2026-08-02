@@ -85,6 +85,19 @@ func candidateFrom(item feed.Item) (candidate, bool) {
 //
 // Only whole lines are dropped, matching how the parsers read them: prose
 // that merely mentions the syntax stays.
+// previewText flattens a message to one line for a sidebar row or a list
+// preview: directives out, markdown markers out, newlines collapsed. The
+// same cleanup the threads get, since a preview is a quote from one.
+func previewText(content string) string {
+	var parts []string
+	for _, raw := range strings.Split(stripDirectives(content), "\n") {
+		if t, _ := demarkdown(raw); strings.TrimSpace(t) != "" {
+			parts = append(parts, strings.TrimSpace(t))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 func stripDirectives(content string) string {
 	lines := strings.Split(content, "\n")
 	kept := make([]string, 0, len(lines))

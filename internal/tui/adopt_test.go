@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -173,6 +174,38 @@ func TestFooterNeverWrapsTheFrame(t *testing.T) {
 					t.Errorf("width %d focus=%v: line overflows (%d cols): %q", w, focus, lipgloss.Width(ln), ln)
 				}
 			}
+		}
+	}
+}
+
+// The detail view is where the full replies live, so it is the last place
+// that should hand back raw markdown and directive syntax.
+func TestDetailViewSharesTheChatRendering(t *testing.T) {
+	projects := []*inbox.Project{{
+		Name: "king", Tool: "opencode", Dir: "/k", Status: driver.StatusIdle,
+		History: []inbox.Message{
+			{Role: "assistant", Content: "On it.\n[send to omni: check]", Timestamp: time.Now()},
+			{Role: "omni", Content: "## Findings\n**three** issues\n- one\n- two", Timestamp: time.Now()},
+		},
+	}}
+	in := inbox.New(projects, map[string]driver.Driver{}, filepath.Join(t.TempDir(), "s.json"))
+	m := New(in, "")
+	m.width, m.height = 80, 40
+	m.selected = 1
+
+	got := m.viewDetail()
+	for _, unwanted := range []string{"[send to", "## ", "**"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("%q reached the detail view:\n%s", unwanted, got)
+		}
+	}
+	// And the fleet speaker is drawn as one, not as an unlabelled role.
+	if !strings.Contains(got, "▸ omni") {
+		t.Errorf("fleet reply is not marked as one:\n%s", got)
+	}
+	for _, want := range []string{"Findings", "three issues", "• one"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
 		}
 	}
 }

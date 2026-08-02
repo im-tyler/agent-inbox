@@ -85,7 +85,7 @@ func (m *Model) renderKing() string {
 			ts := msg.Timestamp.Format(time.Kitchen)
 			b.WriteString(style.Render(fmt.Sprintf("  [%s %s]", label, ts)))
 			b.WriteString("\n")
-			b.WriteString(indent(truncateOneLine(msg.Content, 200), "    "))
+			b.WriteString(indent(truncateOneLine(previewText(msg.Content), 200), "    "))
 			b.WriteString("\n")
 		}
 	}

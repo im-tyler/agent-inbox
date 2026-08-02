@@ -183,3 +183,24 @@ func TestPlural(t *testing.T) {
 		t.Errorf("got %q, want 1 project", got[0])
 	}
 }
+
+// A preview is a quote from a thread, so it gets the same cleanup the thread
+// does — otherwise the sidebar and the list show markers the chat strips.
+func TestPreviewTextIsCleanAndFlat(t *testing.T) {
+	got := previewText("On it.\n[send to omni: check]\n## Findings\n**three** issues")
+	for _, unwanted := range []string{"[send to", "##", "**", "\n"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("%q survived in %q", unwanted, got)
+		}
+	}
+	if !strings.Contains(got, "Findings") || !strings.Contains(got, "three issues") {
+		t.Errorf("content was lost: %q", got)
+	}
+}
+
+// A message that was nothing but directives has no preview to show.
+func TestPreviewTextOfDirectivesOnly(t *testing.T) {
+	if got := previewText("[send to omni: go]"); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}

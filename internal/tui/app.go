@@ -361,7 +361,7 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 			sub = p.LastErr
 		}
 		if !isKing {
-			if s := truncateOneLine(sub, maxW-2); s != "" {
+			if s := truncateOneLine(previewText(sub), maxW-2); s != "" {
 				lines = append(lines, trunc.Render(mutedStyle.Render("  "+s)))
 			}
 		}

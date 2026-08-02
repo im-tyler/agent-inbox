@@ -226,11 +226,13 @@ func ParseKingDirectives(response string) []KingDirective {
 	return dirs
 }
 
-// fleetReply is what a dispatched project came back with.
+// fleetReply is what a dispatched project came back with. Failure is carried
+// in the content — "(error: ...)", "(no output)" — because that is what the
+// king reads and what the receipt shows; a separate flag was written in three
+// places and read in none.
 type fleetReply struct {
 	name    string
 	content string
-	failed  bool
 }
 
 const (
@@ -274,7 +276,6 @@ func (in *Inbox) kingRoundWatcher(kingName string, targets []string) {
 			replies = append(replies, fleetReply{
 				name:    name,
 				content: "(no reply within the round timeout)",
-				failed:  true,
 			})
 		}
 	}
@@ -325,11 +326,9 @@ func (in *Inbox) awaitReply(name string, deadline time.Time) (fleetReply, bool) 
 		reply := fleetReply{name: name, content: target.LastMessage}
 		if target.LastErr != "" {
 			reply.content = "(error: " + target.LastErr + ")"
-			reply.failed = true
 		}
 		if reply.content == "" {
 			reply.content = "(no output)"
-			reply.failed = true
 		}
 		in.mu.Unlock()
 		return reply, true
