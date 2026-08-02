@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +18,8 @@ import (
 // without configuring a paid provider.
 const DefaultOpenCodeModel = "opencode/deepseek-v4-flash-free"
 
-// OpenCode drives `opencode run`. Verified against opencode 1.15.11/1.16.2:
+// OpenCode drives `opencode run`. Verified against opencode 1.15.11/1.16.2
+// and 1.18.11:
 //   - `opencode run --format json` is EMPTY on success, so we ignore run output
 //     and read the reply back via `opencode export <id>` (clean structured JSON).
 //   - `run` cannot create a session with a preset id, and `session list` is
@@ -60,12 +62,18 @@ func (o *OpenCode) Send(ctx context.Context, dir, sessionID, prompt string) Resu
 		before = sessionIDs(ctx, dir)
 	}
 
+	// stdout and stderr are kept apart. They were merged, so opencode's
+	// diagnostics ended up inside the reply on the recovery path below —
+	// stderr belongs in an error message, not in what the agent said.
 	cmd := exec.CommandContext(ctx, "opencode", args...)
 	cmd.Dir = dir
-	runOut, runErr := cmd.CombinedOutput()
-	if runErr != nil {
-		return Result{SessionID: sessionID, Status: StatusError, Err: fmt.Errorf("opencode run: %v: %s", runErr, strings.TrimSpace(string(runOut)))}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if runErr := cmd.Run(); runErr != nil {
+		return Result{SessionID: sessionID, Status: StatusError,
+			Err: fmt.Errorf("opencode run: %v%s", runErr, diagSuffix(strings.TrimSpace(stderr.String())))}
 	}
+	runOut := stdout.Bytes()
 
 	if newSession {
 		id, err := newSessionID(ctx, dir, before)
@@ -83,9 +91,9 @@ func (o *OpenCode) Send(ctx context.Context, dir, sessionID, prompt string) Resu
 	}
 
 	// Try export with retry — the session may not be immediately exportable.
-	text, errMsg, err := exportWithRetry(ctx, sessionID, 3)
+	text, errMsg, err := exportWithRetry(ctx, sessionID, exportAttempts)
 	if err != nil {
-		if runText := cleanReply(string(runOut)); runText != "" {
+		if runText := recoveredReply(string(runOut)); runText != "" {
 			return Result{SessionID: sessionID, Final: runText, Status: StatusWaiting}
 		}
 		return Result{SessionID: sessionID, Status: StatusError, Err: err}
@@ -139,18 +147,40 @@ type ocExport struct {
 	} `json:"messages"`
 }
 
-// exportWithRetry calls exportLastAssistant with retries. OpenCode's
-// session export can return empty immediately after session creation
-// because the internal state hasn't synced yet. Each retry waits 500ms.
+const (
+	// exportAttempts and exportBackoff bound how long we wait for opencode to
+	// make a session exportable.
+	//
+	// This was 3 attempts 500ms apart — 1.5s — and that is why the recovery
+	// path below existed in practice rather than in theory. opencode writes
+	// session state asynchronously after `run` returns, so a freshly created
+	// session routinely was not exportable inside that window, every early
+	// turn fell through to scraping the terminal, and the transcript got
+	// filed as the agent's reply. Doubling from 400ms gives ~6s across six
+	// tries, which costs nothing on the normal path: the first attempt
+	// succeeds and none of the sleeps happen.
+	exportAttempts = 6
+	exportBackoff  = 400 * time.Millisecond
+)
+
+// exportWithRetry calls exportLastAssistant, backing off between attempts.
 func exportWithRetry(ctx context.Context, sessionID string, attempts int) (text, errMsg string, err error) {
+	wait := exportBackoff
 	for i := 0; i < attempts; i++ {
 		text, errMsg, err = exportLastAssistant(ctx, sessionID)
 		if err == nil {
 			return text, errMsg, nil
 		}
-		if i < attempts-1 {
-			time.Sleep(500 * time.Millisecond)
+		if i == attempts-1 {
+			break
 		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			// A cancelled turn should not go on sleeping through its budget.
+			return "", "", ctx.Err()
+		}
+		wait *= 2
 	}
 	return "", "", err
 }
@@ -207,7 +237,7 @@ func exportLastAssistant(ctx context.Context, sessionID string) (text, errMsg st
 // you are reading, a rejected tool call is usually the reason the turn went
 // the way it did, and dropping it would leave an inexplicable answer.
 func cleanReply(s string) string {
-	lines := strings.Split(s, "\n")
+	lines := strings.Split(stripANSI(s), "\n")
 	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
 		lines = lines[1:]
 	}
@@ -215,4 +245,69 @@ func cleanReply(s string) string {
 		lines = lines[1:]
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// ansiPattern matches CSI escape sequences — the colour and cursor codes
+// opencode writes for a human watching a terminal.
+var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+// stripANSI removes terminal control codes.
+//
+// It runs before every other check, because those checks are about the text
+// and an escape sequence is not text. The banner test in particular is a
+// prefix test, and the banner arrives as "\x1b[0m\n> build · model" — escape
+// characters are not whitespace, so TrimSpace left them in place, the prefix
+// never matched, and both the banner and the raw codes reached the UI.
+func stripANSI(s string) string { return ansiPattern.ReplaceAllString(s, "") }
+
+// maxRecovered caps a recovered transcript. It is injected into the king's
+// context and rendered as a sidebar preview, and the whole terminal output of
+// a tool-using turn ran to twelve thousand characters in practice.
+const maxRecovered = 1500
+
+// recoveredReply salvages something readable from raw terminal output when
+// `opencode export` could not be read.
+//
+// This is not the reply and cannot be made into one: what opencode prints is a
+// transcript, with the assistant's prose interleaved with shell commands it
+// echoed and their output, and no marker separating them. Guessing which lines
+// were speech would sometimes be wrong silently.
+//
+// So it says what it is. The command echoes and their output go, because those
+// are the bulk and they are certainly not speech; what remains is capped and
+// labelled, so a reader knows they are looking at scrapings rather than an
+// answer, and knows to open the session for the real one.
+func recoveredReply(raw string) string {
+	cleaned := cleanReply(raw)
+	if cleaned == "" {
+		return ""
+	}
+
+	var kept []string
+	inCommand := false
+	for _, line := range strings.Split(cleaned, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// "$ " starts an echoed shell command; everything up to the next
+		// blank line is that command and its output.
+		if strings.HasPrefix(trimmed, "$ ") {
+			inCommand = true
+			continue
+		}
+		if inCommand {
+			if trimmed == "" {
+				inCommand = false
+			}
+			continue
+		}
+		kept = append(kept, line)
+	}
+
+	body := strings.TrimSpace(strings.Join(kept, "\n"))
+	if body == "" {
+		return ""
+	}
+	if r := []rune(body); len(r) > maxRecovered {
+		body = strings.TrimSpace(string(r[:maxRecovered])) + "\n[…truncated]"
+	}
+	return body + "\n\n(recovered from terminal output — opencode export was not ready; open the session for the full reply)"
 }
