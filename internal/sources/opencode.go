@@ -348,7 +348,9 @@ func (o OpenCode) item(s ocSession, finish string) feed.Item {
 				// The dispatch Claude Code has no equivalent of: a message
 				// goes straight into the existing session.
 				{Label: "reply", Run: []string{o.bin(), "run", "-s", s.ID, "{message}"}, Dir: s.Directory},
-				{Label: "open", Run: []string{o.bin(), "--session", s.ID}, Dir: s.Directory},
+				// open hands over the terminal; reply is a model turn that runs in
+				// the background rather than suspending the inbox for minutes.
+				{Label: "open", Run: []string{o.bin(), "--session", s.ID}, Dir: s.Directory, Interactive: true},
 			},
 		}
 	}

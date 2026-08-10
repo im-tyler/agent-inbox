@@ -218,6 +218,16 @@ func (m Model) byKey(key string) (feed.Item, bool) {
 // is a request that may run a full model turn, and suspending the whole inbox
 // for minutes to wait for one is not the same thing at all.
 func run(action feed.Action, fills map[string]string) tea.Cmd {
+	// A remote action declares an endpoint rather than a command. The contract
+	// defines the field but not its request or response shape, so there is
+	// nothing to implement against yet — and translating it into a curl argv
+	// would be inventing a protocol on the producer's behalf. Say so plainly
+	// rather than reporting the generic "no command".
+	if len(action.Run) == 0 && action.Pane == "" && action.Post != "" {
+		return func() tea.Msg {
+			return ranMsg{err: fmt.Errorf("action %q is a remote action; this build does not execute those", action.Label)}
+		}
+	}
 	argv := substitute(action.Run, fills)
 	if len(argv) == 0 {
 		return func() tea.Msg { return ranMsg{err: fmt.Errorf("action %q has no command", action.Label)} }

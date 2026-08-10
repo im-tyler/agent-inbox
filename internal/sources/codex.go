@@ -296,7 +296,8 @@ func (c Codex) item(s codexSession) feed.Item {
 				// Like opencode and unlike Claude Code, codex accepts a
 				// prompt into an existing session.
 				{Label: "reply", Run: []string{c.bin(), "exec", "resume", s.id, "{message}"}, Dir: s.cwd},
-				{Label: "open", Run: []string{c.bin(), "resume", s.id}, Dir: s.cwd},
+				// See the OpenCode source: open is interactive, reply is not.
+				{Label: "open", Run: []string{c.bin(), "resume", s.id}, Dir: s.cwd, Interactive: true},
 			},
 		}
 	}
