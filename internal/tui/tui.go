@@ -168,6 +168,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = fmt.Sprintf("waiting: %s", strings.Join(upd, ", "))
 			m.toastAt = time.Now()
 		}
+		// A stateful session manager that cannot write its state must say so.
+		// This went to stderr, which is behind the alternate screen and so is
+		// seen by nobody until the program exits.
+		if err := m.inbox.SaveErr(); err != nil {
+			m.toast = "state not saved: " + err.Error()
+			m.toastAt = time.Now()
+		}
 		// Auto-scroll: pin to bottom.
 		if m.mainAutoScroll {
 			m.mainScrollFromBottom = 0

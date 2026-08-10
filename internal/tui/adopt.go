@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/im-tyler/agent-inbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/sources"
 )
 
 // Adoption turns a row in the inbox into a project. The inbox already knows
@@ -64,17 +67,31 @@ func adoptSession(source, id string) (sessionID, forkFrom string) {
 	return id, ""
 }
 
-// candidateFrom derives an adoptable project from an inbox row, reporting
-// false for rows the supervisor could never drive: a deploy, a CI run, or any
-// session that never said which folder it is in.
-func candidateFrom(item feed.Item) (candidate, bool) {
+// candidateFrom derives an adoptable project from an inbox row, reporting why
+// it cannot when it cannot: a deploy, a CI run, a session that never said which
+// folder it is in, or one belonging to an installation the managed runtime
+// cannot reach.
+func candidateFrom(item feed.Item) (candidate, error) {
 	tool := toolFor(item.Source)
 	if tool == "" {
-		return candidate{}, false
+		return candidate{}, errNotAdoptable
 	}
 	dir := item.Context["cwd"]
 	if dir == "" {
-		return candidate{}, false
+		return candidate{}, errNotAdoptable
+	}
+	// A project records which *vendor* drives it, not which installation. So a
+	// session discovered through a customised source — a fork's binary, an
+	// alternate database — would be resumed by the default binary, which has
+	// never heard of that session id.
+	//
+	// Refusing is the honest answer until a project can name a driver profile.
+	// The row is still fully usable from the inbox itself: its reply and open
+	// actions invoke the configured binary, because the source built them.
+	if profile := item.Context[sources.ProfileKey]; profile != "" {
+		return candidate{}, fmt.Errorf(
+			"%s runs a customised %s (%s); the supervisor would resume it with the default %s, which does not know this session — reply to it from the inbox instead",
+			item.Origin, tool, profile, tool)
 	}
 	sessionID, forkFrom := adoptSession(item.Source, item.ID)
 	return candidate{
@@ -82,8 +99,12 @@ func candidateFrom(item feed.Item) (candidate, bool) {
 		Dir:       dir,
 		SessionID: sessionID,
 		ForkFrom:  forkFrom,
-	}, true
+	}, nil
 }
+
+// errNotAdoptable is a row that is simply not a session — no explanation is
+// more useful than the generic one.
+var errNotAdoptable = errors.New("no agent session to adopt on this row")
 
 // stripDirectives removes the king's machine syntax from what a human reads.
 // [send to X: Y] and [note: ...] are instructions to this program, not speech

@@ -921,7 +921,15 @@ func (m Model) View() string {
 		return b.String()
 	}
 	if m.mode == modeBroadcast {
-		b.WriteString("\n" + titleStyle.Render(fmt.Sprintf("broadcast to %d session(s)", m.markedSendable())) + "\n")
+		b.WriteString("\n" + titleStyle.Render(fmt.Sprintf("broadcast to %d session(s)", len(m.broadcastTargets))) + "\n")
+		// Marks survive the `a` filter, so a row can be marked and then hidden.
+		// Those are not recipients — the targets were captured from what was on
+		// screen — but the difference between the mark count and the send count
+		// should not be a mystery.
+		if hidden := m.hiddenMarked(); hidden > 0 {
+			b.WriteString(mutedStyle.Render(fmt.Sprintf(
+				"%d marked row(s) are hidden and will not receive this — press a to show them\n", hidden)))
+		}
 		b.WriteString(m.input.View() + "\n")
 		b.WriteString(mutedStyle.Render("enter to send · esc to cancel") + "\n")
 		return b.String()

@@ -91,6 +91,21 @@ carries the tag goreleaser stamped, a `go install` binary reads its module
 version from build info, and a working-tree build reports the tag it is ahead of
 plus `+dirty`.
 
+### Check the install
+
+```sh
+agent-inbox doctor
+```
+
+This program is mostly a consumer of other people's command-line interfaces, and
+those move. `doctor` reports each agent CLI it can find, probes it for the
+subcommands and flags this build actually passes, and lists the helper binaries
+the session sources shell out to — `sqlite3` for OpenCode's database, `lsof` for
+deciding which sessions are live. Without those two the inbox does not error; it
+quietly shows less. It also fetches every configured source once, so a parser
+that has stopped understanding its input reads as a failure rather than as an
+empty list.
+
 ## Quickstart
 
 ```sh
@@ -196,6 +211,7 @@ unreachable source reports itself and never blanks the rest of the list.
   "opencode": { "model": "opencode/deepseek-v4-flash-free", "skip_permissions": false },
   "codex":    { "sandbox": "workspace-write" },
   "king":     { "rounds": 1 },
+  "turn_timeout_seconds": 0,
   "projects": [
     { "name": "tebian",  "tool": "claude",   "dir": "/path/to/tebian" },
     { "name": "neutron", "tool": "opencode", "dir": "/path/to/neutron" },
@@ -204,10 +220,21 @@ unreachable source reports itself and never blanks the rest of the list.
 }
 ```
 
-`projects` may be empty — a supervisor with nothing to supervise is a usable
-state you add to with `n`. Under `king`, `rounds` is the dispatch budget and the
-optional `name`, `tool` and `dir` override the supervisor. OpenCode defaults to a
-**free, no-key** model so those projects work without configuring a provider.
+There need not be a config file at all: a missing one means the defaults, which
+is a supervisor and nothing to supervise. `projects` may likewise be empty — you
+add to it with `n`. Under `king`, `rounds` is the dispatch budget and the
+optional `name`, `tool` and `dir` override the supervisor; its name is reserved,
+so a project may not claim it. `turn_timeout_seconds` bounds one agent turn — 0
+means the 30-minute default, -1 means no limit. OpenCode defaults to a **free,
+no-key** model so those projects work without configuring a provider.
+
+Everything under the data directory is written `0600` in directories written
+`0700`: it holds assistant output and the paths of your repositories.
+
+If you run with a `--config` somewhere other than the default, set
+`AGENT_INBOX_CONFIG` to the same path. The Stop hook is a separate process and
+cannot see the flag, so without the variable it reads the default config and
+silently matches none of your projects.
 
 ## Keybindings
 

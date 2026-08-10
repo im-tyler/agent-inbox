@@ -64,6 +64,18 @@ func (c Codex) Name() string {
 	return "codex"
 }
 
+// profileNote — see Claude.profileNote.
+func (c Codex) profileNote() string {
+	var parts []string
+	if c.Bin != "" {
+		parts = append(parts, "bin "+c.Bin)
+	}
+	if c.Root != "" {
+		parts = append(parts, "root "+c.Root)
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (c Codex) bin() string {
 	if c.Bin != "" {
 		return c.Bin
@@ -280,7 +292,7 @@ func (c Codex) item(s codexSession) feed.Item {
 		State:     state,
 		Since:     s.last.UTC().Format(time.RFC3339),
 		UpdatedAt: s.last.UTC().Format(time.RFC3339),
-		Context:   map[string]string{"project": project, "cwd": s.cwd},
+		Context:   c.contextFor(project, s.cwd),
 	}
 	if s.lastEvent != "" {
 		item.Context["last_event"] = s.lastEvent

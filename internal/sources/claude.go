@@ -84,6 +84,26 @@ type agentInfo struct {
 	StartedAt int64  `json:"startedAt"` // epoch millis
 }
 
+// profileNote describes how this source differs from a default install, or
+// "" when it does not.
+//
+// Adoption needs this. A discovered session belongs to the *installation* that
+// created it, and the managed runtime is chosen by vendor name alone — so a
+// session found through a customised source would be resumed by whatever the
+// default binary is, which does not know that session. Declaring the
+// difference lets adoption refuse rather than bind the project to the wrong
+// runtime. See internal/tui/adopt.go.
+func (c Claude) profileNote() string {
+	var parts []string
+	if c.Bin != "" {
+		parts = append(parts, "bin "+c.Bin)
+	}
+	if c.Root != "" {
+		parts = append(parts, "root "+c.Root)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // bin is the claude executable this source is configured to use.
 func (c Claude) bin() string {
 	if c.Bin != "" {
@@ -475,6 +495,9 @@ func (c Claude) item(a agentInfo, e enrichment, js jobState, pane string) feed.I
 	}
 
 	ctx := map[string]string{"project": project}
+	if note := c.profileNote(); note != "" {
+		ctx[ProfileKey] = note
+	}
 	if a.Kind != "" {
 		ctx["kind"] = a.Kind
 	}

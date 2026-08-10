@@ -322,3 +322,28 @@ func Errors(results []Result) []Result {
 	sort.Slice(bad, func(i, j int) bool { return bad[i].Source < bad[j].Source })
 	return bad
 }
+
+// ProfileKey marks an item as coming from a customised installation of its
+// vendor — a fork's binary, an alternate database or session root.
+//
+// It is a context key rather than a field because it is advice to the consumer,
+// not part of the wire contract: a remote producer has no installation for us
+// to reason about.
+const ProfileKey = "driver_profile"
+
+// contextFor builds an item's context, noting a non-default profile.
+func (o OpenCode) contextFor(project, cwd string) map[string]string {
+	return profileContext(project, cwd, o.profileNote())
+}
+
+func (c Codex) contextFor(project, cwd string) map[string]string {
+	return profileContext(project, cwd, c.profileNote())
+}
+
+func profileContext(project, cwd, note string) map[string]string {
+	ctx := map[string]string{"project": project, "cwd": cwd}
+	if note != "" {
+		ctx[ProfileKey] = note
+	}
+	return ctx
+}

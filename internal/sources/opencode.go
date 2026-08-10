@@ -63,6 +63,18 @@ func (o OpenCode) Name() string {
 	return "opencode"
 }
 
+// profileNote — see Claude.profileNote.
+func (o OpenCode) profileNote() string {
+	var parts []string
+	if o.Bin != "" {
+		parts = append(parts, "bin "+o.Bin)
+	}
+	if o.DB != "" {
+		parts = append(parts, "db "+o.DB)
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (o OpenCode) bin() string {
 	if o.Bin != "" {
 		return o.Bin
@@ -334,7 +346,7 @@ func (o OpenCode) item(s ocSession, finish string) feed.Item {
 		State:     state,
 		Since:     updated.UTC().Format(time.RFC3339),
 		UpdatedAt: updated.UTC().Format(time.RFC3339),
-		Context:   map[string]string{"project": project, "cwd": s.Directory},
+		Context:   o.contextFor(project, s.Directory),
 	}
 	if finish != "" {
 		item.Context["finish"] = finish

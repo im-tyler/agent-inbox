@@ -107,7 +107,7 @@ func (m *Model) renderToolPicker() string {
 	b.WriteString("\n\n")
 	b.WriteString(mutedStyle.Render(fmt.Sprintf("  current: %s", current)))
 	b.WriteString("\n\n")
-	for i, tool := range config.KnownTools {
+	for i, tool := range config.SelectableTools() {
 		marker := "  "
 		if tool == pending {
 			marker = "> "
@@ -152,8 +152,8 @@ func (m *Model) handleToolPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "1", "2", "3", "4":
 		var n int
 		fmt.Sscanf(msg.String(), "%d", &n)
-		if n >= 1 && n <= len(config.KnownTools) {
-			m.pendingTool = config.KnownTools[n-1]
+		if n >= 1 && n <= len(config.SelectableTools()) {
+			m.pendingTool = config.SelectableTools()[n-1]
 		}
 		return m, nil
 	}

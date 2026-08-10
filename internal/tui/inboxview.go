@@ -63,9 +63,9 @@ func (m Model) adoptSelected() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	c, ok := candidateFrom(item)
-	if !ok {
-		m.toast = "no agent session to adopt on this row"
+	c, err := candidateFrom(item)
+	if err != nil {
+		m.toast = err.Error()
 		m.toastAt = time.Now()
 		return m, nil
 	}

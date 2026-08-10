@@ -11,6 +11,7 @@ import (
 	"github.com/im-tyler/agent-inbox/internal/driver"
 	"github.com/im-tyler/agent-inbox/internal/feed"
 	"github.com/im-tyler/agent-inbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/sources"
 )
 
 func row(source, id, cwd string) feed.Item {
@@ -52,9 +53,9 @@ func TestAdoptSessionForksClaude(t *testing.T) {
 }
 
 func TestCandidateFromDrivableRow(t *testing.T) {
-	c, ok := candidateFrom(row("opencode", "ses_1", "/repo/lab"))
-	if !ok {
-		t.Fatal("opencode row was not adoptable")
+	c, err := candidateFrom(row("opencode", "ses_1", "/repo/lab"))
+	if err != nil {
+		t.Fatalf("opencode row was not adoptable: %v", err)
 	}
 	if c.Tool != "opencode" || c.Dir != "/repo/lab" || c.SessionID != "ses_1" || c.ForkFrom != "" {
 		t.Errorf("candidate = %+v", c)
@@ -65,9 +66,9 @@ func TestCandidateFromDrivableRow(t *testing.T) {
 }
 
 func TestCandidateFromClaudeForksSession(t *testing.T) {
-	c, ok := candidateFrom(row("claude-code", "abc", "/repo/neutron"))
-	if !ok {
-		t.Fatal("claude row was not adoptable")
+	c, err := candidateFrom(row("claude-code", "abc", "/repo/neutron"))
+	if err != nil {
+		t.Fatalf("claude row was not adoptable: %v", err)
 	}
 	if c.SessionID != "" {
 		t.Errorf("session = %q, want empty (a live claude session can't be resumed)", c.SessionID)
@@ -84,12 +85,39 @@ func TestCandidateFromClaudeForksSession(t *testing.T) {
 
 func TestCandidateFromRejectsUndrivableRows(t *testing.T) {
 	// A deploy has no driver behind it.
-	if _, ok := candidateFrom(row("teploy-ship", "1", "/repo/a")); ok {
+	if _, err := candidateFrom(row("teploy-ship", "1", "/repo/a")); err == nil {
 		t.Error("a non-agent source was offered as a project")
 	}
 	// A session that never said where it lives cannot be adopted.
-	if _, ok := candidateFrom(row("opencode", "1", "")); ok {
+	if _, err := candidateFrom(row("opencode", "1", "")); err == nil {
 		t.Error("a row with no cwd was offered as a project")
+	}
+}
+
+// A project records which vendor drives it, not which installation. A session
+// found through a customised source — an opencode fork with its own database,
+// say — would be resumed by the default binary, which has never heard of that
+// session id. Refusing beats binding the project to the wrong runtime.
+func TestCandidateFromRefusesACustomisedInstallation(t *testing.T) {
+	item := row("opencode", "ses_1", "/repo/lab")
+	item.Origin = "fylun-code"
+	item.Context[sources.ProfileKey] = "bin fylun-code, db /home/t/.local/share/fylun-code/opencode.db"
+
+	_, err := candidateFrom(item)
+	if err == nil {
+		t.Fatal("a customised installation was adopted into the default runtime")
+	}
+	for _, want := range []string{"fylun-code", "inbox"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should mention %q: %v", want, err)
+		}
+	}
+}
+
+// An ordinary source is unaffected.
+func TestCandidateFromAcceptsADefaultInstallation(t *testing.T) {
+	if _, err := candidateFrom(row("opencode", "ses_1", "/repo/lab")); err != nil {
+		t.Fatalf("a default opencode row should adopt: %v", err)
 	}
 }
 

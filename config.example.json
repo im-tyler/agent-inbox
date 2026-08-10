@@ -2,8 +2,14 @@
   "claude":   { "permission_mode": "default" },
   "opencode": { "model": "opencode/deepseek-v4-flash-free", "skip_permissions": false },
   "codex":    { "model": "", "sandbox": "workspace-write", "skip_approvals": false },
+
+  "_comment_turn_timeout": "Seconds one agent turn may run before it is killed. Omit for 30 minutes; -1 for no limit. A build or a test suite legitimately runs long, and cancel already exists for a turn that has genuinely hung.",
+  "turn_timeout_seconds": 0,
+
+  "_comment_king": "The supervisor is provisioned, not configured — it gets a folder of its own under the data dir. Override its name, tool or dir here if you want to. Its name is reserved: a project may not claim it.",
+  "king": { "rounds": 1 },
+
   "projects": [
-    { "name": "demo",    "tool": "mock",     "dir": "/tmp" },
     { "name": "project-a", "tool": "claude",   "dir": "/path/to/your/project-a" },
     { "name": "project-b", "tool": "opencode", "dir": "/path/to/your/project-b" },
     { "name": "project-c", "tool": "codex",    "dir": "/path/to/your/project-c" }
