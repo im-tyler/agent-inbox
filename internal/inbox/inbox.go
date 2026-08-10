@@ -3,15 +3,18 @@ package inbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/im-tyler/agent-inbox/internal/config"
 	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/fsutil"
+	"github.com/im-tyler/agent-inbox/internal/ident"
 )
 
 type Project struct {
@@ -85,6 +88,19 @@ type Inbox struct {
 	// send goroutine. Empty when no send is active for that project.
 	cancels map[string]context.CancelFunc
 
+	// turnTimeout bounds a single agent turn. Zero means no deadline.
+	turnTimeout time.Duration
+
+	// nextTurnID hands out turn identities. A turn is the unit watchers wait
+	// on; see activeTurn.
+	nextTurnID TurnID
+
+	// active maps project name -> the turn currently running for it. A
+	// completing turn only applies its result when it is still the active one,
+	// so a subprocess that finishes after its turn was superseded cannot
+	// overwrite the turn that replaced it.
+	active map[string]*activeTurn
+
 	// done is closed by Close. Watchers poll for minutes; without a stop
 	// signal they outlive whatever started them and go on writing state
 	// after the thing that owns it has gone.
@@ -94,43 +110,131 @@ type Inbox struct {
 	// Signalling alone is not enough: a send goroutine already past the
 	// stop check still has a write to make.
 	wg sync.WaitGroup
+
+	// lifecycleMu serialises accepting new background work against shutdown.
+	// wg.Add raced with wg.Wait without it: a watcher scheduling its next
+	// round as Close ran could add to a counter Close had already observed at
+	// zero, and the goroutine outlived the Close that promised to wait for it.
+	lifecycleMu sync.Mutex
+	closing     bool
+
+	// statePersistMu and notesPersistMu serialise whole save operations,
+	// snapshot included. Locking only the file write is not enough: two savers
+	// can snapshot in one order and rename in the other, leaving the older
+	// state on disk. The lock has to span taking the snapshot and writing it.
+	statePersistMu sync.Mutex
+	notesPersistMu sync.Mutex
+
+	// configMu serialises read-modify-write cycles on config.json. Two
+	// concurrent mutations each load, edit and save the whole file, so without
+	// it the second save silently drops the first one's edit.
+	configMu sync.Mutex
+
+	// saveErr records the most recent persistence failure so the UI can say
+	// that state is not reaching disk. A stateful session manager that fails
+	// to persist in silence is telling the user a comfortable lie.
+	saveErr error
 }
 
 func New(projects []*Project, drivers map[string]driver.Driver, statePath string) *Inbox {
 	return &Inbox{
-		projects:  projects,
-		drivers:   drivers,
-		statePath: statePath,
-		cancels:   make(map[string]context.CancelFunc),
-		done:      make(chan struct{}),
+		projects:    projects,
+		drivers:     drivers,
+		statePath:   statePath,
+		cancels:     make(map[string]context.CancelFunc),
+		active:      make(map[string]*activeTurn),
+		done:        make(chan struct{}),
+		turnTimeout: config.DefaultTurnTimeout,
 	}
+}
+
+// WithTurnTimeout bounds a single agent turn. Zero means no deadline.
+func (in *Inbox) WithTurnTimeout(d time.Duration) *Inbox {
+	in.mu.Lock()
+	in.turnTimeout = d
+	in.mu.Unlock()
+	return in
+}
+
+// SaveErr reports the most recent state-persistence failure, or nil.
+func (in *Inbox) SaveErr() error {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return in.saveErr
+}
+
+// NoteAttachReturned records that the user has been in this project's session
+// interactively. Those turns went straight to the underlying CLI, so the
+// history here is no longer the whole conversation — and a dashboard that
+// silently implies it is will be trusted when it should not be.
+func (in *Inbox) NoteAttachReturned(name string) {
+	if name == "" {
+		return
+	}
+	in.mu.Lock()
+	p, err := in.projectByName(name)
+	if err != nil {
+		in.mu.Unlock()
+		return
+	}
+	p.appendHistory(Message{
+		Role:      "system",
+		Content:   "interactive attach ended — the session may contain turns that are not shown here",
+		Timestamp: time.Now(),
+	})
+	p.UpdatedAt = time.Now()
+	in.mu.Unlock()
+	in.save()
 }
 
 // Close stops the background watchers and waits for them, so nothing writes
 // state after it returns. In-flight sends are cancelled rather than waited
-// out — a turn can take five minutes, and quitting should not.
+// out — a turn can run for half an hour, and quitting should not.
 //
 // Safe to call more than once, and safe to call during a round.
 func (in *Inbox) Close() {
 	in.closeOnce.Do(func() {
+		// Refuse new work before signalling, so that a watcher deciding to
+		// schedule its next round loses the race rather than winning it.
+		in.lifecycleMu.Lock()
+		in.closing = true
 		close(in.done)
+		in.lifecycleMu.Unlock()
+
 		in.mu.Lock()
 		for name, cancel := range in.cancels {
 			delete(in.cancels, name)
 			cancel()
+		}
+		// Release anything waiting on a turn handle. A waiter selecting only
+		// on Done would otherwise block until its own deadline.
+		for name, t := range in.active {
+			in.resolveTurn(name, t, TurnOutcome{Cancelled: true, Status: driver.StatusIdle})
 		}
 		in.mu.Unlock()
 	})
 	in.wg.Wait()
 }
 
-// track runs fn in a goroutine Close will wait for.
-func (in *Inbox) track(fn func()) {
+// track runs fn in a goroutine Close will wait for, reporting false when the
+// inbox is shutting down and the work was refused. Callers scheduling
+// follow-on work must treat a refusal as ordinary shutdown.
+func (in *Inbox) track(fn func()) bool {
+	in.lifecycleMu.Lock()
+	if in.closing {
+		in.lifecycleMu.Unlock()
+		return false
+	}
+	// Add must happen under the same lock that Close checks, or Wait can
+	// observe zero between the check and the Add.
 	in.wg.Add(1)
+	in.lifecycleMu.Unlock()
+
 	go func() {
 		defer in.wg.Done()
 		fn()
 	}()
+	return true
 }
 
 // closed reports whether Close has been called.
@@ -253,22 +357,50 @@ func (in *Inbox) AdoptProject(name, tool, dir, sessionID, forkFrom string) error
 	return in.addProject(name, tool, dir, sessionID, forkFrom)
 }
 
+// addProject validates, persists, and only then mutates memory.
+//
+// The old order was the other way round: the project appeared in the UI and
+// the config write was best-effort, so a failed write produced a project that
+// worked until restart and then vanished. Config is the durable record of
+// which projects exist, so a project that cannot be written there has not
+// really been added.
 func (in *Inbox) addProject(name, tool, dir, sessionID, forkFrom string) error {
+	if err := ident.ValidateName(name); err != nil {
+		return err
+	}
 	in.mu.Lock()
 	for _, p := range in.projects {
-		if p.Name == name {
+		if ident.SameName(p.Name, name) {
 			in.mu.Unlock()
 			return fmt.Errorf("a project named %q already exists (dir: %s)", name, p.Dir)
 		}
-		if p.Dir == dir {
+		if ident.SameDir(p.Dir, dir) {
 			in.mu.Unlock()
 			return fmt.Errorf("directory %q is already used by project %q", dir, p.Name)
 		}
+	}
+	if in.kingName != "" && ident.SameName(name, in.kingName) {
+		in.mu.Unlock()
+		return fmt.Errorf("%q is reserved for the supervisor", name)
 	}
 	if _, ok := in.drivers[tool]; !ok {
 		in.mu.Unlock()
 		return fmt.Errorf("unknown tool %q (no driver registered)", tool)
 	}
+	in.mu.Unlock()
+
+	if in.configPath != "" {
+		if err := in.updateConfig(func(s *config.Settings) error {
+			if !s.AddProject(config.Project{Name: name, Tool: tool, Dir: dir}) {
+				return fmt.Errorf("config already lists a project with that name or directory")
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("cannot add %s: %w", name, err)
+		}
+	}
+
+	in.mu.Lock()
 	in.projects = append(in.projects, &Project{
 		Name:      name,
 		Tool:      tool,
@@ -278,28 +410,23 @@ func (in *Inbox) addProject(name, tool, dir, sessionID, forkFrom string) error {
 		Status:    driver.StatusIdle,
 	})
 	in.mu.Unlock()
-
-	// Persist to config.json best-effort. Non-fatal — session still works.
-	if in.configPath != "" {
-		if err := in.appendConfig(name, tool, dir); err != nil {
-			// Log but don't return error — the project IS added in-memory.
-			// The TUI will show a toast; the user knows it won't persist.
-			fmt.Fprintf(os.Stderr, "agent-inbox: warning: config persist failed: %v\n", err)
-		}
-	}
 	in.save()
 	return nil
 }
 
-func (in *Inbox) appendConfig(name, tool, dir string) error {
+// updateConfig applies fn to the on-disk config and saves it, serialised
+// against other config mutations. Returns the error rather than logging it:
+// the caller has in-memory state to keep consistent with the result.
+func (in *Inbox) updateConfig(fn func(*config.Settings) error) error {
+	in.configMu.Lock()
+	defer in.configMu.Unlock()
 	settings, err := config.Load(in.configPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("cannot safely write config: load failed: %w", err)
-		}
-		settings = &config.Settings{}
+		return fmt.Errorf("cannot safely write config: load failed: %w", err)
 	}
-	settings.AddProject(config.Project{Name: name, Tool: tool, Dir: dir})
+	if err := fn(settings); err != nil {
+		return err
+	}
 	return config.Save(in.configPath, settings)
 }
 
@@ -375,37 +502,55 @@ func (in *Inbox) sendNamed(name, displayText, driverText string, record bool) er
 // sendResolved resolves the target under the same lock that starts the turn,
 // so a project cannot be removed between the lookup and the send.
 func (in *Inbox) sendResolved(resolve func() (*Project, error), displayText, driverText string, record bool) error {
+	_, err := in.startSend(resolve, displayText, driverText, record)
+	return err
+}
+
+// startSend begins a turn and returns a handle that resolves when that exact
+// turn finishes. Callers who only want the side effect discard the handle; the
+// supervisor keeps it, because "the turn I started" and "the next time this
+// project is idle" are not the same event.
+func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driverText string, record bool) (TurnHandle, error) {
 	in.mu.Lock()
 	p, err := resolve()
 	if err != nil {
 		in.mu.Unlock()
-		return err
+		return TurnHandle{}, err
 	}
 	if p.Status == driver.StatusWorking {
 		in.mu.Unlock()
-		return fmt.Errorf("%s is already working", p.Name)
+		return TurnHandle{}, fmt.Errorf("%s is already working", p.Name)
 	}
 	d, ok := in.drivers[p.Tool]
 	if !ok {
 		in.mu.Unlock()
-		return fmt.Errorf("%s: no driver for tool %q", p.Name, p.Tool)
+		return TurnHandle{}, fmt.Errorf("%s: no driver for tool %q", p.Name, p.Tool)
 	}
 	p.Status = driver.StatusWorking
+	p.LastErr = ""
 	p.UpdatedAt = time.Now()
 	// Append the DISPLAY text (user's original message) to history —
 	// NOT the driverText which may include injected state context.
 	if record {
 		p.appendHistory(Message{Role: "user", Content: displayText, Timestamp: time.Now()})
 	}
-	dir, sid, forkFrom := p.Dir, p.SessionID, p.ForkFrom
-	// Cancellable context with a 5-minute timeout so a stuck CLI
-	// (rate-limited API, hung model) doesn't hang the project forever.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	in.cancels[p.Name] = cancel
+	dir, sid, forkFrom, name := p.Dir, p.SessionID, p.ForkFrom, p.Name
+
+	// A deadline bounds a CLI that has stopped making progress. It is
+	// configurable because a coding agent running a build legitimately takes
+	// longer than any fixed guess, and the old five minutes killed real work
+	// and reported it as failure.
+	ctx, cancel := context.WithCancel(context.Background())
+	if in.turnTimeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), in.turnTimeout)
+	}
+	in.cancels[name] = cancel
+	turn, handle := in.beginTurn(name, cancel)
 	in.mu.Unlock()
 	in.save()
 
-	in.track(func() {
+	started := in.track(func() {
+		defer cancel()
 		// Send the DRIVER text (may include injected state) to the CLI.
 		fd, canFork := d.(driver.ForkingDriver)
 		sd, canStream := d.(driver.StreamingDriver)
@@ -414,20 +559,26 @@ func (in *Inbox) sendResolved(resolve func() (*Project, error), displayText, dri
 			// The fork turn does not stream. It is one turn, it happens once
 			// per adoption, and giving it a second code path through the
 			// streaming interface would double the surface for a spinner.
-			in.blockingSend(p, func() driver.Result {
+			in.blockingSend(p, turn, func() driver.Result {
 				return fd.SendForked(ctx, dir, forkFrom, driverText)
 			})
 		case forkFrom != "":
 			// Nothing to fork with: start clean rather than resuming an id
 			// this driver has no claim to.
-			in.blockingSend(p, func() driver.Result { return d.Send(ctx, dir, "", driverText) })
+			in.blockingSend(p, turn, func() driver.Result { return d.Send(ctx, dir, "", driverText) })
 		case canStream:
-			in.streamSend(ctx, sd, p, dir, sid, driverText)
+			in.streamSend(ctx, sd, p, turn, dir, sid, driverText)
 		default:
-			in.blockingSend(p, func() driver.Result { return d.Send(ctx, dir, sid, driverText) })
+			in.blockingSend(p, turn, func() driver.Result { return d.Send(ctx, dir, sid, driverText) })
 		}
 		in.mu.Lock()
-		delete(in.cancels, p.Name)
+		// Only clear the cancel func if this turn is still the current one. A
+		// superseded turn finishing late would otherwise delete the entry
+		// belonging to the turn that replaced it, making the new turn
+		// uncancellable.
+		if in.isCurrentTurn(name, turn) {
+			delete(in.cancels, name)
+		}
 		in.mu.Unlock()
 		// Persist the finished turn. streamSend saves as events arrive, but
 		// blockingSend — every non-streaming driver, which is opencode, codex
@@ -435,23 +586,39 @@ func (in *Inbox) sendResolved(resolve func() (*Project, error), displayText, dri
 		// then vanished on the next restart.
 		in.save()
 	})
-	return nil
+	if !started {
+		// Shutting down. Resolve the handle so nobody waits on a turn that
+		// will never run.
+		in.mu.Lock()
+		in.resolveTurn(name, turn, TurnOutcome{Cancelled: true, Status: driver.StatusIdle})
+		delete(in.cancels, name)
+		p.Status = driver.StatusIdle
+		in.mu.Unlock()
+		cancel()
+		return TurnHandle{}, fmt.Errorf("shutting down")
+	}
+	return handle, nil
 }
 
 // blockingSend runs a non-streaming turn and files its outcome. run is what
 // actually talks to the CLI — an ordinary send, or a fork of somebody else's
 // session — so the three ways to start a turn share one way to end it.
-func (in *Inbox) blockingSend(p *Project, run func() driver.Result) {
+func (in *Inbox) blockingSend(p *Project, turn *activeTurn, run func() driver.Result) {
 	res := run()
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	// If the project was cancelled, the underlying subprocess was killed
-	// and the driver returned with a killed-process error. We've already set
-	// the status to Idle in Cancel(); skip the overwrite.
-	if p.Status != driver.StatusWorking {
+	// A turn that is no longer the current one has been cancelled or
+	// superseded. Its subprocess was killed and its result describes a turn
+	// nobody is waiting for; applying it would overwrite the turn that
+	// replaced it.
+	if !in.isCurrentTurn(p.Name, turn) {
 		return
 	}
-	if res.SessionID != "" {
+	// A session id is only adopted when the turn succeeded. On the fork path
+	// the driver's fallback id is the *source* session — somebody else's live
+	// agent — so taking it from a failed turn left the project holding a
+	// session it does not own and must not resume.
+	if res.Err == nil && res.SessionID != "" {
 		p.SessionID = res.SessionID
 	}
 	// A turn that got through has given this project a session of its own,
@@ -462,6 +629,7 @@ func (in *Inbox) blockingSend(p *Project, run func() driver.Result) {
 	}
 	p.Status = res.Status
 	p.Activity = ""
+	out := TurnOutcome{SessionID: p.SessionID, Status: res.Status, Err: res.Err}
 	if res.Err != nil {
 		p.LastErr = res.Err.Error()
 		p.appendHistory(Message{Role: "error", Content: res.Err.Error(), Timestamp: time.Now()})
@@ -469,8 +637,10 @@ func (in *Inbox) blockingSend(p *Project, run func() driver.Result) {
 		p.LastErr = ""
 		p.LastMessage = res.Final
 		p.appendHistory(Message{Role: "assistant", Content: res.Final, Timestamp: time.Now()})
+		out.Final = res.Final
 	}
 	p.UpdatedAt = time.Now()
+	in.resolveTurn(p.Name, turn, out)
 }
 
 // streamSend consumes a StreamingDriver's event channel and updates the
@@ -479,14 +649,19 @@ func (in *Inbox) blockingSend(p *Project, run func() driver.Result) {
 //
 // Must be called from a background goroutine (it is — by Send's caller).
 // Holds the inbox mutex briefly per event to mutate Project state.
-func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *Project, dir, sid, prompt string) {
+func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *Project, turn *activeTurn, dir, sid, prompt string) {
 	ch := sd.StreamSend(ctx, dir, sid, prompt)
 
 	for ev := range ch {
 		in.mu.Lock()
-		// If cancelled, stop processing events.
-		if p.Status != driver.StatusWorking {
+		// Cancelled or superseded: stop processing events for a turn nobody
+		// is waiting on.
+		if !in.isCurrentTurn(p.Name, turn) {
 			in.mu.Unlock()
+			// Drain rather than return, so the driver's sender is not left
+			// blocked writing to a channel with no reader.
+			for range ch {
+			}
 			return
 		}
 		if ev.SessionID != "" {
@@ -523,40 +698,73 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 			p.LastErr = ""
 			p.LastMessage = ev.Content
 			p.appendHistory(Message{Role: "assistant", Content: ev.Content, Timestamp: time.Now()})
+			p.UpdatedAt = time.Now()
+			in.resolveTurn(p.Name, turn, TurnOutcome{
+				SessionID: p.SessionID,
+				Final:     ev.Content,
+				Status:    driver.StatusWaiting,
+			})
+			in.mu.Unlock()
+			in.save()
+			continue
 		case driver.StreamError:
-			p.Status = driver.StatusError
-			p.Activity = ""
 			msg := "turn failed"
 			if ev.Err != nil {
 				msg = ev.Err.Error()
 			}
-			p.LastErr = msg
-			// Preserve partial streaming text or error content.
-			if p.StreamingText != "" {
-				p.LastMessage = p.StreamingText
-				p.appendHistory(Message{Role: "assistant", Content: p.StreamingText + "\n\n(error: " + msg + ")", Timestamp: time.Now()})
-			} else if ev.Content != "" {
-				p.LastMessage = ev.Content
-				p.appendHistory(Message{Role: "error", Content: ev.Content + "\n\n(error: " + msg + ")", Timestamp: time.Now()})
-			} else {
-				p.appendHistory(Message{Role: "error", Content: msg, Timestamp: time.Now()})
-			}
-			p.StreamingText = ""
+			in.finishStreamErrorLocked(p, turn, msg, ev.Content)
+			in.mu.Unlock()
+			in.save()
+			continue
 		}
 		p.UpdatedAt = time.Now()
 		in.mu.Unlock()
 		in.save()
 	}
 
-	// If the channel closed without a Done or Error event, treat as error
-	// (unless we were cancelled, which is handled above).
+	// The channel closed without a terminal event. That is a failure, and it
+	// has to be filed the same way an explicit StreamError is: the old code
+	// set the status and stopped, leaving StreamingText populated but no
+	// longer rendered, LastMessage still showing the *previous* turn, and
+	// nothing at all in history to say what happened.
 	in.mu.Lock()
-	defer in.mu.Unlock()
-	if p.Status == driver.StatusWorking {
-		p.Status = driver.StatusError
-		p.Activity = ""
-		p.LastErr = "stream ended without completion event"
+	if in.isCurrentTurn(p.Name, turn) {
+		in.finishStreamErrorLocked(p, turn, "stream ended without completion event", "")
+		in.mu.Unlock()
+		in.save()
+		return
 	}
+	in.mu.Unlock()
+}
+
+// finishStreamErrorLocked files a failed streaming turn. Caller must hold mu.
+//
+// One routine for every way a stream can fail, because the ways it can fail
+// kept acquiring slightly different behaviour: partial text preserved in one
+// path and dropped in another, history appended here and not there.
+func (in *Inbox) finishStreamErrorLocked(p *Project, turn *activeTurn, msg, evContent string) {
+	partial := strings.TrimSpace(p.StreamingText)
+	p.Status = driver.StatusError
+	p.Activity = ""
+	p.LastErr = msg
+	switch {
+	case partial != "":
+		p.LastMessage = partial
+		p.appendHistory(Message{Role: "assistant", Content: partial + "\n\n(error: " + msg + ")", Timestamp: time.Now()})
+	case evContent != "":
+		p.LastMessage = evContent
+		p.appendHistory(Message{Role: "error", Content: evContent + "\n\n(error: " + msg + ")", Timestamp: time.Now()})
+	default:
+		p.appendHistory(Message{Role: "error", Content: msg, Timestamp: time.Now()})
+	}
+	p.StreamingText = ""
+	p.UpdatedAt = time.Now()
+	in.resolveTurn(p.Name, turn, TurnOutcome{
+		SessionID: p.SessionID,
+		Partial:   partial,
+		Status:    driver.StatusError,
+		Err:       errors.New(msg),
+	})
 }
 
 // Cancel handles the user's "I'm done with this state" intent, with
@@ -591,6 +799,9 @@ func (in *Inbox) Cancel(idx int) error {
 			p.Status = driver.StatusIdle
 			p.Activity = ""
 			p.LastErr = "stuck (no cancel func); reset to idle"
+			if t, live := in.active[p.Name]; live {
+				in.resolveTurn(p.Name, t, TurnOutcome{Cancelled: true, Status: driver.StatusIdle})
+			}
 			in.mu.Unlock()
 			in.save()
 			return nil
@@ -598,9 +809,16 @@ func (in *Inbox) Cancel(idx int) error {
 		delete(in.cancels, p.Name)
 		p.Status = driver.StatusIdle
 		p.Activity = ""
+		p.StreamingText = ""
 		p.LastErr = "cancelled by user"
 		p.appendHistory(Message{Role: "system", Content: "cancelled by user", Timestamp: time.Now()})
 		p.UpdatedAt = time.Now()
+		// Resolve the handle explicitly. A waiter left polling an idle project
+		// learns nothing from the status change and waits out its whole
+		// deadline before reporting a timeout that already happened.
+		if t, live := in.active[p.Name]; live {
+			in.resolveTurn(p.Name, t, TurnOutcome{Cancelled: true, Status: driver.StatusIdle})
+		}
 		in.mu.Unlock()
 		in.save()
 
@@ -641,27 +859,49 @@ func (in *Inbox) RemoveProject(idx int) error {
 	// The supervisor is not one of the projects you manage — it is the thing
 	// managing them. Removing it would leave a UI whose main view has no
 	// conversation to show and no way to get one back.
-	if in.kingName != "" && strings.EqualFold(name, in.kingName) {
+	if in.kingName != "" && ident.SameName(name, in.kingName) {
 		in.mu.Unlock()
 		return fmt.Errorf("%s is the supervisor — it cannot be removed", name)
+	}
+	in.mu.Unlock()
+
+	// Durable removal first. The old order deleted the project and its notes
+	// and then tried to write config; a failed write brought the project back
+	// on restart with its notes already gone.
+	if in.configPath != "" {
+		if err := in.updateConfig(func(s *config.Settings) error {
+			s.RemoveProject(name)
+			return nil
+		}); err != nil {
+			return fmt.Errorf("cannot remove %s: %w", name, err)
+		}
+	}
+
+	in.mu.Lock()
+	// Re-resolve: the index may have shifted while the config was being
+	// written.
+	p, err = in.projectByName(name)
+	if err != nil {
+		in.mu.Unlock()
+		return nil // already gone
 	}
 	// Cancel any in-flight send before removing.
 	if cancel, ok := in.cancels[name]; ok {
 		delete(in.cancels, name)
 		cancel()
 	}
-	// Remove from slice (preserves order).
-	in.projects = append(in.projects[:idx-1], in.projects[idx:]...)
+	if t, live := in.active[name]; live {
+		in.resolveTurn(name, t, TurnOutcome{Cancelled: true, Status: driver.StatusIdle})
+	}
+	for i, q := range in.projects {
+		if q == p {
+			in.projects = append(in.projects[:i], in.projects[i+1:]...)
+			break
+		}
+	}
 	in.mu.Unlock()
 	in.save()
 	in.forgetProject(name)
-
-	// Persist removal to config.json best-effort (non-fatal — matches AddProject).
-	if in.configPath != "" {
-		if err := in.removeProjectConfig(name); err != nil {
-			fmt.Fprintf(os.Stderr, "agent-inbox: warning: config persist failed: %v\n", err)
-		}
-	}
 	return nil
 }
 
@@ -679,57 +919,101 @@ func (in *Inbox) SetProjectTool(idx int, tool string) error {
 		in.mu.Unlock()
 		return fmt.Errorf("unknown tool %q", tool)
 	}
+	// Selecting the tool the project already uses is not a change, and the
+	// unconditional reset below would silently destroy the session it is
+	// mid-conversation with. Nothing to persist, nothing to clear.
+	if p.Tool == tool {
+		in.mu.Unlock()
+		return nil
+	}
 	if _, working := in.cancels[p.Name]; working {
 		in.mu.Unlock()
 		return fmt.Errorf("%s is currently working — cancel before changing tool", p.Name)
 	}
-	p.Tool = tool
-	p.SessionID = "" // previous session is meaningless to the new tool
-	p.Status = driver.StatusIdle
-	p.Activity = ""
-	p.UpdatedAt = time.Now()
-	name := p.Name
+	name, from := p.Name, p.Tool
 	in.mu.Unlock()
-	in.save()
 
 	if in.configPath != "" {
-		if err := in.setProjectToolConfig(name, tool); err != nil {
-			fmt.Fprintf(os.Stderr, "agent-inbox: warning: config persist failed: %v\n", err)
+		if err := in.updateConfig(func(s *config.Settings) error {
+			s.SetProjectTool(name, tool)
+			return nil
+		}); err != nil {
+			return fmt.Errorf("cannot change %s to %s: %w", name, tool, err)
 		}
 	}
+
+	in.mu.Lock()
+	p, err = in.projectByName(name)
+	if err != nil {
+		in.mu.Unlock()
+		return err
+	}
+	p.Tool = tool
+	p.SessionID = "" // previous session is meaningless to the new tool
+	p.ForkFrom = ""  // and so is a fork source belonging to the old one
+	p.Status = driver.StatusIdle
+	p.Activity = ""
+	// Retained history is about to look like one continuous conversation with
+	// a tool that has never seen any of it. Mark the seam.
+	p.appendHistory(Message{
+		Role:      "system",
+		Content:   fmt.Sprintf("tool changed from %s to %s; a new session will start", from, tool),
+		Timestamp: time.Now(),
+	})
+	p.UpdatedAt = time.Now()
+	in.mu.Unlock()
+	in.save()
 	return nil
 }
 
-func (in *Inbox) removeProjectConfig(name string) error {
-	settings, err := config.Load(in.configPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("cannot safely write config: load failed: %w", err)
-		}
-		settings = &config.Settings{}
-	}
-	settings.RemoveProject(name)
-	return config.Save(in.configPath, settings)
-}
+const (
+	// maxHistoryMessages bounds how many turns are kept per project.
+	maxHistoryMessages = 100
+	// maxMessageBytes bounds a single stored message. A count-only limit let
+	// one project's state grow without bound: a hundred messages is small
+	// until one of them is a megabyte of build output, and every save and
+	// every startup then pays for it.
+	maxMessageBytes = 256 * 1024
+	// maxHistoryBytes bounds a project's whole retained history.
+	maxHistoryBytes = 4 * 1024 * 1024
+)
 
-func (in *Inbox) setProjectToolConfig(name, tool string) error {
-	settings, err := config.Load(in.configPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("cannot safely write config: load failed: %w", err)
-		}
-		settings = &config.Settings{}
-	}
-	settings.SetProjectTool(name, tool)
-	return config.Save(in.configPath, settings)
-}
-
-// appendHistory trims to the last 100 messages to bound state.json growth.
+// appendHistory stores a message, bounding both the number of messages and
+// the bytes they occupy.
 func (p *Project) appendHistory(m Message) {
+	m.Content = truncateBytes(m.Content, maxMessageBytes)
 	p.History = append(p.History, m)
-	if len(p.History) > 100 {
-		p.History = p.History[len(p.History)-100:]
+	if len(p.History) > maxHistoryMessages {
+		p.History = p.History[len(p.History)-maxHistoryMessages:]
 	}
+	total := 0
+	for _, h := range p.History {
+		total += len(h.Content)
+	}
+	// Drop oldest until the budget is met, but always keep the newest message
+	// — a history of nothing is less useful than a history of one.
+	for total > maxHistoryBytes && len(p.History) > 1 {
+		total -= len(p.History[0].Content)
+		p.History = p.History[1:]
+	}
+}
+
+// truncateBytes caps s at n bytes without splitting a rune, marking that it
+// did so. Silent truncation of an agent's reply reads as the agent stopping
+// early.
+func truncateBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	const marker = "\n\n[truncated]"
+	cut := n - len(marker)
+	if cut < 0 {
+		cut = 0
+	}
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + marker
 }
 
 // Detail returns a project copy by 1-based index.
@@ -751,6 +1035,18 @@ func (in *Inbox) AttachArgs(idx int) ([]string, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	// Attaching to a session the inbox is mid-turn on puts two writers on one
+	// conversation. Delete and tool-change already refuse this; attach did
+	// not, and it is the one that hands the user an interactive prompt into a
+	// session a subprocess is still writing to.
+	if p.Status == driver.StatusWorking {
+		return nil, "", fmt.Errorf("%s is working — cancel or wait before attaching", p.Name)
+	}
+	// A pending fork source belongs to somebody else's live agent. Attaching
+	// to it would drop the user into that agent's session, not this project's.
+	if p.ForkFrom != "" {
+		return nil, "", fmt.Errorf("%s has not forked its adopted session yet — send it a message first", p.Name)
+	}
 	if p.SessionID == "" {
 		return nil, "", fmt.Errorf("%s has no session yet — send it a message first", p.Name)
 	}
@@ -761,9 +1057,16 @@ func (in *Inbox) AttachArgs(idx int) ([]string, string, error) {
 	return d.AttachArgs(p.Dir, p.SessionID), p.Dir, nil
 }
 
-// save writes state.json atomically (temp file + rename) so a crash
-// during write can't corrupt the existing state file.
+// save writes state.json atomically.
+//
+// The persist lock is taken before the snapshot, not just around the write.
+// Atomic rename alone does not order two savers: one can snapshot old state,
+// be descheduled while a second snapshots and writes newer state, then wake up
+// and rename its stale copy over the top. The file stays valid JSON and the
+// state goes backwards.
 func (in *Inbox) save() {
+	in.statePersistMu.Lock()
+	defer in.statePersistMu.Unlock()
 	if in.closed() {
 		return
 	}
@@ -771,27 +1074,29 @@ func (in *Inbox) save() {
 	b, err := json.MarshalIndent(in.projects, "", "  ")
 	in.mu.Unlock()
 	if err != nil {
+		in.recordSaveErr(err)
 		return
 	}
-	dir := filepath.Dir(in.statePath)
-	_ = os.MkdirAll(dir, 0o755)
-	tmp, err := os.CreateTemp(dir, ".state-*.json")
+	in.recordSaveErr(fsutil.WriteFileAtomic(in.statePath, b, fsutil.FileMode))
+}
+
+func (in *Inbox) recordSaveErr(err error) {
+	in.mu.Lock()
+	in.saveErr = err
+	in.mu.Unlock()
 	if err != nil {
-		return
-	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return
-	}
-	tmp.Close()
-	if err := os.Rename(tmp.Name(), in.statePath); err != nil {
-		os.Remove(tmp.Name())
+		fmt.Fprintf(os.Stderr, "agent-inbox: state not saved: %v\n", err)
 	}
 }
 
-// LoadState overlays persisted session ids and last messages (matched by name)
-// onto the project set defined by config.
+// LoadState overlays persisted session ids and last messages onto the project
+// set defined by config.
+//
+// A saved entry is only applied when its whole identity matches: name, tool
+// and directory. Matching on the name alone meant that editing a project in
+// config — pointing it at a different repository, or switching it to a
+// different CLI — handed the new project the old one's session id and
+// conversation. The session then resumed with another repository's context.
 func LoadState(path string, projects []*Project) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -803,12 +1108,15 @@ func LoadState(path string, projects []*Project) {
 	}
 	byName := make(map[string]Project, len(saved))
 	for _, s := range saved {
-		byName[s.Name] = s
+		byName[ident.Name(s.Name)] = s
 	}
 	for _, p := range projects {
-		s, ok := byName[p.Name]
+		s, ok := byName[ident.Name(p.Name)]
 		if !ok {
 			continue
+		}
+		if s.Tool != p.Tool || !ident.SameDir(s.Dir, p.Dir) {
+			continue // same name, different project — start fresh
 		}
 		p.SessionID = s.SessionID
 		// Without this an adoption that was never sent to before a restart

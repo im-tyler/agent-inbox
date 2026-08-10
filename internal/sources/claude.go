@@ -28,6 +28,8 @@ import (
 // Transcripts are still read, but only to enrich an item with the branch and
 // last prompt. If that read fails the item survives without them.
 type Claude struct {
+	// Label is the configured source name. Empty means the built-in default.
+	Label string
 	// Root defaults to ~/.claude/projects, for transcript enrichment.
 	Root string
 	// Bin is the claude executable. Defaults to "claude" on PATH.
@@ -40,7 +42,15 @@ type Claude struct {
 	Now func() time.Time
 }
 
-func (c Claude) Name() string { return "claude-code" }
+// Name is the configured instance name, so two Claude sources with different
+// roots are distinguishable. Origin is part of an item's identity; returning a
+// hard-coded name made two configured instances collide in the merge.
+func (c Claude) Name() string {
+	if c.Label != "" {
+		return c.Label
+	}
+	return "claude-code"
+}
 
 func (c Claude) now() time.Time {
 	if c.Now != nil {
@@ -73,11 +83,16 @@ type agentInfo struct {
 	StartedAt int64  `json:"startedAt"` // epoch millis
 }
 
-func (c Claude) listAgents(ctx context.Context) ([]agentInfo, error) {
-	bin := c.Bin
-	if bin == "" {
-		bin = "claude"
+// bin is the claude executable this source is configured to use.
+func (c Claude) bin() string {
+	if c.Bin != "" {
+		return c.Bin
 	}
+	return "claude"
+}
+
+func (c Claude) listAgents(ctx context.Context) ([]agentInfo, error) {
+	bin := c.bin()
 	timeout := c.Timeout
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -352,14 +367,17 @@ func truncate(s string, n int) string {
 // through the agent view, which `--cwd` filters to the right project. Forking
 // is offered alongside because it always works and does not disturb the
 // running session.
-func actionsFor(a agentInfo, pane string) []feed.Action {
+// bin is threaded in rather than hard-coded: listing already honoured a
+// configured executable, so actions that ignored it pointed a custom install's
+// rows at the default binary, which does not know those sessions.
+func actionsFor(a agentInfo, pane string, bin string) []feed.Action {
 	actions := []feed.Action{
-		{Label: "attach", Run: []string{"claude", "agents", "--cwd", a.Cwd}, Dir: a.Cwd},
+		{Label: "attach", Run: []string{bin, "agents", "--cwd", a.Cwd}, Dir: a.Cwd, Interactive: true},
 	}
 	if a.SessionID != "" {
 		actions = append(actions, feed.Action{
 			Label: "fork",
-			Run:   []string{"claude", "--resume", a.SessionID, "--fork-session"},
+			Run:   []string{bin, "--resume", a.SessionID, "--fork-session"},
 			Dir:   a.Cwd,
 		})
 	}
@@ -470,7 +488,7 @@ func (c Claude) item(a agentInfo, e enrichment, js jobState, pane string) feed.I
 		item.ID = a.ID
 	}
 	if state == feed.StateBlocked {
-		item.Needs = &feed.Needs{Prompt: prompt, Actions: actionsFor(a, pane)}
+		item.Needs = &feed.Needs{Prompt: prompt, Actions: actionsFor(a, pane, c.bin())}
 	}
 	return item
 }

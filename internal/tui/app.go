@@ -427,16 +427,21 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		m.mainInput.Reset()
-		m.syncInputHeight()
 		// Everything but the supervisor. Asked of the inbox rather than
 		// derived from indices here, so one definition of "the fleet" serves
 		// the dashboard, the king panel and the dispatcher.
-		err := m.inbox.KingSend(m.kingIndex(), text, m.inbox.FleetNames())
-		if err != nil {
+		//
+		// The draft is only cleared once the turn has actually started. It
+		// used to be reset first, so a send rejected because the supervisor
+		// was already working threw away a message the user may have spent
+		// minutes writing — with nothing to paste back.
+		if err := m.inbox.KingSend(m.kingIndex(), text, m.inbox.FleetNames()); err != nil {
 			m.toast = err.Error()
 			m.toastAt = time.Now()
+			return m, nil
 		}
+		m.mainInput.Reset()
+		m.syncInputHeight()
 		m.mainAutoScroll = true
 		m.mainScrollFromBottom = 0
 		// Start animating now rather than on the next second-tick, so the
@@ -638,7 +643,7 @@ func (m Model) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toastAt = time.Now()
 			return m, nil
 		}
-		m.attachRequest = &attachArgs{Argv: args, Dir: dir}
+		m.attachRequest = &attachArgs{Argv: args, Dir: dir, Project: projectNameAt(m.inbox.Snapshot(), m.sidebarCursor)}
 		return m, tea.Quit
 
 	case "x":

@@ -31,6 +31,39 @@ func (m *Model) renderDeleteConfirm() string {
 	return b.String()
 }
 
+// normalizeSelection brings both cursors back into range after the project
+// list changes, and keeps the sidebar off the supervisor — which is not one of
+// the projects those keys act on.
+func (m *Model) normalizeSelection() {
+	snap := m.inbox.Snapshot()
+	n := len(snap)
+	if n == 0 {
+		m.selected, m.sidebarCursor = 1, 1
+		return
+	}
+	clamp := func(v int) int {
+		if v > n {
+			return n
+		}
+		if v < 1 {
+			return 1
+		}
+		return v
+	}
+	m.selected = clamp(m.selected)
+	m.sidebarCursor = clamp(m.sidebarCursor)
+	// Prefer a non-supervisor row; fall back to the supervisor only when it is
+	// the only thing left.
+	if m.inbox.IsKing(snap[m.sidebarCursor-1].Name) {
+		for i, p := range snap {
+			if !m.inbox.IsKing(p.Name) {
+				m.sidebarCursor = i + 1
+				break
+			}
+		}
+	}
+}
+
 func (m *Model) handleDeleteConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
@@ -41,14 +74,12 @@ func (m *Model) handleDeleteConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.view = viewMain
 			return m, nil
 		}
-		// Clamp selection to the new list length.
-		snap := m.inbox.Snapshot()
-		if m.selected > len(snap) {
-			m.selected = len(snap)
-		}
-		if m.selected < 1 {
-			m.selected = 1
-		}
+		// Clamp both selections to the new list length. sidebarCursor was
+		// missed here, and it is the one the delete was launched from: after
+		// removing the last fleet project it could still point past the end,
+		// leaving no row highlighted and every subsequent a/d/t/x aimed at an
+		// index that no longer exists.
+		m.normalizeSelection()
 		m.toast = "deleted"
 		m.toastAt = time.Now()
 		m.view = viewMain

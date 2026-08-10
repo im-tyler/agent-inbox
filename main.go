@@ -14,6 +14,7 @@ import (
 
 	"github.com/im-tyler/agent-inbox/internal/config"
 	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/ident"
 	"github.com/im-tyler/agent-inbox/internal/inbox"
 	"github.com/im-tyler/agent-inbox/internal/tui"
 )
@@ -26,35 +27,46 @@ func dataDir() string {
 	return filepath.Join(home, ".agent-inbox")
 }
 
+// main is a thin wrapper so that every error path leaves through run's
+// deferred cleanup. os.Exit does not run deferred functions, so calling it
+// from inside the TUI loop skipped Inbox.Close entirely: in-flight sends were
+// never cancelled and their child CLI processes were left to the OS.
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-inbox: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "hook":
 			runHook()
-			return
+			return nil
 		case "inbox":
 			runInbox(os.Args[2:])
-			return
+			return nil
+		case "doctor":
+			return runDoctor(os.Args[2:])
 		case "version", "-version", "--version":
 			printVersion()
-			return
+			return nil
 		}
 	}
 
 	dd := dataDir()
-	cfgPath := flag.String("config", filepath.Join(dd, "config.json"), "path to config.json")
+	cfgPath := flag.String("config", defaultConfigPath(dd), "path to config.json")
 	statePath := flag.String("state", filepath.Join(dd, "state.json"), "path to state.json")
 	replMode := flag.Bool("repl", false, "use the legacy line-oriented REPL instead of the TUI dashboard")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "config: %v\n\nCreate one (see config.example.json) at %s\n", err, *cfgPath)
-		os.Exit(1)
+		return fmt.Errorf("config: %w\n\nEdit %s", err, *cfgPath)
 	}
 	if err := config.Validate(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "config: %v\n\nEdit %s\n", err, *cfgPath)
-		os.Exit(1)
+		return fmt.Errorf("config: %w\n\nEdit %s", err, *cfgPath)
 	}
 
 	drivers := map[string]driver.Driver{
@@ -71,7 +83,10 @@ func main() {
 	// The supervisor is provisioned, not configured. It is prepended rather
 	// than written into config.json's projects: it is not one of the user's
 	// projects, and it should not be removable by editing that list.
-	king := supervisorProject(dd, cfg)
+	king, err := supervisorProject(dd, cfg)
+	if err != nil {
+		return err
+	}
 	projects = withSupervisor(king, projects)
 	inbox.LoadState(*statePath, projects)
 
@@ -79,13 +94,14 @@ func main() {
 		WithConfigPath(*cfgPath).
 		WithNotesPath(filepath.Join(dd, "notes.json")).
 		WithKing(king.Name).
-		WithKingRounds(cfg.King.Rounds)
+		WithKingRounds(cfg.King.Rounds).
+		WithTurnTimeout(cfg.TurnTimeout())
 	defer in.Close()
 	eventsDir := filepath.Join(dd, "events")
 
 	if *replMode {
 		repl(in, eventsDir)
-		return
+		return nil
 	}
 
 	// TUI loop: run dashboard; if user requests an attach, exit TUI, exec
@@ -93,17 +109,33 @@ func main() {
 	for {
 		m, err := tui.Run(in, eventsDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "agent-inbox: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		req := m.AttachRequest()
 		if req == nil {
-			return
+			return nil
 		}
 		if err := runAttach(req.Argv, req.Dir); err != nil {
 			fmt.Fprintf(os.Stderr, "agent-inbox: attach ended: %v\n", err)
 		}
+		// An interactive attach advances the real session without telling the
+		// dashboard, so the history shown here is no longer the whole
+		// conversation. Say so rather than implying completeness.
+		in.NoteAttachReturned(req.Project)
 	}
+}
+
+// defaultConfigPath resolves where config.json lives.
+//
+// AGENT_INBOX_CONFIG exists because the Stop hook runs as its own process and
+// cannot see the --config flag that the TUI was launched with. Without a shared
+// resolver a user with a custom config had a hook that silently matched
+// nothing.
+func defaultConfigPath(dataDir string) string {
+	if p := os.Getenv("AGENT_INBOX_CONFIG"); p != "" {
+		return p
+	}
+	return filepath.Join(dataDir, "config.json")
 }
 
 // runAttach execs the interactive attach command in the foreground,
@@ -131,26 +163,37 @@ func runHook() {
 		return
 	}
 	dd := dataDir()
-	cfg, err := config.Load(filepath.Join(dd, "config.json"))
+	cfg, err := config.Load(defaultConfigPath(dd))
 	if err != nil {
 		return
 	}
-	tool := ""
+	known := false
 	for _, pr := range cfg.Projects {
-		if inbox.SameDir(pr.Dir, p.CWD) {
-			tool = pr.Tool
+		if ident.SameDir(pr.Dir, p.CWD) {
+			known = true
 			break
 		}
 	}
-	if tool == "" {
+	if !known {
 		return // not a federated project — stay silent
+	}
+	// The tool is "claude" because this is a Claude Stop hook, not because of
+	// what the project is configured to use. Labelling a Claude session with a
+	// Codex project's tool let a manually-run Claude session in a Codex
+	// project's directory overwrite that project's Codex session id.
+	msg, err := inbox.LastAssistantText(p.TranscriptPath)
+	if err != nil {
+		// A transcript we cannot read means we do not know what was said. An
+		// event with a stale message is worse than no event: it files an old
+		// reply against a new turn.
+		return
 	}
 	_ = inbox.WriteEvent(filepath.Join(dd, "events"), inbox.Event{
 		SessionID: p.SessionID,
 		Dir:       p.CWD,
-		Tool:      tool,
-		Message:   inbox.LastAssistantText(p.TranscriptPath),
-		TS:        time.Now().Unix(),
+		Tool:      "claude",
+		Message:   msg,
+		TS:        time.Now().UnixNano(),
 	})
 }
 

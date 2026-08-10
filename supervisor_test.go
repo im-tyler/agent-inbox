@@ -15,7 +15,10 @@ import (
 // directory, and the old default anchored it inside a project it supervised.
 func TestSupervisorProvisionsItsOwnFolder(t *testing.T) {
 	dd := t.TempDir()
-	p := supervisorProject(dd, &config.Settings{})
+	p, err := supervisorProject(dd, &config.Settings{})
+	if err != nil {
+		t.Fatalf("provisioning failed: %v", err)
+	}
 
 	if p.Name != "supervisor" || p.Tool != "claude" {
 		t.Errorf("supervisor = %+v, want name supervisor on claude", p)
@@ -76,7 +79,10 @@ func TestSupervisorHonoursConfigOverrides(t *testing.T) {
 	cfg.King.Tool = "codex"
 	cfg.King.Dir = filepath.Join(dd, "elsewhere")
 
-	p := supervisorProject(dd, &cfg)
+	p, err := supervisorProject(dd, &cfg)
+	if err != nil {
+		t.Fatalf("provisioning failed: %v", err)
+	}
 	if p.Name != "boss" || p.Tool != "codex" || p.Dir != cfg.King.Dir {
 		t.Errorf("overrides ignored: %+v", p)
 	}
@@ -94,17 +100,40 @@ func TestWithSupervisorPrepends(t *testing.T) {
 	}
 }
 
-// A user who has configured a project under the supervisor's name has said
-// where their supervisor lives. Prepending a second one would give them two.
-func TestWithSupervisorDefersToAConfiguredOne(t *testing.T) {
-	king := &inbox.Project{Name: "supervisor", Dir: "/default"}
-	configured := []*inbox.Project{{Name: "supervisor", Dir: "/mine"}, {Name: "omni"}}
-	got := withSupervisor(king, configured)
-	if len(got) != 2 {
-		t.Fatalf("a duplicate supervisor was added: %v", names(got))
+// The supervisor's name is reserved, and config validation is where that is
+// enforced.
+//
+// This used to be read the other way round: a project carrying the
+// supervisor's name was treated as the user electing it as their supervisor.
+// But config has no way to say that, and the accidental case is far more
+// likely than the deliberate one — naming a repository "supervisor" silently
+// suppressed the isolated supervisor, excluded that repo from its own fleet,
+// and ran supervision prompts inside a working tree.
+func TestAProjectMayNotClaimTheSupervisorsName(t *testing.T) {
+	for _, name := range []string{"supervisor", "Supervisor", "SUPERVISOR"} {
+		cfg := &config.Settings{Projects: []config.Project{{Name: name, Tool: "claude", Dir: "/mine"}}}
+		if err := config.Validate(cfg); err == nil {
+			t.Errorf("%q was accepted; the supervisor's name is reserved", name)
+		}
 	}
-	if got[0].Dir != "/mine" {
-		t.Errorf("dir = %q, want the configured one", got[0].Dir)
+}
+
+// A custom king.name is reserved on the same terms.
+func TestACustomSupervisorNameIsAlsoReserved(t *testing.T) {
+	cfg := &config.Settings{Projects: []config.Project{{Name: "boss", Tool: "claude", Dir: "/mine"}}}
+	cfg.King.Name = "boss"
+	if err := config.Validate(cfg); err == nil {
+		t.Error("a project matching a custom king.name was accepted")
+	}
+}
+
+// And the supervisor is always its own entry, never one of the configured
+// projects wearing the name.
+func TestWithSupervisorAlwaysPrependsItsOwn(t *testing.T) {
+	king := &inbox.Project{Name: "supervisor", Dir: "/default"}
+	got := withSupervisor(king, []*inbox.Project{{Name: "omni"}})
+	if len(got) != 2 || got[0].Dir != "/default" {
+		t.Fatalf("supervisor should lead with its own dir, got %v", names(got))
 	}
 }
 

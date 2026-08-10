@@ -65,16 +65,24 @@ func TestABackgroundAgentIsAttachedToNotResumed(t *testing.T) {
 	if actions[0].Label != "attach" {
 		t.Fatalf("attach must lead, got %q", actions[0].Label)
 	}
-	joined := strings.Join(actions[0].Run, " ")
-	if joined != "claude agents --cwd /repos/teploy" {
+	// The configured binary, not the literal "claude": a custom install's
+	// sessions are unknown to whatever "claude" happens to be on PATH.
+	joined := strings.Join(actions[0].Run[1:], " ")
+	if joined != "agents --cwd /repos/teploy" {
 		t.Fatalf("attach should open the agent view filtered to the project, got %q", joined)
+	}
+	if filepath.Base(actions[0].Run[0]) != "claude" {
+		t.Fatalf("attach should invoke the configured binary, got %q", actions[0].Run[0])
 	}
 	if actions[0].Dir != "/repos/teploy" {
 		t.Fatalf("attach should run in the project, got %q", actions[0].Dir)
 	}
 	// Fork always works and does not disturb the running session.
-	if strings.Join(actions[1].Run, " ") != "claude --resume ad19117b-67a4-4ad0-a333-e39fcc756240 --fork-session" {
+	if strings.Join(actions[1].Run[1:], " ") != "--resume ad19117b-67a4-4ad0-a333-e39fcc756240 --fork-session" {
 		t.Fatalf("unexpected fork argv: %v", actions[1].Run)
+	}
+	if filepath.Base(actions[1].Run[0]) != "claude" {
+		t.Fatalf("fork should invoke the configured binary, got %q", actions[1].Run[0])
 	}
 }
 

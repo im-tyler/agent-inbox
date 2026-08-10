@@ -2,10 +2,13 @@ package inbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/im-tyler/agent-inbox/internal/fsutil"
+	"github.com/im-tyler/agent-inbox/internal/ident"
 )
 
 // Notes are what the supervisor knows about the fleet that no single session
@@ -120,20 +123,52 @@ func (in *Inbox) AddNotes(texts []string) {
 }
 
 // projectsNamedIn finds which fleet members a note is about. Callers hold mu.
-// Names under three characters are skipped: a two-letter project would match
-// inside half the words in English and tag notes that are not about it.
+//
+// The match is on word boundaries, not substrings. Substring matching tagged a
+// note with any project whose name appeared inside another word — a project
+// called "app" was named by "happened", "apply" and "mapping" — and a wrong tag
+// is not cosmetic: it decides which notes are injected into a turn, which are
+// evicted first, and which are dropped when a project is deleted. The old
+// three-character floor only ever helped two-letter names.
 func (in *Inbox) projectsNamedIn(text string) []string {
 	lower := strings.ToLower(text)
 	var out []string
 	for _, p := range in.projects {
-		if len(p.Name) < 3 {
-			continue
-		}
-		if strings.Contains(lower, strings.ToLower(p.Name)) {
+		if namesWord(lower, strings.ToLower(p.Name)) {
 			out = append(out, p.Name)
 		}
 	}
 	return out
+}
+
+// namesWord reports whether name appears in text as a whole word. Word
+// characters are letters and digits; a project name's own dots, underscores and
+// hyphens are interior to it, so "omni-analyst" is one word rather than two.
+func namesWord(text, name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; ; {
+		j := strings.Index(text[i:], name)
+		if j < 0 {
+			return false
+		}
+		start := i + j
+		end := start + len(name)
+		beforeOK := start == 0 || !isWordByte(text[start-1])
+		afterOK := end == len(text) || !isWordByte(text[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		i = start + 1
+		if i >= len(text) {
+			return false
+		}
+	}
+}
+
+func isWordByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
 
 // liveNames is the set of projects that currently exist. Callers hold mu.
@@ -220,23 +255,44 @@ func (in *Inbox) DropNotes(patterns []string) int {
 	return dropped
 }
 
-// forgetProject drops notes that named only this project. Once it is gone
-// they can never be relevant again, and they would go on costing context in
-// every king turn forever.
+// forgetProject drops notes that named only this project, and untags it from
+// the ones that named it alongside others. Once it is gone those notes can
+// never be relevant to it again, and they would go on costing context in every
+// king turn forever.
+//
+// Untagging is what makes repeated deletion work. Dropping only notes whose
+// Projects was exactly [this] left a note tagged [A, B] untouched when A went;
+// deleting B afterwards then saw a two-element list again, so the note
+// survived both of its projects and was injected forever.
 func (in *Inbox) forgetProject(name string) {
 	in.mu.Lock()
 	kept := in.notes[:0]
-	dropped := 0
+	changed := false
 	for _, n := range in.notes {
-		if len(n.Projects) == 1 && strings.EqualFold(n.Projects[0], name) {
-			dropped++
+		if len(n.Projects) == 0 {
+			kept = append(kept, n) // cross-cutting; not about any one project
 			continue
 		}
+		remaining := n.Projects[:0]
+		for _, p := range n.Projects {
+			if !ident.SameName(p, name) {
+				remaining = append(remaining, p)
+			}
+		}
+		if len(remaining) == len(n.Projects) {
+			kept = append(kept, n)
+			continue
+		}
+		changed = true
+		if len(remaining) == 0 {
+			continue // was about this project and nothing else
+		}
+		n.Projects = remaining
 		kept = append(kept, n)
 	}
 	in.notes = kept
 	in.mu.Unlock()
-	if dropped > 0 {
+	if changed {
 		in.saveNotes()
 	}
 }
@@ -298,7 +354,13 @@ func (in *Inbox) loadNotes() {
 
 // saveNotes writes atomically, same as state: a crash mid-write must not cost
 // the notes that were already there.
+//
+// The persist lock spans the snapshot as well as the write, for the reason
+// given on Inbox.save — two savers that snapshot in one order and rename in the
+// other leave the older set on disk.
 func (in *Inbox) saveNotes() {
+	in.notesPersistMu.Lock()
+	defer in.notesPersistMu.Unlock()
 	if in.notesPath == "" || in.closed() {
 		return
 	}
@@ -308,19 +370,7 @@ func (in *Inbox) saveNotes() {
 	if err != nil {
 		return
 	}
-	dir := filepath.Dir(in.notesPath)
-	_ = os.MkdirAll(dir, 0o755)
-	tmp, err := os.CreateTemp(dir, ".notes-*.json")
-	if err != nil {
-		return
-	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return
-	}
-	tmp.Close()
-	if err := os.Rename(tmp.Name(), in.notesPath); err != nil {
-		os.Remove(tmp.Name())
+	if err := fsutil.WriteFileAtomic(in.notesPath, b, fsutil.FileMode); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-inbox: notes not saved: %v\n", err)
 	}
 }

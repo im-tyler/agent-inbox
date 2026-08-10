@@ -78,10 +78,22 @@ type Model struct {
 	height int
 }
 
+// projectNameAt resolves a 1-based index against a snapshot, or "" if it is
+// out of range.
+func projectNameAt(snap []inbox.Project, idx int) string {
+	if idx < 1 || idx > len(snap) {
+		return ""
+	}
+	return snap[idx-1].Name
+}
+
 // attachArgs describes a pending interactive attach request.
 type attachArgs struct {
 	Argv []string
 	Dir  string
+	// Project names the project being attached to, so the caller can record
+	// that the session advanced outside the dashboard's view of it.
+	Project string
 }
 
 // New constructs a Model bound to the given inbox.
@@ -269,7 +281,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toastAt = time.Now()
 			return m, nil
 		}
-		m.attachRequest = &attachArgs{Argv: args, Dir: dir}
+		m.attachRequest = &attachArgs{Argv: args, Dir: dir, Project: projectNameAt(m.inbox.Snapshot(), m.selected)}
 		return m, tea.Quit
 
 	case "j", "down":

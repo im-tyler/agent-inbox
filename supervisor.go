@@ -7,6 +7,7 @@ import (
 
 	"github.com/im-tyler/agent-inbox/internal/config"
 	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/fsutil"
 	"github.com/im-tyler/agent-inbox/internal/inbox"
 )
 
@@ -56,9 +57,14 @@ in. Delegate, gather, and report back.
 // supervisorProject resolves the supervisor's settings, creates its folder and
 // brief on first run, and returns it as a project.
 //
-// A failure to write the brief is not fatal: the folder is what the session
+// A directory that cannot be created is fatal. The supervisor is not an
+// optional side feature — the main view's composer sends to it — so continuing
+// with a warning produced an application whose primary conversation failed at
+// subprocess startup on every message.
+//
+// A failure to write the brief stays a warning: the folder is what the session
 // needs, and a supervisor with no brief still supervises.
-func supervisorProject(dataDir string, cfg *config.Settings) *inbox.Project {
+func supervisorProject(dataDir string, cfg *config.Settings) (*inbox.Project, error) {
 	name := cfg.King.Name
 	if name == "" {
 		name = defaultSupervisorName
@@ -72,18 +78,28 @@ func supervisorProject(dataDir string, cfg *config.Settings) *inbox.Project {
 		dir = filepath.Join(dataDir, defaultSupervisorName)
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-inbox: warning: supervisor dir %s: %v\n", dir, err)
-	} else {
-		writeBriefOnce(dir)
+	if err := os.MkdirAll(dir, fsutil.DirMode); err != nil {
+		return nil, fmt.Errorf("supervisor dir %s: %w", dir, err)
 	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("supervisor dir %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("supervisor dir %s exists but is not a directory", dir)
+	}
+	writeBriefOnce(dir)
 
-	return &inbox.Project{Name: name, Tool: tool, Dir: dir, Status: driver.StatusIdle}
+	return &inbox.Project{Name: name, Tool: tool, Dir: dir, Status: driver.StatusIdle}, nil
 }
 
 // writeBriefOnce writes the starter brief only when neither file is present,
 // so an edited brief is never clobbered and a user who prefers the other
 // filename does not end up with both.
+//
+// AGENTS.md is the name written. All three supported CLIs discover it —
+// Claude Code hardcodes CLAUDE.md and AGENTS.md discovery — so one file serves
+// the supervisor whichever tool it is switched to.
 func writeBriefOnce(dir string) {
 	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
@@ -91,22 +107,20 @@ func writeBriefOnce(dir string) {
 		}
 	}
 	path := filepath.Join(dir, "AGENTS.md")
-	if err := os.WriteFile(path, []byte(supervisorBrief), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(supervisorBrief), fsutil.FileMode); err != nil {
 		fmt.Fprintf(os.Stderr, "agent-inbox: warning: supervisor brief: %v\n", err)
 	}
 }
 
 // withSupervisor puts the supervisor at the head of the project list.
 //
-// If a configured project already carries the supervisor's name, that one is
-// used as-is and nothing is prepended — the user has said explicitly where
-// their supervisor lives, and overriding that would be worse than the default
-// this replaces.
+// The supervisor's name is reserved: config.Validate rejects a project that
+// claims it, so by the time this runs there is nothing to collide with. It
+// previously treated a collision as the user electing that project as their
+// supervisor, which is not something the config has any way to say. Naming a
+// repository "supervisor" silently suppressed the isolated supervisor,
+// excluded that repo from its own fleet, and ran supervision prompts inside a
+// working tree — the three problems the dedicated folder exists to prevent.
 func withSupervisor(king *inbox.Project, projects []*inbox.Project) []*inbox.Project {
-	for _, p := range projects {
-		if p.Name == king.Name {
-			return projects
-		}
-	}
 	return append([]*inbox.Project{king}, projects...)
 }

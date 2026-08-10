@@ -35,6 +35,8 @@ import (
 // most likely to break on an opencode upgrade. Everything degrades to an empty
 // feed rather than a wrong one.
 type OpenCode struct {
+	// Label is the configured source name. Empty means the built-in default.
+	Label string
 	// Bin is the opencode executable. Defaults to "opencode" on PATH.
 	Bin string
 	// DB is the opencode SQLite path. Defaults to
@@ -50,7 +52,15 @@ type OpenCode struct {
 	Now func() time.Time
 }
 
-func (o OpenCode) Name() string { return "opencode" }
+// Name is the configured instance name — see Claude.Name. This matters most
+// here: an alternate OpenCode build with its own database is a different
+// source of sessions, not a second view of the same ones.
+func (o OpenCode) Name() string {
+	if o.Label != "" {
+		return o.Label
+	}
+	return "opencode"
+}
 
 func (o OpenCode) bin() string {
 	if o.Bin != "" {
@@ -167,20 +177,34 @@ func (o OpenCode) sessions(ctx context.Context) ([]ocSession, error) {
 	return sessions, nil
 }
 
-// liveDirs is the set of working directories opencode is running in right now.
-// One lsof call covers every opencode process.
-func liveDirs(ctx context.Context, command string, timeout time.Duration) map[string]bool {
+// liveDirs is the set of working directories the given command is running in
+// right now. One lsof call covers every matching process.
+//
+// The error return distinguishes "no sessions are live" from "liveness cannot
+// be determined". Both used to produce an empty map, so a machine without lsof
+// filtered out every session and showed a confidently empty inbox.
+func liveDirs(ctx context.Context, command string, timeout time.Duration) (map[string]bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Match on the executable's base name so a configured fork or a renamed
+	// binary is still found. lsof's -c matches the command name, which is the
+	// base name, not the path it was invoked by.
+	command = filepath.Base(command)
+
+	if _, err := exec.LookPath("lsof"); err != nil {
+		return nil, fmt.Errorf("lsof is not installed; it is how live sessions are detected")
+	}
 	// -c matches by command name, -d cwd limits to the working directory
 	// descriptor, -Fn prints just the name field.
 	cmd := exec.CommandContext(ctx, "lsof", "-a", "-d", "cwd", "-c", command, "-Fn")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	// lsof exits non-zero when it cannot stat some unrelated process; the
-	// output we asked for is still there, so the status is not worth failing on.
-	_ = cmd.Run()
+	// output we asked for is still there, so the status alone is not worth
+	// failing on — but a nonzero status with no usable output is a real
+	// failure rather than an empty result.
+	runErr := cmd.Run()
 
 	dirs := map[string]bool{}
 	for _, line := range strings.Split(stdout.String(), "\n") {
@@ -188,7 +212,13 @@ func liveDirs(ctx context.Context, command string, timeout time.Duration) map[st
 			dirs[strings.TrimPrefix(line, "n")] = true
 		}
 	}
-	return dirs
+	if runErr != nil && stdout.Len() == 0 {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("lsof timed out after %s", timeout)
+		}
+		return nil, fmt.Errorf("lsof produced no output: %w", runErr)
+	}
+	return dirs, nil
 }
 
 // liveNear reports whether sessionDir is close enough to a live process's cwd
@@ -296,7 +326,15 @@ func (o OpenCode) Fetch(ctx context.Context) (feed.Feed, error) {
 
 	var dirs map[string]bool
 	if !o.AnyDirectory {
-		dirs = liveDirs(ctx, "opencode", o.timeout())
+		// Use the configured binary's name, not the literal "opencode": a
+		// configured fork's actions already invoke o.bin(), so detecting
+		// liveness under the default name found none of its processes and
+		// filtered every one of its sessions out.
+		var err error
+		dirs, err = liveDirs(ctx, o.bin(), o.timeout())
+		if err != nil {
+			return feed.Feed{}, fmt.Errorf("%s: %w", o.Name(), err)
+		}
 	}
 
 	// Newest session per directory: a tab has one conversation you care

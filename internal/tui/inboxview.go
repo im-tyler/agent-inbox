@@ -29,30 +29,31 @@ func (m *Model) openInbox() tea.Cmd {
 		m.toastAt = time.Now()
 		return nil
 	}
-	m.board = board.New(built).SetEmbedded(true)
+	// Hand the board the terminal size immediately. It never receives a
+	// WindowSizeMsg of its own until the next resize, so without this it lays
+	// its first frame out at the 100-column fallback — on a 40-column terminal
+	// every row overflows.
+	m.board = board.New(built).SetEmbedded(true).SetSize(m.width, m.height)
 	m.view = viewInbox
 	return m.board.Init()
 }
 
-// handleInboxKey intercepts the keys the host owns — leaving, and adopting a
-// row — and hands everything else to the board.
+// handleInboxKey asks the board what to do with a key, and acts on the answer.
+//
+// The board decides rather than the host, because only it knows whether it is
+// currently collecting text. Claiming keys here first meant that while filling
+// in an action prompt, typing "no" adopted a project and typing "queue" left
+// the view.
 func (m Model) handleInboxKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
-		// The board uses esc to close its own detail pane; only leave the
-		// view when there is nothing left for esc to close.
-		if msg.String() == "esc" && m.board.InDetail() {
-			break
-		}
+	updated, cmd, intent := m.board.EmbeddedKey(msg)
+	m.board = updated
+	switch intent {
+	case board.HostLeave:
 		m.view = viewMain
 		return m, nil
-
-	case "n":
+	case board.HostAdopt:
 		return m.adoptSelected()
 	}
-
-	updated, cmd := m.board.Update(msg)
-	m.board = updated.(board.Model)
 	return m, cmd
 }
 

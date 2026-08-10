@@ -21,6 +21,7 @@ import (
 	"github.com/im-tyler/agent-inbox/internal/feed"
 	"github.com/im-tyler/agent-inbox/internal/mux"
 	"github.com/im-tyler/agent-inbox/internal/sources"
+	"github.com/im-tyler/agent-inbox/internal/termtext"
 )
 
 var (
@@ -48,6 +49,7 @@ const (
 )
 
 type loadedMsg struct {
+	gen     int
 	items   []feed.Item
 	results []sources.Result
 }
@@ -75,11 +77,31 @@ type Model struct {
 
 	// Pending action awaiting placeholder input.
 	pending  feed.Action
-	fills    []string
+	fills    map[string]string
+	needed   []string
 	input    textinput.Model
 	lastErr  error
 	loading  bool
 	quitting bool
+
+	// gen counts load generations. A completion whose generation is not the
+	// current one is discarded: refreshes are started on a timer and can
+	// overlap, and without this an older, slower fetch finishing second
+	// overwrites the newer state that arrived first.
+	gen int
+
+	// detailKey pins the open detail pane to one item's identity. The pane
+	// used to resolve through the cursor index, so a refresh that reordered
+	// the list changed which item was on screen — and which item an action key
+	// then acted on — without the user touching anything.
+	detailKey string
+
+	// actionCursor is the highlighted action inside the detail pane.
+	actionCursor int
+
+	// broadcastTargets is the set of item keys a composing broadcast will go
+	// to, captured when composition began.
+	broadcastTargets []string
 
 	// showAll includes everything that is merely happening. Off by default:
 	// an inbox of twelve sessions that want nothing is the pane-switching
@@ -145,17 +167,31 @@ func tick() tea.Cmd {
 	return tea.Tick(refreshEvery, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
+// load starts a fetch tagged with the generation it belongs to. Callers bump
+// m.gen first; the completion handler compares and discards stale arrivals.
 func (m Model) load() tea.Cmd {
-	srcs := m.srcs
+	srcs, gen := m.srcs, m.gen
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		items, results := sources.FetchAll(ctx, srcs)
-		return loadedMsg{items: items, results: results}
+		return loadedMsg{gen: gen, items: items, results: results}
 	}
 }
 
+// startLoad bumps the generation and returns the command to run it.
+func (m *Model) startLoad() tea.Cmd {
+	m.gen++
+	m.loading = true
+	return m.load()
+}
+
 func (m Model) selected() (feed.Item, bool) {
+	// In the detail pane the pinned key wins, so a reorder underneath does not
+	// change what is on screen or what an action applies to.
+	if m.mode == modeDetail && m.detailKey != "" {
+		return m.byKey(m.detailKey)
+	}
 	items := m.visible()
 	if m.cursor < 0 || m.cursor >= len(items) {
 		return feed.Item{}, false
@@ -163,10 +199,25 @@ func (m Model) selected() (feed.Item, bool) {
 	return items[m.cursor], true
 }
 
+// byKey finds an item by its stable identity.
+func (m Model) byKey(key string) (feed.Item, bool) {
+	for _, item := range m.items {
+		if item.Key() == key {
+			return item, true
+		}
+	}
+	return feed.Item{}, false
+}
+
 // run executes an action's argv directly — no shell is involved, so a
 // substituted reason containing quotes, semicolons or backticks lands as one
 // argument and can never become another command.
-func run(action feed.Action, fills []string) tea.Cmd {
+//
+// Whether it takes over the terminal depends on the action. Opening or
+// attaching to a session is something the user watches; a reply or an approval
+// is a request that may run a full model turn, and suspending the whole inbox
+// for minutes to wait for one is not the same thing at all.
+func run(action feed.Action, fills map[string]string) tea.Cmd {
 	argv := substitute(action.Run, fills)
 	if len(argv) == 0 {
 		return func() tea.Msg { return ranMsg{err: fmt.Errorf("action %q has no command", action.Label)} }
@@ -187,28 +238,48 @@ func run(action feed.Action, fills []string) tea.Cmd {
 			return ranMsg{err: m.Send(ctx, action.Pane, text)}
 		}
 	}
+	if !action.Interactive {
+		return func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+			cmd.Dir = action.Dir
+			out, err := cmd.CombinedOutput()
+			if err != nil && len(out) > 0 {
+				err = fmt.Errorf("%w: %s", err, termtext.OneLine(string(out)))
+			}
+			return ranMsg{err: err}
+		}
+	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = action.Dir
 	return tea.ExecProcess(cmd, func(err error) tea.Msg { return ranMsg{err: err} })
 }
 
-// substitute replaces {token} occurrences in order, one fill per placeholder.
-// A placeholder is always a whole argv element after substitution, never a
-// shell fragment.
-func substitute(argv []string, fills []string) []string {
+// actionTimeout bounds a background action. A reply is a model turn, so it is
+// generous; it exists to stop a hung CLI holding a slot forever.
+const actionTimeout = 15 * time.Minute
+
+// substitute replaces {token} occurrences with the value collected for that
+// token. A placeholder is always a whole argv element after substitution,
+// never a shell fragment.
+//
+// Substitution is by name. Filling positionally advanced one value per
+// *argument* but replaced every occurrence within it, so an argv element like
+// "--pair={user}:{reason}" prompted for two values and then wrote the first
+// one into both slots. Repeating {message} twice now reuses one value, which
+// is also what a reader of the contract would expect.
+func substitute(argv []string, fills map[string]string) []string {
 	out := make([]string, 0, len(argv))
-	next := 0
 	for _, arg := range argv {
 		if !placeholderPattern.MatchString(arg) {
 			out = append(out, arg)
 			continue
 		}
-		value := ""
-		if next < len(fills) {
-			value = fills[next]
-		}
-		next++
-		replaced := placeholderPattern.ReplaceAllString(arg, value)
+		replaced := placeholderPattern.ReplaceAllStringFunc(arg, func(tok string) string {
+			name := strings.Trim(tok, "{}")
+			return fills[name]
+		})
 		// An empty optional field (a denial with no reason given) should
 		// drop the argument rather than pass "".
 		if strings.TrimSpace(replaced) == "" {
@@ -219,12 +290,17 @@ func substitute(argv []string, fills []string) []string {
 	return out
 }
 
-// placeholders lists the tokens an action needs filled, in argv order.
+// placeholders lists the distinct tokens an action needs filled, in the order
+// they are first seen.
 func placeholders(action feed.Action) []string {
 	var out []string
+	seen := map[string]bool{}
 	for _, arg := range action.Run {
 		for _, match := range placeholderPattern.FindAllStringSubmatch(arg, -1) {
-			out = append(out, match[1])
+			if !seen[match[1]] {
+				seen[match[1]] = true
+				out = append(out, match[1])
+			}
 		}
 	}
 	return out
@@ -254,13 +330,19 @@ func sendable(item feed.Item) (feed.Action, bool) {
 	return feed.Action{}, false
 }
 
-// broadcast delivers text to every marked item that can receive it,
+// broadcast delivers text to the targets captured when composition began,
 // concurrently. Each send is a model turn that can run for minutes, so doing
 // them in sequence would block the UI for as long as the slowest one.
+//
+// The targets are a snapshot rather than a fresh scan of the marks. Marks
+// persist across the `a` filter, so recomputing at send time could deliver to
+// a session the user had marked and then hidden — a recipient not on screen
+// when they pressed enter.
 func (m Model) broadcast(text string) tea.Cmd {
 	var targets []feed.Action
-	for _, item := range m.items {
-		if !m.marked[item.Key()] {
+	for _, key := range m.broadcastTargets {
+		item, ok := m.byKey(key)
+		if !ok {
 			continue
 		}
 		if a, ok := sendable(item); ok {
@@ -303,7 +385,13 @@ func deliver(ctx context.Context, action feed.Action, text string) error {
 		}
 		return m.Send(ctx, action.Pane, text)
 	}
-	argv := substitute(action.Run, []string{text})
+	// Every placeholder gets the broadcast text: a send action's argv has one
+	// message slot, whatever it is called.
+	fills := map[string]string{}
+	for _, name := range placeholders(action) {
+		fills[name] = text
+	}
+	argv := substitute(action.Run, fills)
 	if len(argv) == 0 {
 		return fmt.Errorf("action %q has no command", action.Label)
 	}
@@ -312,16 +400,44 @@ func deliver(ctx context.Context, action feed.Action, text string) error {
 	return cmd.Run()
 }
 
-// markedSendable counts marked items that can actually receive a message.
-// Marking a Claude Code session whose pane did not resolve is allowed — it
-// just cannot be part of a broadcast, and saying so beats a silent no-op.
+// visibleMarkedKeys are the marked items currently on screen, in list order.
+func (m Model) visibleMarkedKeys() []string {
+	var out []string
+	for _, item := range m.visible() {
+		if m.marked[item.Key()] {
+			out = append(out, item.Key())
+		}
+	}
+	return out
+}
+
+// markedSendable counts visible marked items that can actually receive a
+// message. Marking a Claude Code session whose pane did not resolve is allowed
+// — it just cannot be part of a broadcast, and saying so beats a silent no-op.
 func (m Model) markedSendable() int {
 	n := 0
-	for _, item := range m.items {
-		if !m.marked[item.Key()] {
+	for _, key := range m.visibleMarkedKeys() {
+		item, ok := m.byKey(key)
+		if !ok {
 			continue
 		}
 		if _, ok := sendable(item); ok {
+			n++
+		}
+	}
+	return n
+}
+
+// hiddenMarked counts marks on rows the current filter is not showing, so a
+// delivery count smaller than the number of marks is explainable.
+func (m Model) hiddenMarked() int {
+	visible := map[string]bool{}
+	for _, item := range m.visible() {
+		visible[item.Key()] = true
+	}
+	n := 0
+	for key := range m.marked {
+		if !visible[key] {
 			n++
 		}
 	}
@@ -334,7 +450,8 @@ func (m Model) startAction(action feed.Action) (Model, tea.Cmd) {
 		return m, run(action, nil)
 	}
 	m.pending = action
-	m.fills = nil
+	m.fills = map[string]string{}
+	m.needed = needed
 	m.mode = modeInput
 	m.input.SetValue("")
 	m.input.Placeholder = needed[0]
@@ -349,10 +466,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case loadedMsg:
-		m.items, m.results, m.loading = msg.items, msg.results, false
-		if m.cursor >= len(m.visible()) {
-			m.cursor = max(0, len(m.visible())-1)
+		// Discard a completion from a superseded generation. Two refreshes can
+		// be in flight at once, and the older one finishing last would put
+		// stale rows back on screen.
+		if msg.gen != m.gen {
+			return m, nil
 		}
+		// Keep the highlight on the same item across a reorder where possible.
+		var focused string
+		if item, ok := m.selected(); ok {
+			focused = item.Key()
+		}
+		m.items, m.results, m.loading = msg.items, msg.results, false
+		m.restoreCursor(focused)
 		return m, nil
 
 	case tickMsg:
@@ -361,12 +487,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeInput || m.mode == modeBroadcast {
 			return m, tick()
 		}
-		return m, tea.Batch(m.load(), tick())
+		// One at a time. An automatic tick that starts a load while one is
+		// already running just adds concurrent work whose results have to be
+		// thrown away.
+		if m.loading {
+			return m, tick()
+		}
+		return m, tea.Batch(m.startLoad(), tick())
 
 	case ranMsg:
 		m.lastErr = msg.err
 		m.mode = modeList
-		return m, m.load()
+		m.detailKey = ""
+		return m, m.startLoad()
 
 	case broadcastMsg:
 		m.sent = fmt.Sprintf("sent to %d", msg.ok)
@@ -375,7 +508,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastErr = msg.firstErr
 		}
 		m.marked = map[string]bool{}
-		return m, m.load()
+		m.broadcastTargets = nil
+		return m, m.startLoad()
 
 	case tea.KeyMsg:
 		return m.key(msg)
@@ -383,16 +517,93 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// restoreCursor puts the highlight back on the item it was on, or as close as
+// the new list allows.
+func (m *Model) restoreCursor(key string) {
+	items := m.visible()
+	if key != "" {
+		for i, item := range items {
+			if item.Key() == key {
+				m.cursor = i
+				return
+			}
+		}
+	}
+	if m.cursor >= len(items) {
+		m.cursor = max(0, len(items)-1)
+	}
+}
+
+// CapturingInput reports whether the board is collecting text, so a host does
+// not steal ordinary characters from it.
+func (m Model) CapturingInput() bool {
+	return m.mode == modeInput || m.mode == modeBroadcast
+}
+
+// HostIntent is what the board asks its host to do with a key it did not
+// consume itself.
+type HostIntent int
+
+const (
+	// HostNoIntent means the board handled the key.
+	HostNoIntent HostIntent = iota
+	// HostLeave means the user asked to leave the inbox view.
+	HostLeave
+	// HostAdopt means the user asked to adopt the selected row.
+	HostAdopt
+)
+
+// EmbeddedKey routes a key while the board is hosted inside another program.
+//
+// The board decides, because only it knows whether it is currently collecting
+// text. The host used to guess: it claimed 'n', 'q' and Esc before the board
+// saw them, which meant that typing "no" into an action prompt adopted a
+// project, typing "queue it" left the view, and Esc abandoned the whole inbox
+// instead of cancelling the prompt. A side effect as large as adopting a
+// project should not be reachable by typing a letter into a text field.
+func (m Model) EmbeddedKey(msg tea.KeyMsg) (Model, tea.Cmd, HostIntent) {
+	if m.CapturingInput() {
+		updated, cmd := m.Update(msg)
+		return updated.(Model), cmd, HostNoIntent
+	}
+	switch msg.String() {
+	case "esc":
+		if m.mode == modeDetail {
+			updated, cmd := m.Update(msg)
+			return updated.(Model), cmd, HostNoIntent
+		}
+		return m, nil, HostLeave
+	case "q":
+		return m, nil, HostLeave
+	case "n":
+		return m, nil, HostAdopt
+	}
+	updated, cmd := m.Update(msg)
+	return updated.(Model), cmd, HostNoIntent
+}
+
+// SetSize gives the board its dimensions. A hosted board never receives a
+// WindowSizeMsg of its own until the terminal is next resized, so without this
+// it renders its first frame at the 100-column fallback regardless of how wide
+// the terminal actually is.
+func (m Model) SetSize(width, height int) Model {
+	m.width, m.height = width, height
+	m.input.Width = max(20, width-8)
+	return m
+}
+
 func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeBroadcast {
 		switch msg.Type {
 		case tea.KeyEsc:
 			m.mode = modeList
+			m.broadcastTargets = nil
 			return m, nil
 		case tea.KeyEnter:
 			text := strings.TrimSpace(m.input.Value())
 			if text == "" {
 				m.mode = modeList
+				m.broadcastTargets = nil
 				return m, nil
 			}
 			m.mode = modeList
@@ -409,11 +620,10 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeList
 			return m, nil
 		case tea.KeyEnter:
-			m.fills = append(m.fills, m.input.Value())
-			needed := placeholders(m.pending)
-			if len(m.fills) < len(needed) {
+			m.fills[m.needed[len(m.fills)]] = m.input.Value()
+			if len(m.fills) < len(m.needed) {
 				m.input.SetValue("")
-				m.input.Placeholder = needed[len(m.fills)]
+				m.input.Placeholder = m.needed[len(m.fills)]
 				return m, nil
 			}
 			action, fills := m.pending, m.fills
@@ -423,6 +633,42 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
+	}
+
+	// In the detail pane the action list has its own cursor, so an item with
+	// more than five actions is fully reachable. Numbers still work as
+	// shortcuts for the first nine.
+	if m.mode == modeDetail {
+		switch msg.String() {
+		case "j", "down":
+			if item, ok := m.selected(); ok && m.actionCursor < len(m.actionsFor(item))-1 {
+				m.actionCursor++
+			}
+			return m, nil
+		case "k", "up":
+			if m.actionCursor > 0 {
+				m.actionCursor--
+			}
+			return m, nil
+		case "enter":
+			item, ok := m.selected()
+			if !ok {
+				m.mode = modeList
+				m.detailKey = ""
+				return m, nil
+			}
+			actions := m.actionsFor(item)
+			if m.actionCursor < len(actions) {
+				return m.startAction(actions[m.actionCursor])
+			}
+			m.mode = modeList
+			m.detailKey = ""
+			return m, nil
+		case "esc":
+			m.mode = modeList
+			m.detailKey = ""
+			return m, nil
+		}
 	}
 
 	switch msg.String() {
@@ -447,6 +693,8 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.lastErr = fmt.Errorf("nothing marked that can receive a message (space to mark)")
 			break
 		}
+		// Capture the recipients now, from what is on screen now.
+		m.broadcastTargets = m.visibleMarkedKeys()
 		m.mode = modeBroadcast
 		m.sent = ""
 		m.input.SetValue("")
@@ -466,17 +714,20 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		m.cursor = max(0, len(m.visible())-1)
 	case "r":
-		m.loading = true
-		return m, m.load()
+		if m.loading {
+			break
+		}
+		return m, m.startLoad()
 	case "enter":
-		if m.mode == modeDetail {
-			m.mode = modeList
-		} else if _, ok := m.selected(); ok {
+		if item, ok := m.selected(); ok {
 			m.mode = modeDetail
+			m.detailKey = item.Key()
+			m.actionCursor = 0
 		}
 	case "esc":
 		m.mode = modeList
-	case "1", "2", "3", "4", "5":
+		m.detailKey = ""
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		item, ok := m.selected()
 		if !ok {
 			break
@@ -533,9 +784,10 @@ func tag(a feed.Attention) string {
 }
 
 func age(item feed.Item) string {
-	t := item.SinceTime()
-	if t.IsZero() {
-		return ""
+	t, ok := item.SinceTime()
+	if !ok {
+		// Unknown, not ancient. Showing nothing here read as "just arrived".
+		return "?"
 	}
 	d := time.Since(t)
 	switch {
@@ -552,12 +804,15 @@ func age(item feed.Item) string {
 	}
 }
 
+// clip shortens s to n terminal cells.
+//
+// A non-positive width now yields the empty string. It used to return the
+// whole string, which inverted the intent exactly where it mattered: the
+// column widths are computed by subtraction, so the narrower the terminal, the
+// more likely a width went non-positive — and the more likely clipping
+// switched itself off and the row overflowed.
 func clip(s string, n int) string {
-	r := []rune(s)
-	if n <= 1 || len(r) <= n {
-		return s
-	}
-	return string(r[:n-1]) + "…"
+	return termtext.Truncate(termtext.OneLine(s), n)
 }
 
 func (m Model) View() string {
@@ -616,8 +871,11 @@ func (m Model) View() string {
 	}
 
 	for i, item := range items {
-		row := fmt.Sprintf("%-5s %-*s %s", age(item), projWidth,
-			clip(project(item), projWidth), clip(item.Title, width-projWidth-24))
+		// Cell-aware padding, not %-*s: that pads by rune count, so one CJK
+		// title shifts every column after it by the number of wide glyphs.
+		titleWidth := width - projWidth - 24
+		row := termtext.Pad(age(item), 5) + " " + termtext.Pad(project(item), projWidth) +
+			" " + clip(item.Title, titleWidth)
 		if mixed {
 			row = tag(item.Attention) + "  " + row
 		}
@@ -708,7 +966,22 @@ func (m Model) detail() string {
 	if len(actions) > 0 {
 		b.WriteString("\n")
 		for i, a := range actions {
-			b.WriteString(fmt.Sprintf("  [%d] %s %s\n", i+1, a.Label, mutedStyle.Render(strings.Join(a.Run, " "))))
+			// Every action shown is reachable: the first nine by number, all
+			// of them by j/k and enter. Rendering a numbered list longer than
+			// the keys that select it advertised actions nobody could run.
+			label := fmt.Sprintf("  [%d] %s", i+1, a.Label)
+			if i >= 9 {
+				label = "      " + a.Label
+			}
+			detail := strings.Join(a.Run, " ")
+			if detail == "" && a.Post != "" {
+				detail = "remote action (not supported)"
+			}
+			line := label + " " + mutedStyle.Render(clip(detail, max(10, maxWidth(m.width)-len(label)-2)))
+			if i == m.actionCursor {
+				line = selectedStyle.Render(clip(label+" "+detail, maxWidth(m.width)))
+			}
+			b.WriteString(line + "\n")
 		}
 	}
 	return b.String()

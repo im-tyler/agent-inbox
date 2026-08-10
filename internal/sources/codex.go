@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -32,6 +33,8 @@ import (
 // without it the list fills with months of finished work that all looks like
 // it is waiting on you.
 type Codex struct {
+	// Label is the configured source name. Empty means the built-in default.
+	Label string
 	// Root defaults to ~/.codex/sessions.
 	Root string
 	// Bin is the codex executable. Defaults to "codex" on PATH.
@@ -53,7 +56,13 @@ const codexDefaultMaxAge = 7 * 24 * time.Hour
 // that a longer prompt does not silently drop the session.
 const metaLineMax = 4 * 1024 * 1024
 
-func (c Codex) Name() string { return "codex" }
+// Name is the configured instance name — see Claude.Name.
+func (c Codex) Name() string {
+	if c.Label != "" {
+		return c.Label
+	}
+	return "codex"
+}
 
 func (c Codex) bin() string {
 	if c.Bin != "" {
@@ -275,7 +284,13 @@ func (c Codex) Fetch(ctx context.Context) (feed.Feed, error) {
 
 	var dirs map[string]bool
 	if !c.AnyDirectory {
-		dirs = liveDirs(ctx, "codex", c.timeout())
+		// The configured binary, not the literal "codex" — see the same
+		// comment in the OpenCode source.
+		var err error
+		dirs, err = liveDirs(ctx, c.bin(), c.timeout())
+		if err != nil {
+			return feed.Feed{}, fmt.Errorf("%s: %w", c.Name(), err)
+		}
 	}
 
 	// Newest rollout per directory: a tab has one conversation you care
