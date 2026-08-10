@@ -19,6 +19,7 @@ import (
 	"github.com/im-tyler/agent-inbox/internal/board"
 	"github.com/im-tyler/agent-inbox/internal/driver"
 	"github.com/im-tyler/agent-inbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/termtext"
 )
 
 // viewMode controls which screen the TUI is rendering.
@@ -153,8 +154,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.sendInput.Width = max(60, msg.Width-30)
-		m.mainInput.SetWidth(max(40, msg.Width-8))
+		// Clamp to the terminal, do not impose a minimum larger than it.
+		// max(60, W-30) gave a 60-column input inside a 30-column terminal.
+		m.sendInput.Width = clampInputWidth(msg.Width, 30, 60)
+		m.mainInput.SetWidth(clampInputWidth(msg.Width, 8, 40))
 		if m.view == viewInbox {
 			return m.forwardToBoard(msg)
 		}
@@ -170,22 +173,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mainScrollFromBottom = 0
 		}
 		// Clamp scroll to prevent blank conversation.
+		//
+		// The bound comes from the same line builder the renderer uses. It was
+		// estimated by counting newlines in the raw content, which undercounts
+		// every message that wraps — so on a narrow terminal the clamp pulled
+		// the view back toward the bottom on each tick and the top of a long
+		// history could not be reached.
 		if m.mainScrollFromBottom > 0 {
-			snap := m.inbox.Snapshot()
-			if m.kingIndex() >= 1 && m.kingIndex() <= len(snap) {
-				king := snap[m.kingIndex()-1]
-				lineCount := 2
-				for _, msg := range king.History {
-					lineCount += 1 + strings.Count(msg.Content, "\n") + 1 + 1
-				}
-				bodyH := m.height - 7
-				maxScroll := lineCount - bodyH
-				if maxScroll < 0 {
-					maxScroll = 0
-				}
-				if m.mainScrollFromBottom > maxScroll {
-					m.mainScrollFromBottom = maxScroll
-				}
+			if maxScroll := m.mainMaxScroll(); m.mainScrollFromBottom > maxScroll {
+				m.mainScrollFromBottom = maxScroll
 			}
 		}
 		// Catch a turn that started without going through a keypress —
@@ -375,61 +371,77 @@ func (m Model) View() string {
 	}
 }
 
+// detailWidth is the body width inside the detail frame. One definition, so
+// the renderer and the scroll bound cannot disagree about it.
+func (m Model) detailWidth() int {
+	w := m.width - 6
+	if w < 20 {
+		w = 20
+	}
+	return w
+}
+
+// detailBodyLines builds the detail view's body as the exact lines it will
+// render. Both the renderer and the scroll bound call this: the bound used to
+// be a second, approximate implementation, and the two disagreed on every
+// message that wrapped.
+func (m Model) detailBodyLines() []string {
+	snap := m.inbox.Snapshot()
+	if m.selected < 1 || m.selected > len(snap) {
+		return nil
+	}
+	p := snap[m.selected-1]
+	detailW := m.detailWidth()
+
+	var lines []string
+	lines = append(lines, mutedStyle.Render(fmt.Sprintf("dir: %s   session: %s   turns: %d",
+		shortPath(p.Dir), shortSession(p.SessionID), len(p.History))))
+	lines = append(lines, "")
+
+	if len(p.History) == 0 {
+		lines = append(lines, mutedStyle.Render("(no messages yet)"))
+	} else {
+		// Same rendering as the king's thread, except that directive
+		// stripping is the supervisor's alone: this view is the full
+		// transcript of a project, and a project quoting the syntax is
+		// saying something, not issuing an instruction.
+		isKing := m.inbox.IsKing(p.Name)
+		for _, msg := range p.History {
+			body := displayContent(isKing, msg.Content)
+			if body == "" {
+				continue
+			}
+			glyph, label, style := speaker(msg.Role, p.Tool)
+			lines = append(lines, speakerLine(glyph, label, msg.Timestamp.Format(time.Kitchen), style, detailW))
+			lines = append(lines, wrapBody(body, detailW)...)
+			lines = append(lines, "")
+		}
+	}
+
+	if p.Status == driver.StatusWorking {
+		lines = append(lines, speakerLine(m.frame(), p.Tool, workingLabel(p.Activity), workingStyle, detailW))
+		if p.StreamingText != "" {
+			lines = append(lines, wrapBody(p.StreamingText, detailW)...)
+		}
+	}
+	return lines
+}
+
 func (m Model) viewDetail() string {
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
+		return m.tooSmall()
+	}
 	snap := m.inbox.Snapshot()
 	if m.selected < 1 || m.selected > len(snap) {
 		m.view = viewMain
 		return m.renderMain()
 	}
 	p := snap[m.selected-1]
-
-	// Frame borders and padding take four columns.
-	detailW := m.width - 6
-	if detailW < 20 {
-		detailW = 20
-	}
-
-	var b strings.Builder
-
-	// Metadata block (compact, 2 lines).
-	b.WriteString(mutedStyle.Render(fmt.Sprintf("dir: %s   session: %s   turns: %d",
-		shortPath(p.Dir), shortSession(p.SessionID), len(p.History))))
-	b.WriteString("\n\n")
-
-	// Full history (not truncated — scrollable).
-	if len(p.History) == 0 {
-		b.WriteString(mutedStyle.Render("(no messages yet)"))
-		b.WriteString("\n")
-	} else {
-		// Same rendering as the king's thread. This view is where the full
-		// replies live, so it is the last place that should hand back the
-		// raw "## Heading" and "[send to ...]" the other one strips.
-		for _, msg := range p.History {
-			body := stripDirectives(msg.Content)
-			if body == "" {
-				continue
-			}
-			glyph, label, style := speaker(msg.Role, p.Tool)
-			b.WriteString(speakerLine(glyph, label, msg.Timestamp.Format(time.Kitchen), style, detailW))
-			b.WriteString("\n")
-			b.WriteString(strings.Join(wrapBody(body, detailW), "\n"))
-			b.WriteString("\n\n")
-		}
-	}
-
-	// Live streaming text (if currently working).
-	if p.Status == driver.StatusWorking {
-		b.WriteString(speakerLine(m.frame(), p.Tool, workingLabel(p.Activity), workingStyle, detailW))
-		b.WriteString("\n")
-		if p.StreamingText != "" {
-			b.WriteString(strings.Join(wrapBody(p.StreamingText, detailW), "\n"))
-			b.WriteString("\n")
-		}
-	}
+	detailW := m.detailWidth()
+	_ = detailW
 
 	// Build full body and apply scroll.
-	body := b.String()
-	bodyLines := strings.Split(body, "\n")
+	bodyLines := m.detailBodyLines()
 
 	// Available height for body inside the frame.
 	availH := m.height - 6
@@ -475,33 +487,67 @@ func (m Model) viewDetail() string {
 	return renderFrame(m.width, m.height, title, visible, footer)
 }
 
+// shortPath keeps the tail of a path, which is the part that identifies it.
+// Measured in terminal cells and cut on rune boundaries: byte slicing could
+// split a multi-byte character and emit invalid UTF-8.
 func shortPath(dir string) string {
-	if len(dir) > 40 {
-		return "…" + dir[len(dir)-38:]
+	const max = 40
+	if termtext.Width(dir) <= max {
+		return dir
 	}
-	return dir
+	r := []rune(dir)
+	for i := range r {
+		if tail := string(r[i:]); termtext.Width(tail) <= max-1 {
+			return "…" + tail
+		}
+	}
+	return "…"
 }
 
-// detailBodyLineCount estimates how many lines the detail-view body will
-// occupy for the currently-selected project. Used by detailMaxScroll and
-// clampDetailScroll to bound the scroll offset.
-func (m Model) detailBodyLineCount() int {
+// mainMaxScroll is how far the king conversation can scroll up, measured in
+// the same rendered lines the renderer emits.
+func (m Model) mainMaxScroll() int {
 	snap := m.inbox.Snapshot()
-	if m.selected < 1 || m.selected > len(snap) {
+	contentW := m.width - 4
+	if contentW < 20 {
+		contentW = 20
+	}
+	sidebarW := contentW / 4
+	if sidebarW < 20 {
+		sidebarW = 20
+	}
+	if sidebarW > 35 {
+		sidebarW = 35
+	}
+	convW := contentW - sidebarW - 2
+	if convW < 20 {
+		convW = 20
+	}
+	inputH := m.mainInput.Height()
+	if inputH < 1 {
+		inputH = 1
+	}
+	bodyH := m.height - 6 - inputH
+	if bodyH < 3 {
+		bodyH = 3
+	}
+	maxScroll := len(m.buildConversationLines(snap, convW)) - bodyH
+	if maxScroll < 0 {
 		return 0
 	}
-	p := snap[m.selected-1]
-	lines := 2 // metadata (1 line) + blank
-	for _, msg := range p.History {
-		lines += 2 // header + blank
-		lines += strings.Count(msg.Content, "\n") + 1
-	}
-	if p.Status == driver.StatusWorking && p.StreamingText != "" {
-		lines += 2 + strings.Count(p.StreamingText, "\n")
-	} else if p.Status == driver.StatusWorking {
-		lines += 1
-	}
-	return lines
+	return maxScroll
+}
+
+// detailBodyLineCount is how many lines the detail-view body occupies for the
+// currently-selected project, counted from the exact rendered lines rather
+// than estimated from the source text. Used by detailMaxScroll and
+// clampDetailScroll to bound the scroll offset.
+//
+// The estimate it replaces counted one row per newline, so a paragraph that
+// wrapped to a dozen terminal rows counted as one: G stopped short of the
+// bottom and PgUp could not reach the first message.
+func (m Model) detailBodyLineCount() int {
+	return len(m.detailBodyLines())
 }
 
 func (m Model) detailMaxScroll() int {
@@ -540,18 +586,34 @@ func ageHuman(d time.Duration) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
+// truncateOneLine flattens s to one line of at most max terminal cells.
+//
+// It measured bytes and sliced bytes, so a multibyte rune could be cut in
+// half — producing invalid UTF-8 — and a CJK or emoji string was measured at
+// two to four times its real width, overflowing the column it was sized for.
 func truncateOneLine(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.TrimSpace(s)
-	if len(s) <= max {
-		return s
+	return termtext.Truncate(termtext.OneLine(s), max)
+}
+
+// clampInputWidth sizes a text input for the terminal: the preferred width
+// where it fits, never wider than the terminal minus its chrome.
+func clampInputWidth(termWidth, chrome, preferred int) int {
+	avail := termWidth - chrome
+	if termWidth <= 0 {
+		return preferred // no size reported yet
 	}
-	return s[:max-1] + "…"
+	if avail < preferred {
+		if avail < 10 {
+			return 10
+		}
+		return avail
+	}
+	return preferred
 }
 
 func shortSession(id string) string {
-	if len(id) > 12 {
-		return id[:12] + "…"
+	if r := []rune(id); len(r) > 12 {
+		return string(r[:12]) + "…"
 	}
 	if id == "" {
 		return "(none — send a message first)"

@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -149,16 +150,28 @@ func (Tmux) Panes(ctx context.Context) ([]Pane, error) {
 	return panes, nil
 }
 
+// bufferSeq numbers tmux buffers within this process.
+var bufferSeq atomic.Uint64
+
 func (Tmux) Send(ctx context.Context, paneID, text string) error {
 	// send-keys splits on newlines, so a multiline message has to go through
 	// a buffer or it submits itself line by line.
 	if strings.Contains(text, "\n") {
-		load := exec.CommandContext(ctx, "tmux", "load-buffer", "-b", "agentinbox", "-")
+		// A buffer name unique to this send. Every multiline send used the
+		// same name "agentinbox", and tmux buffers are shared across the whole
+		// server: two concurrent sends — from a broadcast, or from a second
+		// agent-inbox process — could interleave load and paste, so one pane
+		// received the other's message.
+		name := fmt.Sprintf("agentinbox-%d-%d", os.Getpid(), bufferSeq.Add(1))
+		load := exec.CommandContext(ctx, "tmux", "load-buffer", "-b", name, "-")
 		load.Stdin = strings.NewReader(text)
 		if err := load.Run(); err != nil {
 			return fmt.Errorf("tmux load-buffer: %w", err)
 		}
-		if _, err := run(ctx, "tmux", "paste-buffer", "-b", "agentinbox", "-t", paneID); err != nil {
+		// -d deletes the buffer as it is pasted, so a cancelled or failed send
+		// does not leave the message sitting in the user's paste buffers.
+		if _, err := run(ctx, "tmux", "paste-buffer", "-d", "-b", name, "-t", paneID); err != nil {
+			_, _ = run(ctx, "tmux", "delete-buffer", "-b", name)
 			return err
 		}
 	} else if _, err := run(ctx, "tmux", "send-keys", "-t", paneID, "-l", text); err != nil {
@@ -167,7 +180,14 @@ func (Tmux) Send(ctx context.Context, paneID, text string) error {
 		// sending an interrupt.
 		return err
 	}
-	time.Sleep(submitDelay)
+	// Wait for the pane to settle, but abandon the submit if the caller gave
+	// up. An unconditional sleep went on to press Enter after cancellation,
+	// which sends the message the user just cancelled.
+	select {
+	case <-time.After(submitDelay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	_, err := run(ctx, "tmux", "send-keys", "-t", paneID, "Enter")
 	return err
 }

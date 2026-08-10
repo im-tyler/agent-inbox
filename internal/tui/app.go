@@ -21,7 +21,39 @@ import (
 // characters so nothing wraps. bodyH = terminalHeight - 7 (the exact
 // count of non-body lines: top border, title, blank, blank, input, hint,
 // bottom border).
+const (
+	// minWidth and minHeight are the smallest terminal this layout is built
+	// for. Below them the frame's arithmetic stops describing the screen: the
+	// minimum clamps on the composer and the two panes add up to more than the
+	// terminal has, so every row overflows and the borders break apart.
+	//
+	// Saying so is better than rendering a 40-column composer into 20 columns
+	// and letting the user work out why it looks like that.
+	minWidth  = 40
+	minHeight = 10
+)
+
+// tooSmall is the whole screen when the terminal cannot hold the layout.
+func (m Model) tooSmall() string {
+	// Built by hand rather than through the frame, because the frame is the
+	// thing that does not fit.
+	lines := []string{"agent-inbox", "terminal too small", fmt.Sprintf("need %dx%d", minWidth, minHeight)}
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		if m.height > 0 && len(out) >= m.height {
+			break
+		}
+		out = append(out, truncateOneLine(ln, m.width))
+	}
+	return strings.Join(out, "\n")
+}
+
 func (m Model) renderMain() string {
+	// A zero size is the frame before the first WindowSizeMsg arrives, not a
+	// tiny terminal.
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
+		return m.tooSmall()
+	}
 	snap := m.inbox.Snapshot()
 	W := m.width
 	H := m.height
@@ -178,7 +210,7 @@ func (m Model) buildConversationLines(snap []inbox.Project, width int) []string 
 	lines = append(lines, "")
 
 	for _, msg := range king.History {
-		body := stripDirectives(msg.Content)
+		body := displayContent(true, msg.Content)
 		if body == "" {
 			// A turn that was nothing but directives has already been shown
 			// as the dispatch it caused. An empty bubble adds nothing.
@@ -369,7 +401,7 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 			sub = p.LastErr
 		}
 		if !isKing {
-			if s := truncateOneLine(previewText(sub), maxW-2); s != "" {
+			if s := truncateOneLine(previewText(sub, m.inbox.IsKing(p.Name)), maxW-2); s != "" {
 				lines = append(lines, trunc.Render(mutedStyle.Render("  "+s)))
 			}
 		}

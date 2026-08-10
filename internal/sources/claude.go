@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -262,29 +263,57 @@ func (c Claude) job(shortID string) jobState {
 // slug of the working directory that is lossy to reconstruct, so this looks
 // rather than computes.
 func (c Claude) transcriptPath(sessionID string) string {
+	return c.transcriptIndex([]string{sessionID})[sessionID]
+}
+
+// transcriptIndex resolves several session ids in one pass over the root.
+//
+// Resolving them one at a time meant ReadDir plus one Stat per project
+// directory for *every* live agent, on a board that refreshes every five
+// seconds: with A agents and D historical project directories that is O(A×D)
+// filesystem calls per refresh, and D grows forever because old project
+// directories are never removed.
+func (c Claude) transcriptIndex(sessionIDs []string) map[string]string {
+	out := make(map[string]string, len(sessionIDs))
 	root := c.root()
-	if root == "" || sessionID == "" {
-		return ""
+	if root == "" || len(sessionIDs) == 0 {
+		return out
+	}
+	want := make(map[string]string, len(sessionIDs))
+	for _, id := range sessionIDs {
+		if id != "" {
+			want[id+".jsonl"] = id
+		}
+	}
+	if len(want) == 0 {
+		return out
 	}
 	dirs, err := os.ReadDir(root)
 	if err != nil {
-		return ""
+		return out
 	}
-	name := sessionID + ".jsonl"
 	for _, dir := range dirs {
 		if !dir.IsDir() {
 			continue
 		}
-		path := filepath.Join(root, dir.Name(), name)
-		if _, err := os.Stat(path); err == nil {
-			return path
+		entries, err := os.ReadDir(filepath.Join(root, dir.Name()))
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if id, ok := want[e.Name()]; ok {
+				out[id] = filepath.Join(root, dir.Name(), e.Name())
+				delete(want, e.Name())
+			}
+		}
+		if len(want) == 0 {
+			break // every id located; no reason to read the rest
 		}
 	}
-	return ""
+	return out
 }
 
-func (c Claude) enrich(sessionID string) enrichment {
-	path := c.transcriptPath(sessionID)
+func (c Claude) enrich(path string) enrichment {
 	if path == "" {
 		return enrichment{}
 	}
@@ -505,12 +534,21 @@ func (c Claude) Fetch(ctx context.Context) (feed.Feed, error) {
 		panes, _ = m.Panes(ctx)
 	}
 
-	f := feed.Feed{Schema: feed.Schema, Items: make([]feed.Item, 0, len(agents))}
+	live := make([]agentInfo, 0, len(agents))
+	ids := make([]string, 0, len(agents))
 	for _, a := range agents {
 		if !c.alive(a) {
 			continue
 		}
-		e := c.enrich(a.SessionID)
+		live = append(live, a)
+		ids = append(ids, a.SessionID)
+	}
+	// One walk of the transcript root for the whole fetch.
+	index := c.transcriptIndex(ids)
+
+	f := feed.Feed{Schema: feed.Schema, Items: make([]feed.Item, 0, len(live))}
+	for _, a := range live {
+		e := c.enrich(index[a.SessionID])
 		pane := ""
 		if len(panes) > 0 {
 			// tmux reports a working directory, which identifies a pane far
@@ -546,5 +584,81 @@ func (c Claude) alive(a agentInfo) bool {
 		return false
 	}
 	// Signal 0 checks for existence without touching the process.
-	return proc.Signal(syscall.Signal(0)) == nil
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
+	return c.processStartMatches(a)
+}
+
+// processStartMatches reports whether pid's process started when this agent
+// says it did.
+//
+// Existence alone is not identity: pids are recycled, so a stale agent record
+// whose pid has since been reused by an unrelated process passes Signal(0) and
+// is resurrected as a live blocked session. Start time is the discriminator —
+// a recycled pid belongs to a process that started later than the agent did.
+//
+// Anything unparseable is treated as a match. This check exists to reject a
+// recycled pid, and a live session vanishing from the list would be a worse
+// failure than a ghost one appearing in it.
+func (c Claude) processStartMatches(a agentInfo) bool {
+	if a.StartedAt <= 0 {
+		return true // nothing recorded to compare against
+	}
+	elapsed, ok := processElapsed(a.PID)
+	if !ok {
+		return true
+	}
+	started := c.now().Add(-elapsed)
+	recorded := time.UnixMilli(a.StartedAt)
+	// Generous: ps reports whole seconds, the recorded time comes from a
+	// different clock read, and neither is worth being strict about.
+	const tolerance = 2 * time.Minute
+	return started.Sub(recorded).Abs() <= tolerance
+}
+
+// processElapsed asks ps how long pid has been running. `etime` is the one
+// spelling both macOS and Linux agree on; its format is [[dd-]hh:]mm:ss.
+func processElapsed(pid int) (time.Duration, bool) {
+	out, err := exec.Command("ps", "-o", "etime=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0, false
+	}
+	return parseETime(strings.TrimSpace(string(out)))
+}
+
+func parseETime(s string) (time.Duration, bool) {
+	if s == "" {
+		return 0, false
+	}
+	days := 0
+	if before, after, found := strings.Cut(s, "-"); found {
+		d, err := strconv.Atoi(before)
+		if err != nil {
+			return 0, false
+		}
+		days, s = d, after
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, false
+	}
+	nums := make([]int, len(parts))
+	for i, p := range parts {
+		n, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil {
+			return 0, false
+		}
+		nums[i] = n
+	}
+	var hours, mins, secs int
+	if len(parts) == 3 {
+		hours, mins, secs = nums[0], nums[1], nums[2]
+	} else {
+		mins, secs = nums[0], nums[1]
+	}
+	return time.Duration(days)*24*time.Hour +
+		time.Duration(hours)*time.Hour +
+		time.Duration(mins)*time.Minute +
+		time.Duration(secs)*time.Second, true
 }

@@ -187,7 +187,7 @@ func TestPlural(t *testing.T) {
 // A preview is a quote from a thread, so it gets the same cleanup the thread
 // does — otherwise the sidebar and the list show markers the chat strips.
 func TestPreviewTextIsCleanAndFlat(t *testing.T) {
-	got := previewText("On it.\n[send to omni: check]\n## Findings\n**three** issues")
+	got := previewText("On it.\n[send to omni: check]\n## Findings\n**three** issues", true)
 	for _, unwanted := range []string{"[send to", "##", "**", "\n"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("%q survived in %q", unwanted, got)
@@ -200,7 +200,25 @@ func TestPreviewTextIsCleanAndFlat(t *testing.T) {
 
 // A message that was nothing but directives has no preview to show.
 func TestPreviewTextOfDirectivesOnly(t *testing.T) {
-	if got := previewText("[send to omni: go]"); got != "" {
+	if got := previewText("[send to omni: go]", true); got != "" {
 		t.Errorf("got %q, want empty", got)
+	}
+}
+
+// Directive stripping belongs to the supervisor alone. A fleet project that
+// writes the syntax is quoting it — documenting the feature, echoing a file,
+// or relaying text it read somewhere — and deleting the line from its own
+// transcript loses real content and hides injected content.
+func TestAProjectsOwnDirectiveLookingTextIsKept(t *testing.T) {
+	const said = "Use [send to omni: check] to dispatch."
+	if got := displayContent(false, said); got != said {
+		t.Errorf("a project's line was stripped: %q", got)
+	}
+	if got := previewText(said, false); !strings.Contains(got, "send to omni") {
+		t.Errorf("preview dropped it too: %q", got)
+	}
+	// The supervisor's own output still gets stripped.
+	if got := displayContent(true, "[send to omni: check]"); got != "" {
+		t.Errorf("the supervisor's directive should not be shown: %q", got)
 	}
 }

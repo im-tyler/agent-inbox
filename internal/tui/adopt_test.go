@@ -187,7 +187,8 @@ func TestFooterNeverWrapsTheFrame(t *testing.T) {
 }
 
 // The detail view is where the full replies live, so it is the last place
-// that should hand back raw markdown and directive syntax.
+// that should hand back raw markdown. Directive syntax goes too, but only
+// because this project is the supervisor — see displayContent.
 func TestDetailViewSharesTheChatRendering(t *testing.T) {
 	projects := []*inbox.Project{{
 		Name: "king", Tool: "opencode", Dir: "/k", Status: driver.StatusIdle,
@@ -196,7 +197,8 @@ func TestDetailViewSharesTheChatRendering(t *testing.T) {
 			{Role: "omni", Content: "## Findings\n**three** issues\n- one\n- two", Timestamp: time.Now()},
 		},
 	}}
-	in := inbox.New(projects, map[string]driver.Driver{}, filepath.Join(t.TempDir(), "s.json"))
+	in := inbox.New(projects, map[string]driver.Driver{}, filepath.Join(t.TempDir(), "s.json")).
+		WithKing("king")
 	m := New(in, "")
 	m.width, m.height = 80, 40
 	m.selected = 1

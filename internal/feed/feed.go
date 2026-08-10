@@ -64,8 +64,11 @@ const (
 // consumer decides how; see Sanitize.
 type Action struct {
 	Label string `json:"label"`
-	// Run is argv. Never populated from a remote feed — see Sanitize.
-	Run []string `json:"-"`
+	// Run is argv. It is written on output — `inbox --json` describes what a
+	// local action would do, and that is part of the contract — but never read
+	// on input: UnmarshalJSON below decodes only the fields a producer owns.
+	// The asymmetry is the point.
+	Run []string `json:"run,omitempty"`
 	// Post names a remote endpoint that resolves this action. Accepted on the
 	// wire but not yet executed: the contract does not define its request or
 	// response shape, and guessing one would mean inventing a protocol on the

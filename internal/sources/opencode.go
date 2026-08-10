@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -184,6 +185,25 @@ func (o OpenCode) sessions(ctx context.Context) ([]ocSession, error) {
 // be determined". Both used to produce an empty map, so a machine without lsof
 // filtered out every session and showed a confidently empty inbox.
 func liveDirs(ctx context.Context, command string, timeout time.Duration) (map[string]bool, error) {
+	counts, err := liveDirCounts(ctx, command, timeout)
+	if err != nil {
+		return nil, err
+	}
+	dirs := make(map[string]bool, len(counts))
+	for d := range counts {
+		dirs[d] = true
+	}
+	return dirs, nil
+}
+
+// liveDirCounts is liveDirs with the number of processes in each directory.
+//
+// The count is what allows more than one session per repo to be shown. Two
+// tabs open on the same project is ordinary, and collapsing to the newest hid
+// one of them — but the database holds every session ever created there, so
+// showing all of them would bury the live ones under months of finished work.
+// The number of live processes is the bound that distinguishes the two.
+func liveDirCounts(ctx context.Context, command string, timeout time.Duration) (map[string]int, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -206,10 +226,10 @@ func liveDirs(ctx context.Context, command string, timeout time.Duration) (map[s
 	// failure rather than an empty result.
 	runErr := cmd.Run()
 
-	dirs := map[string]bool{}
+	dirs := map[string]int{}
 	for _, line := range strings.Split(stdout.String(), "\n") {
 		if strings.HasPrefix(line, "n/") {
-			dirs[strings.TrimPrefix(line, "n")] = true
+			dirs[strings.TrimPrefix(line, "n")]++
 		}
 	}
 	if runErr != nil && stdout.Len() == 0 {
@@ -219,6 +239,30 @@ func liveDirs(ctx context.Context, command string, timeout time.Duration) (map[s
 		return nil, fmt.Errorf("lsof produced no output: %w", runErr)
 	}
 	return dirs, nil
+}
+
+// perDirLimit is how many sessions a directory may contribute: one per live
+// process there, and at least one when liveness is not being consulted.
+func perDirLimit(counts map[string]int, dir string) int {
+	if counts == nil {
+		return 1
+	}
+	best := 0
+	for cwd, n := range counts {
+		near := cwd == dir
+		if !near {
+			if rel, ok := oneLevelApart(cwd, dir); ok && rel {
+				near = true
+			}
+		}
+		if near && n > best {
+			best = n
+		}
+	}
+	if best < 1 {
+		best = 1
+	}
+	return best
 }
 
 // liveNear reports whether sessionDir is close enough to a live process's cwd
@@ -324,6 +368,7 @@ func (o OpenCode) Fetch(ctx context.Context) (feed.Feed, error) {
 		return feed.Feed{}, err
 	}
 
+	var counts map[string]int
 	var dirs map[string]bool
 	if !o.AnyDirectory {
 		// Use the configured binary's name, not the literal "opencode": a
@@ -331,27 +376,44 @@ func (o OpenCode) Fetch(ctx context.Context) (feed.Feed, error) {
 		// liveness under the default name found none of its processes and
 		// filtered every one of its sessions out.
 		var err error
-		dirs, err = liveDirs(ctx, o.bin(), o.timeout())
+		counts, err = liveDirCounts(ctx, o.bin(), o.timeout())
 		if err != nil {
 			return feed.Feed{}, fmt.Errorf("%s: %w", o.Name(), err)
 		}
+		dirs = make(map[string]bool, len(counts))
+		for d := range counts {
+			dirs[d] = true
+		}
 	}
 
-	// Newest session per directory: a tab has one conversation you care
-	// about, not the twenty that came before it in the same repo.
-	newest := map[string]ocSession{}
+	// Newest sessions per directory, up to the number of processes actually
+	// running there.
+	//
+	// This was one per directory unconditionally, which hid a second tab open
+	// on the same repo — an ordinary thing to have, and the product's whole
+	// claim is that it shows every running session. Showing all of them is not
+	// the answer either: the database keeps every session ever created in that
+	// repo, and almost all of them ended on "stop", so the live one would be
+	// buried under months of finished work. The live process count is the
+	// bound that separates the two.
+	byDir := map[string][]ocSession{}
 	for _, s := range sessions {
 		if dirs != nil && !liveNear(dirs, s.Directory) {
 			continue
 		}
-		if prev, ok := newest[s.Directory]; !ok || s.Updated > prev.Updated {
-			newest[s.Directory] = s
-		}
+		byDir[s.Directory] = append(byDir[s.Directory], s)
 	}
 
-	f := feed.Feed{Schema: feed.Schema, Items: make([]feed.Item, 0, len(newest))}
-	for _, s := range newest {
-		f.Items = append(f.Items, o.item(s, s.Finish))
+	f := feed.Feed{Schema: feed.Schema, Items: make([]feed.Item, 0, len(byDir))}
+	for dir, group := range byDir {
+		sort.Slice(group, func(i, j int) bool { return group[i].Updated > group[j].Updated })
+		limit := perDirLimit(counts, dir)
+		if limit > len(group) {
+			limit = len(group)
+		}
+		for _, s := range group[:limit] {
+			f.Items = append(f.Items, o.item(s, s.Finish))
+		}
 	}
 	return f, nil
 }

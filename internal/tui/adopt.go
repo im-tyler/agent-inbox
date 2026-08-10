@@ -93,16 +93,32 @@ func candidateFrom(item feed.Item) (candidate, bool) {
 // Only whole lines are dropped, matching how the parsers read them: prose
 // that merely mentions the syntax stays.
 // previewText flattens a message to one line for a sidebar row or a list
-// preview: directives out, markdown markers out, newlines collapsed. The
-// same cleanup the threads get, since a preview is a quote from one.
-func previewText(content string) string {
+// preview: markdown markers out, newlines collapsed. isKing selects whether
+// supervisor directives are also removed — see displayContent.
+func previewText(content string, isKing bool) string {
 	var parts []string
-	for _, raw := range strings.Split(stripDirectives(content), "\n") {
+	for _, raw := range strings.Split(displayContent(isKing, content), "\n") {
 		if t, _ := demarkdown(raw); strings.TrimSpace(t) != "" {
 			parts = append(parts, strings.TrimSpace(t))
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// displayContent is what a human should see of one message.
+//
+// Directive stripping applies only to the supervisor's own output. It was
+// applied to every project's history, so a coding agent that legitimately
+// wrote a line like "[note: this is the syntax]" — quoting documentation,
+// explaining the feature, or echoing a file — had that line silently deleted
+// from what is meant to be its full transcript. That also hides the evidence
+// when the text arrived through prompt injection, which is exactly when you
+// want to see it.
+func displayContent(isKing bool, content string) string {
+	if !isKing {
+		return strings.TrimSpace(content)
+	}
+	return stripDirectives(content)
 }
 
 func stripDirectives(content string) string {

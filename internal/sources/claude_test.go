@@ -21,6 +21,12 @@ func claude(t *testing.T, agentsJSON string) Claude {
 	// Fixtures name this process so the liveness check passes; a session
 	// whose pid is gone is deliberately dropped.
 	agentsJSON = strings.ReplaceAll(agentsJSON, "__PID__", strconv.Itoa(os.Getpid()))
+	// ...and claim to have started when this process did, measured on the same
+	// fake clock the source reads. Liveness now checks that a pid's process
+	// started when the agent says it did, so a fixture pairing a live pid with
+	// an unrelated start time describes a recycled pid, which is exactly what
+	// that check is there to reject.
+	agentsJSON = strings.ReplaceAll(agentsJSON, "__STARTED__", strconv.FormatInt(fixedNow.UnixMilli(), 10))
 	script := "#!/bin/sh\ncat <<'JSON'\n" + agentsJSON + "\nJSON\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -39,7 +45,7 @@ func fetch(t *testing.T, c Claude) []feed.Item {
 
 const blockedBg = `[{"id":"ad19117b","sessionId":"ad19117b-67a4-4ad0-a333-e39fcc756240",
   "cwd":"/repos/teploy","kind":"background","name":"resume-background-agent",
-  "status":"idle","state":"blocked","pid":__PID__,"startedAt":1783971598326}]`
+  "status":"idle","state":"blocked","pid":__PID__,"startedAt":__STARTED__}]`
 
 func TestClaudeCodesOwnBlockedStateIsTrustedRatherThanRederived(t *testing.T) {
 	items := fetch(t, claude(t, blockedBg))
@@ -88,7 +94,7 @@ func TestABackgroundAgentIsAttachedToNotResumed(t *testing.T) {
 
 func TestABusySessionIsRunningAndOffersNothing(t *testing.T) {
 	items := fetch(t, claude(t, `[{"sessionId":"s1","cwd":"/repos/neutron","kind":"interactive",
-	  "name":"neutron-79","status":"busy","pid":__PID__,"startedAt":1784915267440}]`))
+	  "name":"neutron-79","status":"busy","pid":__PID__,"startedAt":__STARTED__}]`))
 	if items[0].State != feed.StateRunning {
 		t.Fatalf("a busy session is running, got %q", items[0].State)
 	}
@@ -119,7 +125,7 @@ func TestTitleFallsBackToTheProjectWhenUnnamed(t *testing.T) {
 
 func TestSinceFallsBackToStartedAtWhenNoTranscriptIsFound(t *testing.T) {
 	items := fetch(t, claude(t, blockedBg))
-	want := time.UnixMilli(1783971598326).UTC().Format(time.RFC3339)
+	want := fixedNow.UTC().Format(time.RFC3339) // the fixture's __STARTED__
 	if items[0].Since != want {
 		t.Fatalf("got %q, want %q", items[0].Since, want)
 	}
