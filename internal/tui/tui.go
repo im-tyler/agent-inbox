@@ -18,6 +18,7 @@ import (
 
 	"github.com/im-tyler/agent-inbox/internal/board"
 	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/ident"
 	"github.com/im-tyler/agent-inbox/internal/inbox"
 	"github.com/im-tyler/agent-inbox/internal/termtext"
 )
@@ -66,6 +67,12 @@ type Model struct {
 	// Tab-focus state: false = chat focused (default), true = sidebar focused.
 	focusSidebar  bool
 	sidebarCursor int // 1-based project index currently highlighted in sidebar
+
+	// activeGroup is which supervisor's tab is open, 0-based. Every view in the
+	// main screen is scoped to it: the conversation is that group's king, the
+	// sidebar is that group's fleet, and a message goes to that king with that
+	// fleet as its allowlist.
+	activeGroup int
 
 	toast   string
 	toastAt time.Time
@@ -641,11 +648,13 @@ func helpText() string {
 		"    alt+enter     newline",
 		"    pgup/pgdn     scroll the conversation",
 		"    tab           focus the fleet",
+		"    shift+tab     next group (when the fleet is split)",
 		"    ?             close this help",
 		"    ctrl+c        quit",
 		"",
 		"  fleet focused (tab):",
 		"    j/k or ↑↓     move through the fleet",
+		"    h/l or [ ]    previous / next group",
 		"    enter         open the project's detail view",
 		"    i             session inbox",
 		"    n             new project",
@@ -666,7 +675,8 @@ func helpText() string {
 
 // (max is the Go 1.21+ builtin — no local definition needed.)
 
-// kingIndex resolves the supervisor's position in the current project list.
+// kingIndex resolves the active group's supervisor to a position in the
+// current project list.
 //
 // Resolved on each use rather than stored. The old code kept two integers —
 // one hardcoded to 1 for the dashboard, one set by pressing K — which could
@@ -676,4 +686,98 @@ func helpText() string {
 //
 // Returns 0 when there is no supervisor, which callers must treat as "no
 // conversation to show" rather than as an index.
-func (m Model) kingIndex() int { return m.inbox.KingIndex() }
+func (m Model) kingIndex() int { return m.inbox.KingIndexOf(m.activeGroup) }
+
+// groupMembers is the projects the active tab shows, as 1-based indices into
+// the snapshot: this group's supervisor first, then its fleet in project order.
+//
+// Indices stay global rather than per-tab. Every inbox call the sidebar makes —
+// Cancel, AttachArgs, Detail, RemoveProject — addresses a project by its
+// position in the whole list, and a second numbering scheme that had to be
+// translated at each of those call sites is exactly how off-by-one bugs get in.
+func (m Model) groupMembers(snap []inbox.Project) []int {
+	ki := m.kingIndex()
+	out := make([]int, 0, len(snap))
+	if ki >= 1 && ki <= len(snap) {
+		out = append(out, ki)
+	}
+	fleet := m.inbox.FleetNamesOf(m.activeGroup)
+	want := make(map[string]bool, len(fleet))
+	for _, n := range fleet {
+		want[ident.Name(n)] = true
+	}
+	for i, p := range snap {
+		if i+1 == ki {
+			continue
+		}
+		if want[ident.Name(p.Name)] {
+			out = append(out, i+1)
+		}
+	}
+	return out
+}
+
+// selectableMembers is the active group's rows the cursor may land on: its
+// fleet, without the supervisor. The supervisor's row is a label for the
+// conversation already on screen, not somewhere to navigate to.
+func (m Model) selectableMembers(snap []inbox.Project) []int {
+	ki := m.kingIndex()
+	members := m.groupMembers(snap)
+	sel := make([]int, 0, len(members))
+	for _, idx := range members {
+		if idx != ki {
+			sel = append(sel, idx)
+		}
+	}
+	return sel
+}
+
+// moveSidebar steps the cursor through the active group's fleet.
+//
+// A cursor that is not in the current selection — stale after a tab switch or
+// a removal — snaps to the first row rather than being treated as position
+// zero, which would silently skip a project on the first keypress.
+func (m *Model) moveSidebar(snap []inbox.Project, delta int) {
+	sel := m.selectableMembers(snap)
+	if len(sel) == 0 {
+		m.sidebarCursor = 0
+		return
+	}
+	pos, found := 0, false
+	for i, idx := range sel {
+		if idx == m.sidebarCursor {
+			pos, found = i, true
+			break
+		}
+	}
+	if !found {
+		m.sidebarCursor = sel[0]
+		return
+	}
+	pos = min(max(pos+delta, 0), len(sel)-1)
+	m.sidebarCursor = sel[pos]
+}
+
+// selectGroup switches tabs, wrapping at both ends, and puts the sidebar
+// cursor on something that exists in the new tab. A cursor left pointing into
+// the previous tab's fleet would highlight nothing.
+func (m *Model) selectGroup(g int) {
+	n := m.inbox.GroupCount()
+	if n < 1 {
+		n = 1
+	}
+	m.activeGroup = ((g % n) + n) % n
+	m.resetSidebarCursor()
+	m.mainScrollFromBottom = 0
+	m.mainAutoScroll = true
+}
+
+// resetSidebarCursor points the cursor at the active group's first project,
+// or at nothing when the group has no fleet.
+func (m *Model) resetSidebarCursor() {
+	if sel := m.selectableMembers(m.inbox.Snapshot()); len(sel) > 0 {
+		m.sidebarCursor = sel[0]
+		return
+	}
+	m.sidebarCursor = 0
+}

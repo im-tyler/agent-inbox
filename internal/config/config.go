@@ -59,6 +59,46 @@ type Settings struct {
 	TurnTimeoutSeconds int `json:"turn_timeout_seconds"`
 
 	Projects []Project `json:"projects"`
+
+	// Groups splits the fleet between several supervisors. Empty means one
+	// supervisor over everything, which is what this program did before groups
+	// existed and remains the default.
+	Groups []Group `json:"groups,omitempty"`
+}
+
+// Group assigns a subset of the fleet to a supervisor of its own.
+//
+// A supervisor's context is rebuilt on every turn out of its fleet's status
+// lines and every note that mentions one of them. That is what makes
+// supervision accurate, and it is also what degrades as the fleet grows: seven
+// projects means seven status lines and every note about any of them, on every
+// message. Splitting the fleet gives each supervisor a smaller and sharper
+// brief, and the two conversations stay about different things.
+//
+// The supervisor is provisioned rather than configured, exactly as the single
+// one is — its name and folder are derived from the group's name. King exists
+// for the cases where the derived answer is not wanted.
+type Group struct {
+	Name     string    `json:"name"`
+	Projects []string  `json:"projects"`
+	King     GroupKing `json:"king,omitzero"`
+}
+
+// GroupKing overrides a group's provisioned supervisor. Empty fields keep the
+// derived default.
+type GroupKing struct {
+	Name string `json:"name,omitempty"`
+	Tool string `json:"tool,omitempty"`
+	Dir  string `json:"dir,omitempty"`
+}
+
+// KingName is the supervisor's name for this group: the override when set,
+// otherwise "supervisor-<group>".
+func (g Group) KingName() string {
+	if g.King.Name != "" {
+		return g.King.Name
+	}
+	return DefaultKingName + "-" + g.Name
 }
 
 // DefaultTurnTimeout bounds one agent turn unless config says otherwise.
@@ -134,6 +174,17 @@ func Validate(s *Settings) error {
 	if err := ident.ValidateName(kingName); err != nil {
 		return fmt.Errorf("king.name: %w", err)
 	}
+	// Every name a supervisor will occupy, so a project cannot claim one. With
+	// groups configured the singular supervisor is not provisioned at all —
+	// each group brings its own — so reserving its name too would forbid a
+	// perfectly ordinary project called "supervisor".
+	reserved := map[string]string{}
+	if len(s.Groups) == 0 {
+		reserved[ident.Name(kingName)] = "king.name"
+	}
+	if err := validateGroups(s, reserved); err != nil {
+		return err
+	}
 	if s.King.Tool != "" && !IsKnownTool(s.King.Tool) {
 		return fmt.Errorf("king.tool: unknown tool %q (known: %s)", s.King.Tool, strings.Join(KnownTools, ", "))
 	}
@@ -158,9 +209,9 @@ func Validate(s *Settings) error {
 		if err := ident.ValidateName(p.Name); err != nil {
 			return fmt.Errorf("project %d: %w", i+1, err)
 		}
-		if ident.SameName(p.Name, kingName) {
-			return fmt.Errorf("project %d: %q is reserved for the supervisor — rename the project or set king.name",
-				i+1, p.Name)
+		if where, taken := reserved[ident.Name(p.Name)]; taken {
+			return fmt.Errorf("project %d: %q is reserved for a supervisor (%s) — rename the project or the supervisor",
+				i+1, p.Name, where)
 		}
 		if p.Tool != "" && !IsKnownTool(p.Tool) {
 			return fmt.Errorf("project %d (%s): unknown tool %q (known: %s)",
@@ -182,6 +233,80 @@ func Validate(s *Settings) error {
 		if prev, clash := dirs[ident.Dir(s.King.Dir)]; clash {
 			return fmt.Errorf("king.dir collides with project %d (%s) — the supervisor needs a directory of its own",
 				prev+1, s.Projects[prev].Name)
+		}
+	}
+	for _, g := range s.Groups {
+		if g.King.Dir == "" {
+			continue
+		}
+		if prev, clash := dirs[ident.Dir(g.King.Dir)]; clash {
+			return fmt.Errorf("group %q: king.dir collides with project %d (%s) — a supervisor needs a directory of its own",
+				g.Name, prev+1, s.Projects[prev].Name)
+		}
+	}
+	return validateGroupMembership(s, names)
+}
+
+// validateGroups checks group shape and reserves the names their supervisors
+// will occupy. It runs before the project loop so that a project claiming a
+// supervisor's name is reported against the project, where the user can act
+// on it.
+func validateGroups(s *Settings, reserved map[string]string) error {
+	seen := make(map[string]int, len(s.Groups))
+	for i, g := range s.Groups {
+		if g.Name == "" {
+			return fmt.Errorf("group %d: name is required — it labels the tab and derives the supervisor's name", i+1)
+		}
+		// The group name becomes part of a supervisor name and a directory, so
+		// it has to survive both. Validating it here names the field; letting
+		// it through surfaces later as a supervisor that cannot be created.
+		if err := ident.ValidateName(g.Name); err != nil {
+			return fmt.Errorf("group %d: %w", i+1, err)
+		}
+		if prev, dup := seen[ident.Name(g.Name)]; dup {
+			return fmt.Errorf("group %d (%s): duplicate name, already used by group %d", i+1, g.Name, prev+1)
+		}
+		seen[ident.Name(g.Name)] = i
+
+		king := g.KingName()
+		if err := ident.ValidateName(king); err != nil {
+			return fmt.Errorf("group %d (%s): supervisor name %q: %w", i+1, g.Name, king, err)
+		}
+		if where, dup := reserved[ident.Name(king)]; dup {
+			return fmt.Errorf("group %d (%s): supervisor name %q is already used by %s", i+1, g.Name, king, where)
+		}
+		reserved[ident.Name(king)] = fmt.Sprintf("group %q", g.Name)
+
+		if g.King.Tool != "" && !IsKnownTool(g.King.Tool) {
+			return fmt.Errorf("group %d (%s): king.tool: unknown tool %q (known: %s)",
+				i+1, g.Name, g.King.Tool, strings.Join(KnownTools, ", "))
+		}
+	}
+	return nil
+}
+
+// validateGroupMembership checks that every project a group names exists, and
+// that no project is claimed twice.
+//
+// A project named by no group is not an error. It joins the first group, so
+// that adding a project — from config or from the dashboard — can never leave
+// it in a fleet no supervisor can see.
+func validateGroupMembership(s *Settings, names map[string]int) error {
+	if len(s.Groups) == 0 {
+		return nil
+	}
+	claimed := make(map[string]string, len(names))
+	for _, g := range s.Groups {
+		for _, p := range g.Projects {
+			key := ident.Name(p)
+			if _, ok := names[key]; !ok {
+				return fmt.Errorf("group %q names project %q, which is not in projects", g.Name, p)
+			}
+			if prev, dup := claimed[key]; dup {
+				return fmt.Errorf("project %q is in both group %q and group %q — a project belongs to one supervisor",
+					p, prev, g.Name)
+			}
+			claimed[key] = g.Name
 		}
 	}
 	return nil

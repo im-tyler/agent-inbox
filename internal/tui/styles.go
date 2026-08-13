@@ -31,4 +31,12 @@ var (
 	selectedStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("236")). // dark gray
 			Foreground(lipgloss.Color("15"))   // bright white
+
+	// activeTabStyle marks which supervisor you are typing to. Underlined as
+	// well as bright, so the distinction survives a terminal whose palette
+	// renders bold and muted at similar weights.
+	activeTabStyle = lipgloss.NewStyle().
+			Bold(true).
+			Underline(true).
+			Foreground(lipgloss.Color("15"))
 )

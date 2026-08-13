@@ -80,20 +80,20 @@ func run() error {
 	for i, p := range cfg.Projects {
 		projects[i] = &inbox.Project{Name: p.Name, Tool: p.Tool, Dir: p.Dir, Status: driver.StatusIdle}
 	}
-	// The supervisor is provisioned, not configured. It is prepended rather
-	// than written into config.json's projects: it is not one of the user's
-	// projects, and it should not be removable by editing that list.
-	king, err := supervisorProject(dd, cfg)
+	// Supervisors are provisioned, not configured. They are prepended rather
+	// than written into config.json's projects: they are not the user's
+	// projects, and they should not be removable by editing that list.
+	kings, groups, err := supervisors(dd, cfg)
 	if err != nil {
 		return err
 	}
-	projects = withSupervisor(king, projects)
+	projects = withSupervisors(kings, projects)
 	inbox.LoadState(*statePath, projects)
 
 	in := inbox.New(projects, drivers, *statePath).
 		WithConfigPath(*cfgPath).
 		WithNotesPath(filepath.Join(dd, "notes.json")).
-		WithKing(king.Name).
+		WithGroups(groups).
 		WithKingRounds(cfg.King.Rounds).
 		WithTurnTimeout(cfg.TurnTimeout())
 	defer in.Close()

@@ -138,9 +138,9 @@ func TestFleetSummaryWrapsRatherThanTruncates(t *testing.T) {
 	}
 }
 
-// The count includes the king. A total that silently excluded it never
-// matched the rows drawn above it.
-func TestFleetSummaryCountsTheKing(t *testing.T) {
+// The total is rendered as given, and a fleet with nothing in flight gets one
+// line rather than a line plus an empty one.
+func TestFleetSummaryRendersTheTotal(t *testing.T) {
 	if got := fleetSummary(4, 0, 0, 40); got[0] != "4 projects" {
 		t.Errorf("got %q, want 4 projects", got[0])
 	}

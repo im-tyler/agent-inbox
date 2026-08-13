@@ -74,12 +74,16 @@ type Inbox struct {
 	// that started it.
 	rounds int
 
-	// kingName identifies the supervisor. It is a name and not an index
-	// because the supervisor has to survive the list moving: adding and
-	// removing projects reorders indices, and the king was previously
-	// "whichever project happens to be first", which made the supervisor an
-	// accident of config ordering.
-	kingName string
+	// groups partition the fleet: each one is a supervisor and the projects it
+	// oversees. There is always at least one once WithGroups has run, and a
+	// fleet with no configured groups is expressed as a single group holding
+	// everything — so the code below has one shape to handle, not two.
+	//
+	// Membership is by name rather than index, because the supervisor has to
+	// survive the list moving: adding and removing projects reorders indices,
+	// and the king was once "whichever project happens to be first", which made
+	// the supervisor an accident of config ordering.
+	groups []Group
 
 	// notes are the supervisor's durable facts about the fleet.
 	notes []Note
@@ -270,56 +274,177 @@ func (in *Inbox) WithKingRounds(n int) *Inbox {
 	return in
 }
 
-// WithKing names the project that acts as supervisor. Set once at startup.
-func (in *Inbox) WithKing(name string) *Inbox {
+// Group is one supervisor and the projects it oversees.
+//
+// Splitting a fleet is not organisation for its own sake. A supervisor's whole
+// context is rebuilt each turn from its fleet's status lines and the notes that
+// mention them, so a fleet of seven spends every turn describing four projects
+// the question was not about. Two supervisors over three projects each are both
+// cheaper and more accurate than one over six.
+type Group struct {
+	// Name labels the tab. Empty for the implicit single group, which has no
+	// tab to label.
+	Name string
+	// King is the supervisor's project name.
+	King string
+	// Projects are the members, by name. Empty means this group takes whatever
+	// is left over, which is how the single-supervisor case is expressed.
+	Projects []string
+}
+
+// WithGroups sets the fleet's partition. Set once at startup.
+//
+// An empty partition is normalised to one anonymous group with no explicit
+// members, so every reader downstream sees the same shape whether or not the
+// user configured groups.
+func (in *Inbox) WithGroups(groups []Group) *Inbox {
 	in.mu.Lock()
-	in.kingName = name
+	if len(groups) == 0 {
+		groups = []Group{{}}
+	}
+	in.groups = append([]Group(nil), groups...)
 	in.mu.Unlock()
 	return in
 }
 
-// KingName is the supervisor's project name, empty when none is configured.
-func (in *Inbox) KingName() string {
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	return in.kingName
+// WithKing is the single-supervisor shorthand: one group, that king, and every
+// other project as its fleet. Most installs are this, and they should not have
+// to describe a partition in order to say so.
+func (in *Inbox) WithKing(name string) *Inbox {
+	return in.WithGroups([]Group{{King: name}})
 }
 
-// KingIndex resolves the supervisor to a 1-based index, or 0 when it is not in
-// the list. Callers that hold an index across time must re-resolve: a removal
-// shifts everything after it.
-func (in *Inbox) KingIndex() int {
+// Groups returns a copy of the partition. Always at least one entry.
+func (in *Inbox) Groups() []Group {
 	in.mu.Lock()
 	defer in.mu.Unlock()
+	return in.groupsLocked()
+}
+
+func (in *Inbox) groupsLocked() []Group {
+	if len(in.groups) == 0 {
+		return []Group{{}}
+	}
+	out := make([]Group, len(in.groups))
+	copy(out, in.groups)
+	return out
+}
+
+// GroupCount is how many supervisors the fleet is split between.
+func (in *Inbox) GroupCount() int {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return len(in.groupsLocked())
+}
+
+// KingNameOf is group g's supervisor, or "" when g is out of range or the
+// group has no supervisor.
+func (in *Inbox) KingNameOf(g int) string {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	gs := in.groupsLocked()
+	if g < 0 || g >= len(gs) {
+		return ""
+	}
+	return gs[g].King
+}
+
+// KingIndexOf resolves group g's supervisor to a 1-based project index, or 0
+// when it is not in the list. Callers that hold an index across time must
+// re-resolve: a removal shifts everything after it.
+func (in *Inbox) KingIndexOf(g int) int {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	gs := in.groupsLocked()
+	if g < 0 || g >= len(gs) || gs[g].King == "" {
+		return 0
+	}
 	for i, p := range in.projects {
-		if strings.EqualFold(p.Name, in.kingName) {
+		if strings.EqualFold(p.Name, gs[g].King) {
 			return i + 1
 		}
 	}
 	return 0
 }
 
-// IsKing reports whether a project name is the supervisor's.
+// IsKing reports whether a project name belongs to any group's supervisor.
+// Rendering asks this — "is this row a supervisor" — and the answer must not
+// depend on which tab happens to be open.
 func (in *Inbox) IsKing(name string) bool {
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	return in.kingName != "" && strings.EqualFold(name, in.kingName)
+	return in.isKingLocked(name)
 }
 
-// FleetNames is every project the supervisor can dispatch to: all of them
-// except itself. A king that could send to itself would wait for a reply from
-// the session that is waiting to send it.
-func (in *Inbox) FleetNames() []string {
+func (in *Inbox) isKingLocked(name string) bool {
+	for _, g := range in.groupsLocked() {
+		if g.King != "" && ident.SameName(name, g.King) {
+			return true
+		}
+	}
+	return false
+}
+
+// FleetNamesOf is every project group g's supervisor may dispatch to.
+//
+// No supervisor is ever in its own fleet: a king that could send to itself
+// would wait for a reply from the session that is waiting to send it. Neither
+// is any other group's supervisor — the partition is the point.
+//
+// The first group also absorbs every project no group claimed. A project can
+// be added at runtime, from the dashboard or by editing config, and a project
+// that belonged to no supervisor would sit in the fleet unreachable and
+// unasked. Landing it somewhere beats losing it.
+func (in *Inbox) FleetNamesOf(g int) []string {
 	in.mu.Lock()
 	defer in.mu.Unlock()
+	gs := in.groupsLocked()
+	if g < 0 || g >= len(gs) {
+		return nil
+	}
+
+	claimed := make(map[string]bool)
+	for _, grp := range gs {
+		for _, n := range grp.Projects {
+			claimed[ident.Name(n)] = true
+		}
+	}
+	want := make(map[string]bool, len(gs[g].Projects))
+	for _, n := range gs[g].Projects {
+		want[ident.Name(n)] = true
+	}
+
 	out := make([]string, 0, len(in.projects))
 	for _, p := range in.projects {
-		if in.kingName != "" && strings.EqualFold(p.Name, in.kingName) {
+		if in.isKingLocked(p.Name) {
 			continue
 		}
-		out = append(out, p.Name)
+		key := ident.Name(p.Name)
+		if want[key] || (g == 0 && !claimed[key]) {
+			out = append(out, p.Name)
+		}
 	}
 	return out
+}
+
+// GroupOfProject is the group a project belongs to, or 0 for anything
+// unclaimed — which is where FleetNamesOf puts it too. A supervisor reports
+// the group it leads.
+func (in *Inbox) GroupOfProject(name string) int {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	gs := in.groupsLocked()
+	for i, g := range gs {
+		if g.King != "" && ident.SameName(name, g.King) {
+			return i
+		}
+		for _, n := range g.Projects {
+			if ident.SameName(n, name) {
+				return i
+			}
+		}
+	}
+	return 0
 }
 
 // WithConfigPath enables runtime project addition via AddProject; the path
@@ -379,9 +504,9 @@ func (in *Inbox) addProject(name, tool, dir, sessionID, forkFrom string) error {
 			return fmt.Errorf("directory %q is already used by project %q", dir, p.Name)
 		}
 	}
-	if in.kingName != "" && ident.SameName(name, in.kingName) {
+	if in.isKingLocked(name) {
 		in.mu.Unlock()
-		return fmt.Errorf("%q is reserved for the supervisor", name)
+		return fmt.Errorf("%q is reserved for a supervisor", name)
 	}
 	if _, ok := in.drivers[tool]; !ok {
 		in.mu.Unlock()
@@ -856,12 +981,12 @@ func (in *Inbox) RemoveProject(idx int) error {
 		return err
 	}
 	name := p.Name
-	// The supervisor is not one of the projects you manage — it is the thing
-	// managing them. Removing it would leave a UI whose main view has no
+	// A supervisor is not one of the projects you manage — it is the thing
+	// managing them. Removing it would leave a tab whose main view has no
 	// conversation to show and no way to get one back.
-	if in.kingName != "" && ident.SameName(name, in.kingName) {
+	if in.isKingLocked(name) {
 		in.mu.Unlock()
-		return fmt.Errorf("%s is the supervisor — it cannot be removed", name)
+		return fmt.Errorf("%s is a supervisor — it cannot be removed", name)
 	}
 	in.mu.Unlock()
 

@@ -163,6 +163,51 @@ silence.
 row is always a live process, so it is *forked* (`--fork-session`): the new
 session inherits the original's history and the original is left untouched.
 
+## Groups — more than one supervisor
+
+A supervisor's context is rebuilt from scratch on every turn out of its fleet's
+status lines and the notes that mention them. That is what makes supervision
+accurate, and it is also what degrades as the fleet grows: seven projects means
+seven status lines and every note about any of them, on every message you send.
+
+Groups split the fleet. Each one gets a supervisor of its own and a tab of its
+own, so two conversations stay about different things.
+
+```json
+"groups": [
+  { "name": "infra",   "projects": ["teploy", "infra"] },
+  { "name": "product", "projects": ["neutron", "fylun"] }
+]
+```
+
+```
+╭──────────────────────────────────────────────────────────────╮
+│ agent-inbox                                                  │
+│ infra 1●  ·  product ⠋                                       │
+│ infra  claude                              fleet             │
+│                                            ★ supervisor-infra│
+│                                              teploy        ● │
+│                                              infra         · │
+│                                            2 projects        │
+│                                            1 waiting         │
+```
+
+Each group's supervisor is provisioned the same way the single one is — named
+`supervisor-<group>`, in a folder of its own. Override any of that with a
+`king` block inside the group (`name`, `tool`, `dir`).
+
+A project belongs to exactly one group, and validation rejects a config where
+one is claimed twice. A project no group names — including one added later from
+the dashboard — joins the first group, so a project is never left in the fleet
+with no supervisor able to see it.
+
+`shift+tab` cycles tabs from the composer; `[` and `]` (or `h`/`l`) do it with
+the fleet focused. Each tab carries its own count of what is waiting, so a
+project needing you in a tab you do not have open still says so.
+
+Omit `groups` entirely for one supervisor over everything, which is the default
+and what most installs want.
+
 ## Session inbox — `i`, or headless
 
 The dashboard *drives* sessions. The inbox does the opposite: it only reads
@@ -226,7 +271,9 @@ add to it with `n`. Under `king`, `rounds` is the dispatch budget and the
 optional `name`, `tool` and `dir` override the supervisor; its name is reserved,
 so a project may not claim it. `turn_timeout_seconds` bounds one agent turn — 0
 means the 30-minute default, -1 means no limit. OpenCode defaults to a **free,
-no-key** model so those projects work without configuring a provider.
+no-key** model so those projects work without configuring a provider. An
+optional `groups` array splits the fleet between several supervisors — see
+[Groups](#groups--more-than-one-supervisor).
 
 Everything under the data directory is written `0600` in directories written
 `0700`: it holds assistant output and the paths of your repositories.
@@ -249,6 +296,7 @@ always shows the keys for whichever one you are in.
 | `Alt+Enter` | newline |
 | `PgUp` / `PgDn` | scroll the conversation |
 | `Tab` | focus the fleet |
+| `Shift+Tab` | next group, when the fleet is split |
 | `?` | help |
 | `Ctrl+C` | quit |
 
@@ -257,6 +305,7 @@ always shows the keys for whichever one you are in.
 | Key | Action |
 |---|---|
 | `j` / `k` | move through the fleet |
+| `[` / `]` or `h` / `l` | previous / next group |
 | `Enter` | open the selected project's detail view |
 | `i` | session inbox |
 | `n` | new project |

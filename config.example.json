@@ -13,5 +13,11 @@
     { "name": "project-a", "tool": "claude",   "dir": "/path/to/your/project-a" },
     { "name": "project-b", "tool": "opencode", "dir": "/path/to/your/project-b" },
     { "name": "project-c", "tool": "codex",    "dir": "/path/to/your/project-c" }
+  ],
+
+  "_comment_groups": "Optional. Split the fleet between several supervisors, one per tab. A supervisor's context is rebuilt from its fleet on every turn, so six projects means six status lines on every message; two supervisors over three each are cheaper and sharper. Each group gets its own provisioned supervisor named supervisor-<group>. A project not named by any group joins the first one. Omit this entirely for a single supervisor over everything.",
+  "groups": [
+    { "name": "infra",   "projects": ["project-a", "project-b"] },
+    { "name": "product", "projects": ["project-c"] }
   ]
 }

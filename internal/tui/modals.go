@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,15 +53,12 @@ func (m *Model) normalizeSelection() {
 	}
 	m.selected = clamp(m.selected)
 	m.sidebarCursor = clamp(m.sidebarCursor)
-	// Prefer a non-supervisor row; fall back to the supervisor only when it is
-	// the only thing left.
-	if m.inbox.IsKing(snap[m.sidebarCursor-1].Name) {
-		for i, p := range snap {
-			if !m.inbox.IsKing(p.Name) {
-				m.sidebarCursor = i + 1
-				break
-			}
-		}
+	// The cursor has to land on a row this tab is drawing. Clamping to the
+	// whole project list is not enough once the fleet is split: an in-range
+	// index can name a project belonging to another supervisor, which the
+	// sidebar is not showing and which a/d/t/x would then act on unseen.
+	if !slices.Contains(m.selectableMembers(snap), m.sidebarCursor) {
+		m.resetSidebarCursor()
 	}
 }
 
