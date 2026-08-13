@@ -38,6 +38,15 @@ type Settings struct {
 		Name string `json:"name"`
 		// Tool is the driver it runs on. Defaults to "claude".
 		Tool string `json:"tool"`
+		// Autonomous lets the supervisor start a turn nobody asked for, when a
+		// project in its fleet finishes or gets stuck. Off by default, and the
+		// default matters: this is the one thing here that spends money while
+		// nobody is watching.
+		Autonomous bool `json:"autonomous"`
+		// WakesPerHour bounds that. 0 selects the default; the value is
+		// clamped. It is separate from Rounds because they bound different
+		// things — how often it may start, and how far it may go once started.
+		WakesPerHour int `json:"wakes_per_hour"`
 		// Dir is the folder its session lives in. Defaults to a "supervisor"
 		// directory beside config.json, created on first run.
 		//
@@ -190,6 +199,9 @@ func Validate(s *Settings) error {
 	}
 	if s.King.Rounds < 0 {
 		return fmt.Errorf("king.rounds: must not be negative, got %d", s.King.Rounds)
+	}
+	if s.King.WakesPerHour < 0 {
+		return fmt.Errorf("king.wakes_per_hour: must not be negative, got %d", s.King.WakesPerHour)
 	}
 	if s.Claude.PermissionMode != "" && !contains(ClaudePermissionModes, s.Claude.PermissionMode) {
 		return fmt.Errorf("claude.permission_mode: unknown mode %q (known: %s)",

@@ -604,6 +604,12 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSidebarKey(msg)
 	}
 
+	// Tell the inbox whether a draft exists, so an autonomous supervisor does
+	// not start a turn under someone who is mid-message. Done on every key
+	// rather than on send, because the whole point is the window between
+	// starting to type and pressing enter.
+	defer func() { m.inbox.SetDraft(strings.TrimSpace(m.mainInput.Value()) != "") }()
+
 	// Chat-focused keys.
 	switch msg.String() {
 	case "enter":

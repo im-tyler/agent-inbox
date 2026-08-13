@@ -7,7 +7,8 @@
   "turn_timeout_seconds": 0,
 
   "_comment_king": "The supervisor is provisioned, not configured — it gets a folder of its own under the data dir. Override its name, tool or dir here if you want to. Its name is reserved: a project may not claim it.",
-  "king": { "rounds": 1 },
+  "_comment_autonomous": "autonomous lets the supervisor start a turn nobody asked for, when a project finishes or gets stuck. Off by default: it is the only thing here that spends money while nobody is watching. wakes_per_hour bounds how often it may start (default 4, capped at 30) and is separate from rounds, which bounds how far it may go once started. Every wake writes a line into the supervisor's thread naming what woke it.",
+  "king": { "rounds": 1, "autonomous": false, "wakes_per_hour": 4 },
 
   "projects": [
     { "name": "project-a", "tool": "claude",   "dir": "/path/to/your/project-a" },

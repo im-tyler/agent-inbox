@@ -100,6 +100,9 @@ func run() error {
 		WithTurnTimeout(cfg.TurnTimeout()).
 		WithUsage(&usage.Claude{}).
 		WithGitRefresh(inbox.DefaultGitRefresh)
+	// Autonomy last, and off unless config asks for it. It is the only thing
+	// here that starts an agent turn nobody typed a message for.
+	in.WithAutonomy(cfg.King.Autonomous, cfg.King.WakesPerHour, in.HasDraft)
 	defer in.Close()
 	eventsDir := filepath.Join(dd, "events")
 

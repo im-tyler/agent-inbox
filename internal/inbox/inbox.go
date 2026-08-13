@@ -145,6 +145,14 @@ type Inbox struct {
 	usageSrc  usage.Source
 	usageSnap usage.Snapshot
 	usageErr  error
+
+	// overseer wakes a supervisor when its fleet changes, or nil when autonomy
+	// is off — which is the default, because it is the one thing here that
+	// spends money while nobody is watching.
+	overseer *Overseer
+	// draft is whether the user has an unsent message in the composer, told to
+	// us by the UI. See SetDraft.
+	draft bool
 	// wg tracks every background goroutine so Close can wait for them.
 	// Signalling alone is not enough: a send goroutine already past the
 	// stop check still has a write to make.
@@ -246,6 +254,8 @@ func (in *Inbox) Close() {
 		// Background work is cancelled, not waited out. A git call has its own
 		// five-second deadline, and quitting should not sit through it.
 		in.bgCancel()
+		// A scheduled wake must not fire into an inbox that is shutting down.
+		in.oversight().Stop()
 
 		in.mu.Lock()
 		for name, cancel := range in.cancels {

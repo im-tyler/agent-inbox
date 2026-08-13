@@ -140,6 +140,11 @@ func (in *Inbox) Ingest(eventsDir string) []string {
 		}
 		if name, ok := in.applyEvent(ev); ok {
 			updated = append(updated, name)
+			// The supervisor, if it is allowed to notice things. Told the
+			// reason as well as the name: "finished" and "stuck on a permission
+			// prompt" are the two cases, and they are what it has to choose
+			// between.
+			in.oversight().Notice(name, string(ParseReason(string(ev.Reason))))
 		}
 		os.Remove(full)
 	}
