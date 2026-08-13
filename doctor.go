@@ -151,6 +151,10 @@ func helperChecks() []check {
 	}{
 		{"sqlite3", "reads the OpenCode session database", true},
 		{"lsof", "decides which sessions are live", true},
+		// Without git the fleet loses branch state and the supervisor loses the
+		// one question it can answer without spending an agent turn. Everything
+		// else still works, so this is a warning.
+		{"git", "reads branch state and answers [git: ...] without an agent turn", true},
 		{"tmux", "types into panes", false},
 		{"zellij", "types into panes", false},
 	} {

@@ -149,6 +149,25 @@ repository, and it cannot read the fleet's files.
    ...]` retracts one. Notes are injected into later turns and evicted by
    relevance rather than age — the oldest note is usually the most load-bearing
    one, so plain FIFO discards exactly the wrong end.
+4. **Free questions.** `[git: PROJECT status|diff|log]` is answered by
+   agent-inbox itself, from a subprocess. Everything else the supervisor wants
+   to know costs a model invocation in that project's session; this costs
+   milliseconds and no tokens, and returns the same answer every time. It is
+   told so explicitly, because a model that does not know the cheap path exists
+   will spend a turn on it.
+
+Every project's branch, divergence and dirty state also ride along in the
+injected fleet listing, so "is neutron actually mid-change" needs no question at
+all. A trailing `*` on a sidebar row means uncommitted changes — the one thing
+the status glyph cannot tell you, since an agent that reports it is done and
+leaves a clean tree did nothing.
+
+**Trust.** `[git: ...]` is allowlisted exactly as `[send to ...]` is: the target
+must be in that turn's fleet and the subcommand comes from a closed set of
+three. The supervisor's reply is model output shaped by agents that have read
+repositories, issues and web pages, so a name appearing in it is a name and not
+authorisation. Nothing assembled from that text reaches git, which is invoked as
+argv and never through a shell.
 
 **Round budget.** By default the supervisor gets one dispatch round per message:
 ask, read every reply, answer you. `king.rounds` (max 5) lets it act on what a

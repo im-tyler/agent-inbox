@@ -408,8 +408,14 @@ func (m Model) detailBodyLines() []string {
 	detailW := m.detailWidth()
 
 	var lines []string
-	lines = append(lines, mutedStyle.Render(fmt.Sprintf("dir: %s   session: %s   turns: %d",
-		shortPath(p.Dir), shortSession(p.SessionID), len(p.History))))
+	head := fmt.Sprintf("dir: %s   session: %s   turns: %d",
+		shortPath(p.Dir), shortSession(p.SessionID), len(p.History))
+	// The detail view has the width the sidebar does not, so this is where the
+	// tree gets stated in full rather than compressed to a star.
+	if g := p.Git.Summary(); g != "" {
+		head += "   git: " + g
+	}
+	lines = append(lines, mutedStyle.Render(head))
 	lines = append(lines, "")
 
 	if len(p.History) == 0 {

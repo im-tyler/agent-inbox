@@ -95,7 +95,8 @@ func run() error {
 		WithNotesPath(filepath.Join(dd, "notes.json")).
 		WithGroups(groups).
 		WithKingRounds(cfg.King.Rounds).
-		WithTurnTimeout(cfg.TurnTimeout())
+		WithTurnTimeout(cfg.TurnTimeout()).
+		WithGitRefresh(inbox.DefaultGitRefresh)
 	defer in.Close()
 	eventsDir := filepath.Join(dd, "events")
 

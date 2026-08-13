@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/git"
 	"github.com/im-tyler/agent-inbox/internal/ident"
 )
 
@@ -118,15 +119,19 @@ func (in *Inbox) kingDispatchWatcher(kingName string, handle TurnHandle, allowed
 // against. allowed is the exact fleet this turn may address.
 func (in *Inbox) dispatchDirectives(kingName, response string, budget int, prev map[string]string, allowed []string) {
 	dirs := ParseKingDirectives(response)
-	if len(dirs) == 0 {
+	gits := ParseGitDirectives(response)
+	if len(dirs) == 0 && len(gits) == 0 {
 		return
 	}
+	// A git query costs nothing to answer, but the round it lands in ends in a
+	// summary turn, and that is an agent turn like any other. So the budget
+	// governs both.
 	if budget <= 0 {
 		// Silence here reads as the king deciding not to follow up. It did
 		// decide to; the budget stopped it, and only this line says so.
 		in.noteToKing(kingName, fmt.Sprintf(
 			"%d more dispatch(es) requested but this turn's round budget is spent — ask again to continue (king.rounds = %d)",
-			len(dirs), in.kingRounds()))
+			len(dirs)+len(gits), in.kingRounds()))
 		return
 	}
 
@@ -163,7 +168,14 @@ func (in *Inbox) dispatchDirectives(kingName, response string, budget int, prev 
 		current[key] = d.Message
 		order = append(order, key)
 	}
-	if len(order) == 0 {
+	// Git queries go into the fingerprint too, under a key no project name can
+	// take — ident.ValidateName rejects a colon. Without them, a supervisor
+	// repeating the same git query every round would look like an empty
+	// dispatch each time and never trip the loop check.
+	for _, g := range gits {
+		current["git:"+ident.Name(g.Target)] = strings.ToLower(strings.TrimSpace(g.Kind))
+	}
+	if len(current) == 0 {
 		return
 	}
 	// A king that asks the same projects the same thing twice running is not
@@ -174,7 +186,7 @@ func (in *Inbox) dispatchDirectives(kingName, response string, budget int, prev 
 		return
 	}
 
-	var handles []TurnHandle
+	var items []pending
 	var sent []string
 	for _, key := range order {
 		// A failed dispatch must not get a watcher. Otherwise the watcher
@@ -188,17 +200,56 @@ func (in *Inbox) dispatchDirectives(kingName, response string, budget int, prev 
 			in.noteToKing(kingName, fmt.Sprintf("%s: %v — nothing sent", key, err))
 			continue
 		}
-		handles = append(handles, h)
+		items = append(items, pending{name: h.Project, handle: &h})
 		sent = append(sent, h.Project)
 	}
-	if len(handles) == 0 {
+	// Git queries join the same round. The supervisor asked for both in one
+	// reply and should get both back together, rather than learning the cheap
+	// answer a round after the expensive one.
+	items = append(items, in.answerGitDirectives(kingName, response, allowSet)...)
+	if len(items) == 0 {
 		return
 	}
-	if prev != nil {
+	if prev != nil && len(sent) > 0 {
 		in.noteToKing(kingName, fmt.Sprintf("follow-up round: %s (%d left after this)",
 			strings.Join(sent, ", "), budget-1))
 	}
-	in.track(func() { in.kingRoundWatcher(kingName, handles, budget-1, current, allowed) })
+	in.track(func() { in.kingRoundWatcher(kingName, items, budget-1, current, allowed) })
+}
+
+// answerGitDirectives runs every [git: PROJECT kind] in a response and returns
+// the answers, ready to go into the round.
+//
+// The allowlist is the same one [send to ...] uses, and for the same reason:
+// this response is model output shaped by replies from agents that have read
+// repositories, issues and web pages. A project name appearing in that text is
+// a name, not authorisation. The subcommand comes from a closed set for the
+// same reason — nothing here is assembled from the model's words.
+func (in *Inbox) answerGitDirectives(kingName, response string, allowSet map[string]bool) []pending {
+	var out []pending
+	for _, d := range ParseGitDirectives(response) {
+		key := ident.Name(d.Target)
+		if !allowSet[key] {
+			in.noteToKing(kingName, fmt.Sprintf("%s is not in this turn's fleet — no git query run", d.Target))
+			continue
+		}
+		kind, ok := git.ParseKind(d.Kind)
+		if !ok {
+			in.noteToKing(kingName, fmt.Sprintf("%s: %q is not a git query I can answer", d.Target, d.Kind))
+			continue
+		}
+		answer, err := in.QueryGit(key, kind)
+		switch {
+		case err != nil:
+			answer = fmt.Sprintf("(git %s failed: %v)", kind, err)
+		case strings.TrimSpace(answer) == "":
+			// A clean tree and an empty diff are real answers. Returning
+			// nothing would read as a failed query.
+			answer = fmt.Sprintf("(git %s: nothing to report)", kind)
+		}
+		out = append(out, pending{name: fmt.Sprintf("%s git %s", key, kind), answer: answer})
+	}
+	return out
 }
 
 // sameDispatch reports whether two rounds asked the same projects the same
@@ -286,7 +337,14 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 					lastMsg = "no recent activity"
 				}
 			}
-			b.WriteString(fmt.Sprintf("- %s (%s) [%s]: %s\n", p.Name, p.Tool, status, lastMsg))
+			// The tree, when there is one. This costs nothing to inject and
+			// answers a question that would otherwise cost a whole agent turn
+			// in that project's session to ask.
+			tree := ""
+			if g := p.Git.Summary(); g != "" {
+				tree = " {" + g + "}"
+			}
+			b.WriteString(fmt.Sprintf("- %s (%s) [%s]%s: %s\n", p.Name, p.Tool, status, tree, lastMsg))
 		}
 	}
 	if found && firstProject != "" {
@@ -302,6 +360,16 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 		b.WriteString(fmt.Sprintf("[send to %s: describe the task here]\n\n", firstProject))
 		b.WriteString(fmt.Sprintf("Example: [send to %s: what are you working on?]\n", firstProject))
 		b.WriteString("You can include multiple [send to ...] lines — they run in parallel, and you get every reply back before you answer the user.\n")
+
+		// Stating the cheap path explicitly, because a model that does not know
+		// it exists will spend an agent turn on a question a subprocess
+		// answers. Asking a project anything costs a model invocation in that
+		// project's session; this costs nothing and is exact.
+		b.WriteString("\nFor git, do not spend a question on a project. Ask me directly:\n")
+		b.WriteString(fmt.Sprintf("[git: %s status]\n", firstProject))
+		b.WriteString("Also 'diff' (changed files, with counts) and 'log' (the last 20 commits).")
+		b.WriteString(" These are free and exact — no agent is involved and no tokens are spent.")
+		b.WriteString(" Use them before asking a project what it has changed.\n")
 	}
 
 	// The note syntax is not conditional on having a fleet. A supervisor
@@ -349,6 +417,43 @@ func ParseKingDirectives(response string) []KingDirective {
 	return dirs
 }
 
+// GitDirective is a parsed [git: PROJECT kind] line.
+type GitDirective struct {
+	Target string
+	Kind   string
+}
+
+// ParseGitDirectives extracts [git: PROJECT status|diff|log] lines.
+//
+// Same line-oriented shape as the other directives: a directive is a whole
+// line, so prose that mentions the syntax cannot become one. Neither field is
+// validated here — the target is checked against the turn's fleet and the kind
+// against a closed set, both at the point of use, because that is where the
+// authority to act lives.
+func ParseGitDirectives(response string) []GitDirective {
+	var out []GitDirective
+	for _, line := range strings.Split(response, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToLower(line), "[git:") || !strings.HasSuffix(line, "]") {
+			continue
+		}
+		body := strings.TrimSpace(strings.TrimSuffix(line[5:], "]"))
+		target, kind, ok := strings.Cut(body, " ")
+		if !ok {
+			// A bare [git: PROJECT] is asking the obvious question.
+			if target = strings.TrimSpace(body); target != "" {
+				out = append(out, GitDirective{Target: target, Kind: string(git.KindStatus)})
+			}
+			continue
+		}
+		target, kind = strings.TrimSpace(target), strings.TrimSpace(kind)
+		if target != "" && kind != "" {
+			out = append(out, GitDirective{Target: target, Kind: kind})
+		}
+	}
+	return out
+}
+
 // fleetReply is what a dispatched project came back with. Failure is carried
 // in the content — "(error: ...)", "(no output)" — because that is what the
 // king reads and what the receipt shows; a separate flag was written in three
@@ -356,6 +461,23 @@ func ParseKingDirectives(response string) []KingDirective {
 type fleetReply struct {
 	name    string
 	content string
+}
+
+// pending is one reply the round is waiting on, and it is waiting on two
+// different kinds of thing.
+//
+// Most come from an agent turn: a subprocess is running somewhere and the
+// handle resolves when it finishes. Some are answered here, from a subprocess
+// that has already returned — a git query costs milliseconds and no tokens, so
+// making the round wait on a turn handle for it would be inventing a delay.
+//
+// Both end up in the same summary, fenced the same way. Our own output is
+// trusted and a project's reply is not, but the fencing stays uniform rather
+// than acquiring an exception the model has to be told about.
+type pending struct {
+	name   string
+	handle *TurnHandle // nil when the answer is already here
+	answer string      // set when handle is nil
 }
 
 const (
@@ -413,7 +535,7 @@ func (in *Inbox) pollInterval() time.Duration {
 // behaviour. Above zero the king may act on what it just learned — the case
 // where a project answers "that depends on what B is doing" and the supervisor
 // can go and ask B instead of telling the user to.
-func (in *Inbox) kingRoundWatcher(kingName string, handles []TurnHandle, budget int, prev map[string]string, allowed []string) {
+func (in *Inbox) kingRoundWatcher(kingName string, items []pending, budget int, prev map[string]string, allowed []string) {
 	// One deadline for the whole round, applied to all targets at once.
 	//
 	// Collecting sequentially against a shared absolute deadline lost replies:
@@ -421,7 +543,7 @@ func (in *Inbox) kingRoundWatcher(kingName string, handles []TurnHandle, budget 
 	// and by the time it looked at B the deadline had passed — so B was
 	// reported as "no reply" despite having answered minutes earlier. A
 	// completed handle stays completed no matter what order they are read in.
-	replies := in.collectReplies(handles, kingRoundTimeout)
+	replies := in.collectReplies(items, kingRoundTimeout)
 
 	in.mu.Lock()
 	king, err := in.projectByName(kingName)
@@ -455,13 +577,21 @@ func (in *Inbox) kingRoundWatcher(kingName string, handles []TurnHandle, budget 
 
 // collectReplies waits for every dispatched turn concurrently, bounded by one
 // shared timeout, and returns the replies in the order they were dispatched.
-func (in *Inbox) collectReplies(handles []TurnHandle, timeout time.Duration) []fleetReply {
-	replies := make([]fleetReply, len(handles))
+//
+// Entries that were answered locally pass straight through. They are still
+// returned in dispatch order, so the summary reads in the order the supervisor
+// asked rather than in the order the answers happened to be cheap.
+func (in *Inbox) collectReplies(items []pending, timeout time.Duration) []fleetReply {
+	replies := make([]fleetReply, len(items))
 	var wg sync.WaitGroup
 	t := time.NewTimer(timeout)
 	defer t.Stop()
 
-	for i, h := range handles {
+	for i, it := range items {
+		if it.handle == nil {
+			replies[i] = fleetReply{name: it.name, content: it.answer}
+			continue
+		}
 		wg.Add(1)
 		go func(i int, h TurnHandle) {
 			defer wg.Done()
@@ -473,7 +603,7 @@ func (in *Inbox) collectReplies(handles []TurnHandle, timeout time.Duration) []f
 			case <-in.done:
 				replies[i] = fleetReply{name: h.Project, content: "(shutting down)"}
 			}
-		}(i, h)
+		}(i, *it.handle)
 	}
 	wg.Wait()
 	return replies

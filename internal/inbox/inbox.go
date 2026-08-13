@@ -14,6 +14,7 @@ import (
 	"github.com/im-tyler/agent-inbox/internal/config"
 	"github.com/im-tyler/agent-inbox/internal/driver"
 	"github.com/im-tyler/agent-inbox/internal/fsutil"
+	"github.com/im-tyler/agent-inbox/internal/git"
 	"github.com/im-tyler/agent-inbox/internal/ident"
 )
 
@@ -46,6 +47,13 @@ type Project struct {
 	// The TUI shows this in the detail view so the user can watch the
 	// response arrive in real time instead of staring at a blank screen.
 	StreamingText string `json:"-"`
+
+	// Git is the working tree as it was last read. Transient, like the two
+	// above, and for a reason that is not just tidiness: the tree changes while
+	// this program is not running, so a persisted branch restored at startup
+	// would be presented as current when it describes whenever we last
+	// happened to look.
+	Git git.State `json:"-"`
 }
 
 // Message is a single turn in a project's conversation history.
@@ -110,6 +118,16 @@ type Inbox struct {
 	// after the thing that owns it has gone.
 	done      chan struct{}
 	closeOnce sync.Once
+
+	// bgCtx bounds background work that is not a turn — the git refresh, and
+	// anything else that runs on a timer. Close cancels it, so quitting does
+	// not wait out a subprocess's own timeout before the program can exit.
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+
+	// gitNudge asks for an out-of-band tree refresh. Buffered at one: several
+	// turns finishing together want the same single refresh, not one each.
+	gitNudge chan struct{}
 	// wg tracks every background goroutine so Close can wait for them.
 	// Signalling alone is not enough: a send goroutine already past the
 	// stop check still has a write to make.
@@ -141,6 +159,7 @@ type Inbox struct {
 }
 
 func New(projects []*Project, drivers map[string]driver.Driver, statePath string) *Inbox {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Inbox{
 		projects:    projects,
 		drivers:     drivers,
@@ -148,6 +167,9 @@ func New(projects []*Project, drivers map[string]driver.Driver, statePath string
 		cancels:     make(map[string]context.CancelFunc),
 		active:      make(map[string]*activeTurn),
 		done:        make(chan struct{}),
+		bgCtx:       ctx,
+		bgCancel:    cancel,
+		gitNudge:    make(chan struct{}, 1),
 		turnTimeout: config.DefaultTurnTimeout,
 	}
 }
@@ -204,6 +226,9 @@ func (in *Inbox) Close() {
 		in.closing = true
 		close(in.done)
 		in.lifecycleMu.Unlock()
+		// Background work is cancelled, not waited out. A git call has its own
+		// five-second deadline, and quitting should not sit through it.
+		in.bgCancel()
 
 		in.mu.Lock()
 		for name, cancel := range in.cancels {
@@ -710,6 +735,10 @@ func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driver
 		// and mock — only mutated memory. Its reply reached the screen and
 		// then vanished on the next restart.
 		in.save()
+		// An agent turn is the one thing this program does that moves a
+		// project's tree, so it is the moment the branch and dirty state on
+		// screen are most likely to be stale.
+		in.nudgeGit()
 	})
 	if !started {
 		// Shutting down. Resolve the handle so nobody waits on a turn that

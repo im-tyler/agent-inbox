@@ -479,7 +479,14 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 		if nameW < 4 {
 			nameW = 4
 		}
-		name := truncateOneLine(p.Name, nameW)
+		// A trailing star means uncommitted changes. One column, no extra row,
+		// and it answers the question the status glyph cannot: an agent that
+		// reported it was done and left the tree clean did nothing.
+		label := p.Name
+		if p.Git.Dirty {
+			label += "*"
+		}
+		name := truncateOneLine(label, nameW)
 		entry := fmt.Sprintf("%s%-*s %s", marker, nameW, name, statusGlyph(p.Status, m.frame()))
 		if m.focusSidebar && idx == m.sidebarCursor && !isKing {
 			lines = append(lines, trunc.Render(cursorStyle.Render(entry)))
