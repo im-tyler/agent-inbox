@@ -230,12 +230,11 @@ func liveDirCounts(ctx context.Context, command string, timeout time.Duration) (
 	// -c matches by command name, -d cwd limits to the working directory
 	// descriptor, -Fn prints just the name field.
 	cmd := exec.CommandContext(ctx, "lsof", "-a", "-d", "cwd", "-c", command, "-Fn")
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	// lsof exits non-zero when it cannot stat some unrelated process; the
 	// output we asked for is still there, so the status alone is not worth
-	// failing on — but a nonzero status with no usable output is a real
-	// failure rather than an empty result.
+	// failing on.
 	runErr := cmd.Run()
 
 	dirs := map[string]int{}
@@ -248,9 +247,30 @@ func liveDirCounts(ctx context.Context, command string, timeout time.Duration) (
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("lsof timed out after %s", timeout)
 		}
-		return nil, fmt.Errorf("lsof produced no output: %w", runErr)
+		// An exit status alone cannot tell "nothing matched" from "lsof
+		// broke": it returns 1 for both, and the ordinary case — no session of
+		// this tool running right now — is the one that matched nothing. This
+		// used to be reported as a failed source, so doctor exited non-zero
+		// claiming a dependency was broken whenever you simply had no codex
+		// session open, which is the exact confusion between "nothing found"
+		// and "cannot read" that this package exists to avoid.
+		//
+		// stderr is what actually separates them. lsof stays silent when it
+		// matched nothing and writes diagnostics when something went wrong.
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("lsof failed: %s", firstLine(msg))
+		}
 	}
 	return dirs, nil
+}
+
+// firstLine keeps an error to one line. lsof repeats its complaint once per
+// offending argument, and a source's failure is rendered on a single row.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // perDirLimit is how many sessions a directory may contribute: one per live

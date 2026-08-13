@@ -2,6 +2,7 @@ package sources
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -229,5 +230,40 @@ func TestLiveNearMatchesExactAndOneLevelButNotAShallowAncestor(t *testing.T) {
 	}
 	if liveNear(live, "/repos/other-project") {
 		t.Fatal("an unrelated sibling directory must not match")
+	}
+}
+
+// lsof returns exit 1 both when it matched nothing and when it broke, and the
+// ordinary case — no session of this tool open right now — is the one that
+// matches nothing.
+//
+// Reporting that as a failed source made `doctor` exit non-zero claiming a
+// dependency was broken whenever you simply had no codex session running. That
+// is the confusion between "nothing found" and "cannot read" this package
+// exists to avoid, arriving in the command written to detect it.
+func TestNoLiveProcessesIsNotAFailure(t *testing.T) {
+	counts, err := liveDirCounts(t.Context(), "a-command-that-cannot-be-running", 5*time.Second)
+	if err != nil {
+		t.Fatalf("no matching process reported as an error: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Errorf("counts = %v, want empty", counts)
+	}
+}
+
+// A genuinely broken lsof still has to be reported, or the empty list becomes
+// a comfortable lie.
+func TestABrokenLsofIsStillAFailure(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "lsof")
+	// Writes to stderr and exits non-zero, which is what a real failure looks
+	// like; a no-match is silent.
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho 'lsof: something is wrong' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := liveDirCounts(t.Context(), "anything", 5*time.Second); err == nil {
+		t.Error("a broken lsof was reported as no live sessions")
 	}
 }
