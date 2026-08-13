@@ -314,6 +314,18 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 		b.WriteString("\n")
 	}
 
+	// Capacity, when a source is configured. Stated as burn and labelled as an
+	// estimate: there is no published denominator, so a supervisor told
+	// "remaining" would be acting on a number nobody can produce.
+	if u := in.Usage(); !u.Block.Empty() {
+		b.WriteString("Capacity (estimated, burn not remaining): " + u.Summary())
+		if u.Account != "" {
+			b.WriteString(" — account " + u.Account)
+		}
+		b.WriteString("\n")
+		b.WriteString("If a limit looks close, say so and prioritise rather than starting work that will stop halfway.\n\n")
+	}
+
 	found := false
 	if len(nameSet) > 0 {
 		b.WriteString("Your fleet:\n")

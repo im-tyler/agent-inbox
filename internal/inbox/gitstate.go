@@ -6,6 +6,7 @@ import (
 
 	"github.com/im-tyler/agent-inbox/internal/git"
 	"github.com/im-tyler/agent-inbox/internal/ident"
+	"github.com/im-tyler/agent-inbox/internal/usage"
 )
 
 // Reading the fleet's working trees.
@@ -38,14 +39,26 @@ func (in *Inbox) WithGitRefresh(every time.Duration) *Inbox {
 	if every <= 0 {
 		return in
 	}
-	in.track(func() { in.gitRefreshLoop(every) })
+	in.track(func() { in.refreshLoop(every) })
 	return in
 }
 
-func (in *Inbox) gitRefreshLoop(every time.Duration) {
+// WithUsage attaches a source for how much has been spent against the rate
+// limit. Optional: with none, the capacity line is absent everywhere rather
+// than showing zero, because "no source" and "no usage" are opposite facts
+// that render as the same number.
+func (in *Inbox) WithUsage(src usage.Source) *Inbox {
+	in.mu.Lock()
+	in.usageSrc = src
+	in.mu.Unlock()
+	return in
+}
+
+func (in *Inbox) refreshLoop(every time.Duration) {
 	// Once immediately, so the first frame the user sees already has branches
 	// in it rather than filling them in a beat later.
 	in.RefreshGit()
+	in.refreshUsage()
 
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -57,8 +70,45 @@ func (in *Inbox) gitRefreshLoop(every time.Duration) {
 			in.RefreshGit()
 		case <-t.C:
 			in.RefreshGit()
+			in.refreshUsage()
 		}
 	}
+}
+
+// RefreshUsage re-reads the usage source now, rather than waiting for the
+// next tick.
+func (in *Inbox) RefreshUsage() { in.refreshUsage() }
+
+// refreshUsage re-reads the usage source. The first read of a long history
+// takes a second or so and every one after it is a few milliseconds, which is
+// why this is on a timer and not on the render path.
+func (in *Inbox) refreshUsage() {
+	in.mu.Lock()
+	src := in.usageSrc
+	in.mu.Unlock()
+	if src == nil {
+		return
+	}
+	snap, err := src.Read()
+	in.mu.Lock()
+	if err != nil {
+		// Keep the last good snapshot. A transient read failure should not
+		// blank a figure that was correct a moment ago.
+		in.usageErr = err
+		in.mu.Unlock()
+		return
+	}
+	in.usageSnap, in.usageErr = snap, nil
+	in.mu.Unlock()
+}
+
+// Usage is the last-read capacity snapshot. The zero value means no source is
+// configured or none has been read yet, and Snapshot.Summary renders that as
+// nothing.
+func (in *Inbox) Usage() usage.Snapshot {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return in.usageSnap
 }
 
 // nudgeGit asks for a refresh at the next opportunity, without blocking. A

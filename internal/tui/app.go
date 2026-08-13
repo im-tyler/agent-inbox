@@ -16,6 +16,7 @@ import (
 	"github.com/im-tyler/agent-inbox/internal/driver"
 	"github.com/im-tyler/agent-inbox/internal/ident"
 	"github.com/im-tyler/agent-inbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/usage"
 )
 
 // renderMain draws the split-pane king-first layout with EXACT width/height
@@ -541,7 +542,33 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	for _, s := range fleetSummary(fleetCount, working, waiting, maxW) {
 		lines = append(lines, trunc.Render(mutedStyle.Render(s)))
 	}
+	// Capacity last, and only when there is something to say. An absent source
+	// renders as nothing rather than as a zero, because "no data" and "no usage
+	// yet" are the same number and opposite facts.
+	if u := m.inbox.Usage(); !u.Block.Empty() {
+		lines = append(lines, "")
+		for _, s := range capacityLines(u, maxW) {
+			lines = append(lines, trunc.Render(mutedStyle.Render(s)))
+		}
+	}
 	return lines
+}
+
+// capacityLines is the burn block under the sidebar, wrapped to the column
+// rather than truncated — the same rule as the fleet counts, for the same
+// reason: half a number is not a number.
+func capacityLines(u usage.Snapshot, width int) []string {
+	b := u.Block
+	total := "~" + usage.Compact(b.Input+b.Output+b.CacheCreate) + " this 5h"
+	out := []string{total}
+	if !u.ResetsAt.IsZero() {
+		resets := "resets " + u.ResetsAt.Local().Format("3:04PM")
+		if joined := total + "  " + resets; lipgloss.Width(joined) <= width {
+			return []string{joined}
+		}
+		out = append(out, resets)
+	}
+	return out
 }
 
 // fleetSummary is the count block under the sidebar. total is the fleet, which

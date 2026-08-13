@@ -162,6 +162,27 @@ all. A trailing `*` on a sidebar row means uncommitted changes — the one thing
 the status glyph cannot tell you, since an agent that reports it is done and
 leaves a clean tree did nothing.
 
+**Capacity.** How much has been spent against the five-hour rate limit is read
+from Claude Code's own transcripts and injected too, so the supervisor can
+prioritise instead of starting work that stops halfway. Three things about that
+number, because a resource figure that looks authoritative and is not gets
+trusted at exactly the wrong moment:
+
+- It is **burn, never remaining**. No published denominator exists, so
+  "remaining" would be invented. It is labelled as an estimate everywhere.
+- It is **deduplicated** on message and request id. The same message really is
+  written more than once — twice in a row in one transcript, and again when a
+  session is resumed — so summing naively inflates every figure silently.
+- Cache reads are **named separately** rather than folded into one total. On
+  real transcripts they outweigh everything else fifty to one, and a single
+  number would read as fifty times the work actually done.
+
+With no readable source the line is absent rather than zero: "no data" and "no
+usage" are the same number and opposite facts. The signed-in account is shown
+when it can be determined and reads as unknown when it cannot — attributing one
+account's burn to another is worse than admitting ignorance. Switching accounts
+is yours to do; the supervisor can recommend it and never performs it.
+
 **Trust.** `[git: ...]` is allowlisted exactly as `[send to ...]` is: the target
 must be in that turn's fleet and the subcommand comes from a closed set of
 three. The supervisor's reply is model output shaped by agents that have read

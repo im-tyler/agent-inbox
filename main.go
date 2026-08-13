@@ -18,6 +18,7 @@ import (
 	"github.com/im-tyler/agent-inbox/internal/ident"
 	"github.com/im-tyler/agent-inbox/internal/inbox"
 	"github.com/im-tyler/agent-inbox/internal/tui"
+	"github.com/im-tyler/agent-inbox/internal/usage"
 )
 
 func dataDir() string {
@@ -97,6 +98,7 @@ func run() error {
 		WithGroups(groups).
 		WithKingRounds(cfg.King.Rounds).
 		WithTurnTimeout(cfg.TurnTimeout()).
+		WithUsage(&usage.Claude{}).
 		WithGitRefresh(inbox.DefaultGitRefresh)
 	defer in.Close()
 	eventsDir := filepath.Join(dd, "events")

@@ -16,6 +16,7 @@ import (
 	"github.com/im-tyler/agent-inbox/internal/fsutil"
 	"github.com/im-tyler/agent-inbox/internal/git"
 	"github.com/im-tyler/agent-inbox/internal/ident"
+	"github.com/im-tyler/agent-inbox/internal/usage"
 )
 
 type Project struct {
@@ -136,6 +137,14 @@ type Inbox struct {
 	// gitNudge asks for an out-of-band tree refresh. Buffered at one: several
 	// turns finishing together want the same single refresh, not one each.
 	gitNudge chan struct{}
+
+	// usageSrc reads how much has been spent against the rate limit; nil when
+	// none is configured. usageSnap is its last good answer, kept across a
+	// failed read so a transient error does not blank a figure that was right a
+	// moment ago.
+	usageSrc  usage.Source
+	usageSnap usage.Snapshot
+	usageErr  error
 	// wg tracks every background goroutine so Close can wait for them.
 	// Signalling alone is not enough: a send goroutine already past the
 	// stop check still has a write to make.
