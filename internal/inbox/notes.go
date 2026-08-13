@@ -30,6 +30,10 @@ const (
 	maxNoteLen = 240
 )
 
+// MaxNotes is the cap on the store, exported so the memory view can say how
+// full it is.
+const MaxNotes = maxNotes
+
 // Kind separates the things a supervisor remembers, because they are not
 // interchangeable and one of them must not be filtered.
 type Kind string
@@ -132,6 +136,32 @@ func parseBracketed(response, prefix string) []string {
 		}
 	}
 	return out
+}
+
+// DropNoteExact removes the note whose text matches exactly, reporting whether
+// one did.
+//
+// Exact rather than by substring, and by text rather than by index, because
+// this is the user deleting a specific thing they are looking at: a substring
+// match could take neighbours with it, and an index could name a different note
+// if the store moved between rendering the list and pressing the key.
+func (in *Inbox) DropNoteExact(text string) bool {
+	in.mu.Lock()
+	kept := in.notes[:0]
+	dropped := false
+	for _, n := range in.notes {
+		if !dropped && n.Text == text {
+			dropped = true
+			continue
+		}
+		kept = append(kept, n)
+	}
+	in.notes = kept
+	in.mu.Unlock()
+	if dropped {
+		in.saveNotes()
+	}
+	return dropped
 }
 
 // AddNotes records new facts, skipping ones already known. Deduplication is

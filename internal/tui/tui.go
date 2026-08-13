@@ -33,6 +33,7 @@ const (
 	viewToolPicker
 	viewMain  // king-first split-pane layout (default)
 	viewInbox // the session inbox, hosted rather than run as its own program
+	viewNotes // the supervisor's memory: what it remembers, and a way to delete it
 )
 
 // Model is the Bubble Tea model for the agent-inbox dashboard.
@@ -73,6 +74,9 @@ type Model struct {
 	// sidebar is that group's fleet, and a message goes to that king with that
 	// fleet as its allowlist.
 	activeGroup int
+
+	// notesCursor is the highlighted row in the memory view.
+	notesCursor int
 
 	toast   string
 	toastAt time.Time
@@ -251,6 +255,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleToolPickerKey(msg)
 	case viewInbox:
 		return m.handleInboxKey(msg)
+	case viewNotes:
+		return m.handleNotesKey(msg)
 	}
 	return m, nil
 }
@@ -378,6 +384,8 @@ func (m Model) View() string {
 		return m.renderDeleteConfirm()
 	case viewToolPicker:
 		return m.renderToolPicker()
+	case viewNotes:
+		return m.renderNotes()
 	case viewInbox:
 		return m.board.View()
 	default:
@@ -664,6 +672,7 @@ func helpText() string {
 		"    enter         open the project's detail view",
 		"    i             session inbox",
 		"    n             new project",
+		"    m             supervisor memory (view and delete what it remembers)",
 		"    d             delete project",
 		"    t             change tool",
 		"    a             attach to the session",

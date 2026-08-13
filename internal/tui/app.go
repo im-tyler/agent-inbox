@@ -160,9 +160,9 @@ func (m Model) renderMain() string {
 	var footerText string
 	switch {
 	case m.focusSidebar && split:
-		footerText = "  ↑↓ move  [ ] group  enter detail  i inbox  n new  d del  t tool  a attach  x cancel  tab chat"
+		footerText = "  ↑↓ move  [ ] group  enter detail  i inbox  m memory  n new  d del  t tool  a attach  x cancel  tab chat"
 	case m.focusSidebar:
-		footerText = "  ↑↓ move  enter detail  i inbox  n new  d del  t tool  a attach  x cancel  tab chat"
+		footerText = "  ↑↓ move  enter detail  i inbox  m memory  n new  d del  t tool  a attach  x cancel  tab chat"
 	case m.helpMode:
 		footerText = "  ? close help"
 	case split:
@@ -794,6 +794,14 @@ func (m Model) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i":
 		// The inbox: every session on the machine, and the way to take one on.
 		return m, m.openInbox()
+
+	case "m":
+		// The supervisor's memory. Everything in it was written by model
+		// output, and a standing rule never ages out on its own, so there has
+		// to be somewhere to look at it and take one back.
+		m.notesCursor = 0
+		m.view = viewNotes
+		return m, nil
 
 	case "d":
 		// Delete selected project.

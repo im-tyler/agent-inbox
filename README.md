@@ -149,7 +149,17 @@ repository, and it cannot read the fleet's files.
    ...]` retracts one. Notes are injected into later turns and evicted by
    relevance rather than age — the oldest note is usually the most load-bearing
    one, so plain FIFO discards exactly the wrong end.
-4. **Free questions.** `[git: PROJECT status|diff|log]` is answered by
+4. **Standing rules.** `[constraint: neutron stays on the free model]` and
+   `[priority: teploy ships first]` are injected into *every* turn regardless
+   of which projects it is about — a rule that only applies when its subject
+   happens to be in the room is not a rule. They are given up last under
+   eviction and survive the removal of the project they name, because deleting
+   a project should not silently repeal a decision.
+
+   Everything in that store is written by model output, so press **`m`** from
+   the fleet to see all of it and delete anything that should not be there.
+   A fact ages out on its own; a standing rule does not.
+5. **Free questions.** `[git: PROJECT status|diff|log]` is answered by
    agent-inbox itself, from a subprocess. Everything else the supervisor wants
    to know costs a model invocation in that project's session; this costs
    milliseconds and no tokens, and returns the same answer every time. It is
@@ -383,6 +393,7 @@ always shows the keys for whichever one you are in.
 | `[` / `]` or `h` / `l` | previous / next group |
 | `Enter` | open the selected project's detail view |
 | `i` | session inbox |
+| `m` | supervisor memory — what it remembers, and `d` to forget one |
 | `n` | new project |
 | `d` | delete · `t` change tool |
 | `a` | attach — hands the terminal to the agent, relaunches on exit |
