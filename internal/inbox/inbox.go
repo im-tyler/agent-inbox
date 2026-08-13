@@ -102,8 +102,13 @@ type Inbox struct {
 	// the supervisor an accident of config ordering.
 	groups []Group
 
-	// notes are the supervisor's durable facts about the fleet.
+	// notes are the supervisor's durable facts about the fleet, plus any
+	// standing rules it has proposed and the user has not ratified.
 	notes []Note
+
+	// rules are the ratified standing rules, read from config. The supervisor
+	// cannot write here — see rules.go for why that separation exists.
+	rules []Rule
 
 	// cancels maps project Name -> the cancel function for its in-flight
 	// send goroutine. Empty when no send is active for that project.

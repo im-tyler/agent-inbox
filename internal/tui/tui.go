@@ -672,7 +672,7 @@ func helpText() string {
 		"    enter         open the project's detail view",
 		"    i             session inbox",
 		"    n             new project",
-		"    m             supervisor memory (view and delete what it remembers)",
+		"    m             supervisor memory — accept or delete what it remembers",
 		"    d             delete project",
 		"    t             change tool",
 		"    a             attach to the session",

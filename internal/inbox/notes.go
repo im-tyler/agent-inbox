@@ -66,6 +66,15 @@ type Note struct {
 	// Kind defaults to KindFact when absent, so notes written before kinds
 	// existed keep behaving exactly as they did.
 	Kind Kind `json:"kind,omitempty"`
+	// Proposed marks a standing rule the supervisor asked for and the user has
+	// not ratified. A proposal is stored and shown; it is never injected, so
+	// it binds nothing until accepted.
+	//
+	// Facts are never proposed. An observation that turns out to be wrong is
+	// filtered out by relevance, ages out of a bounded store, and overrides
+	// nothing — so it carries its own limits. A rule carries none of them,
+	// which is exactly why it needs a principal behind it.
+	Proposed bool `json:"proposed,omitempty"`
 	// Projects are the fleet members this note names, detected when it was
 	// written. Empty means it is a cross-cutting fact — those are the
 	// architectural ones, and they outlive any single project.
@@ -76,7 +85,11 @@ type Note struct {
 // mentions reports whether the note is about one of the given projects, or is
 // general enough to be about all of them.
 func (n Note) mentions(names map[string]bool) bool {
-	// A standing rule applies whether or not its subject is in the room.
+	// An unratified rule is not injected at all, so relevance never arises.
+	if n.Proposed {
+		return false
+	}
+	// A ratified rule applies whether or not its subject is in the room.
 	if n.Kind.Standing() {
 		return true
 	}
@@ -169,10 +182,18 @@ func (in *Inbox) DropNoteExact(text string) bool {
 // with one fact.
 func (in *Inbox) AddNotes(texts []string) { in.addNotes(texts, KindFact) }
 
-// AddConstraints records standing rules, and AddPriorities what matters most.
-// Both are injected into every turn regardless of which projects it is about.
-func (in *Inbox) AddConstraints(texts []string) { in.addNotes(texts, KindConstraint) }
-func (in *Inbox) AddPriorities(texts []string)  { in.addNotes(texts, KindPriority) }
+// ProposeConstraints and ProposePriorities record standing rules the
+// supervisor has asked for. They are stored as proposals and bind nothing
+// until the user ratifies them, at which point they move to config.
+//
+// This is the same stance the dispatcher already takes on actions: a target
+// named in a response is a name, not authorisation. A rule stated in a
+// response is a request, not policy. The supervisor's replies are shaped by
+// what its projects say, which is shaped by whatever those agents have read,
+// so a rule it wrote itself is a rule an attacker could have written — and a
+// rule, unlike an observation, binds every later turn and never ages out.
+func (in *Inbox) ProposeConstraints(texts []string) { in.addNotes(texts, KindConstraint) }
+func (in *Inbox) ProposePriorities(texts []string)  { in.addNotes(texts, KindPriority) }
 
 func (in *Inbox) addNotes(texts []string, kind Kind) {
 	if len(texts) == 0 {
@@ -191,8 +212,11 @@ func (in *Inbox) addNotes(texts []string, kind Kind) {
 		}
 		known[strings.ToLower(t)] = true
 		in.notes = append(in.notes, Note{
-			Text:      t,
-			Kind:      kind,
+			Text: t,
+			Kind: kind,
+			// Every standing rule the supervisor writes starts as a proposal.
+			// There is no path from a model response to a rule that binds.
+			Proposed:  kind.Standing(),
 			Projects:  in.projectsNamedIn(t),
 			CreatedAt: time.Now(),
 		})

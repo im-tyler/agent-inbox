@@ -47,6 +47,21 @@ type Settings struct {
 		// clamped. It is separate from Rounds because they bound different
 		// things — how often it may start, and how far it may go once started.
 		WakesPerHour int `json:"wakes_per_hour"`
+		// Constraints are standing rules the supervisor must respect, and
+		// Priorities what matters most. Both are injected into every turn.
+		//
+		// They live here, in the file you own, and not in the supervisor's own
+		// note store, because of who is allowed to author policy.
+		//
+		// The supervisor's replies are shaped by what its projects say, and
+		// what its projects say is shaped by the repositories, issues and web
+		// pages those agents read. A rule it wrote itself would therefore be a
+		// rule an attacker could have written — and unlike an observation, a
+		// rule binds every later turn, is never filtered out, and does not age
+		// out of the store on its own. So the supervisor may propose one; only
+		// you ratify it, and ratifying means it appears here.
+		Constraints []string `json:"constraints,omitempty"`
+		Priorities  []string `json:"priorities,omitempty"`
 		// Dir is the folder its session lives in. Defaults to a "supervisor"
 		// directory beside config.json, created on first run.
 		//
@@ -416,3 +431,24 @@ var ClaudePermissionModes = []string{"default", "acceptEdits", "bypassPermission
 
 // CodexSandboxes are the values Codex accepts for --sandbox.
 var CodexSandboxes = []string{"read-only", "workspace-write", "danger-full-access"}
+
+// AddKingRule appends a ratified standing rule, skipping duplicates. Returns
+// true if it was added.
+//
+// This is the only way a rule enters the supervisor's policy, and it is only
+// reached from an explicit user action in the dashboard.
+func (s *Settings) AddKingRule(kind, text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	list := &s.King.Constraints
+	if kind == "priority" {
+		list = &s.King.Priorities
+	}
+	if slices.Contains(*list, text) {
+		return false
+	}
+	*list = append(*list, text)
+	return true
+}

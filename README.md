@@ -149,16 +149,16 @@ repository, and it cannot read the fleet's files.
    ...]` retracts one. Notes are injected into later turns and evicted by
    relevance rather than age — the oldest note is usually the most load-bearing
    one, so plain FIFO discards exactly the wrong end.
-4. **Standing rules.** `[constraint: neutron stays on the free model]` and
-   `[priority: teploy ships first]` are injected into *every* turn regardless
-   of which projects it is about — a rule that only applies when its subject
-   happens to be in the room is not a rule. They are given up last under
-   eviction and survive the removal of the project they name, because deleting
-   a project should not silently repeal a decision.
+4. **Standing rules, which you ratify.** `king.constraints` and
+   `king.priorities` in your config are injected into *every* turn regardless
+   of what it is about — a rule that only applies when its subject happens to
+   be in the room is not a rule.
 
-   Everything in that store is written by model output, so press **`m`** from
-   the fleet to see all of it and delete anything that should not be there.
-   A fact ages out on its own; a standing rule does not.
+   The supervisor can *propose* one with `[constraint: ...]`, but a proposal
+   binds nothing. Press **`m`** from the fleet, then **`a`** to accept, which
+   writes it to your config. **`d`** deletes anything — proposal or fact.
+
+   The split is deliberate, and [Trust](#trust) explains why.
 5. **Free questions.** `[git: PROJECT status|diff|log]` is answered by
    agent-inbox itself, from a subprocess. Everything else the supervisor wants
    to know costs a model invocation in that project's session; this costs
@@ -193,12 +193,39 @@ when it can be determined and reads as unknown when it cannot — attributing on
 account's burn to another is worse than admitting ignorance. Switching accounts
 is yours to do; the supervisor can recommend it and never performs it.
 
-**Trust.** `[git: ...]` is allowlisted exactly as `[send to ...]` is: the target
-must be in that turn's fleet and the subcommand comes from a closed set of
-three. The supervisor's reply is model output shaped by agents that have read
-repositories, issues and web pages, so a name appearing in it is a name and not
-authorisation. Nothing assembled from that text reaches git, which is invoked as
-argv and never through a shell.
+## Trust
+
+The supervisor's replies are shaped by what its projects say, and what its
+projects say is shaped by the repositories, issues and web pages those agents
+read. So everything the supervisor writes is untrusted-derived, and the design
+follows from taking that literally.
+
+**Actions.** `[send to ...]` and `[git: ...]` are allowlisted in code, not
+trusted to the prompt: the target must be in that turn's fleet, and git's
+subcommand comes from a closed set of three. A name appearing in model output is
+a name, not authorisation. Nothing assembled from that text reaches git, which
+runs as argv and never through a shell.
+
+**Beliefs.** The same stance, applied to memory — which is the part conventional
+injection defences miss, because they screen actions rather than what an agent
+comes to believe. So:
+
+- **The supervisor cannot author policy.** It proposes; you ratify; ratified
+  rules live in `config.json`, the file you own. There is no path from a model
+  response to a rule that binds.
+- **Observations stay cheap.** Facts are model-written, but they are filtered by
+  relevance, age out of a bounded store, and override nothing — they carry their
+  own limits, which is exactly what a rule does not.
+- **A project's own words are marked wherever they appear**, with a per-line
+  `<<<`, in the fleet listing as well as in the fenced reply block. Truncating a
+  snippet to 80 characters is no defence: an instruction fits in far fewer.
+
+Deliberately **not** done: screening rule text for anything suspicious.
+Published evaluations put detection of this class at roughly half, and weak
+signals — a plausible fabricated "the team decided X" with no instruction in it
+— are close to indistinguishable from legitimate content. A filter that catches
+some of it reads as a guarantee and is not one. Nothing here inspects the text;
+the only control is who signed it.
 
 **Round budget.** By default the supervisor gets one dispatch round per message:
 ask, read every reply, answer you. `king.rounds` (max 5) lets it act on what a

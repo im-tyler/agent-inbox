@@ -17,8 +17,8 @@ func TestNoteKindSurvivesRestart(t *testing.T) {
 
 	in := New(projects, map[string]driver.Driver{"mock": driver.Mock{}}, filepath.Join(dir, "state.json")).
 		WithKing("supervisor").WithNotesPath(notes)
-	in.AddConstraints([]string{"neutron stays on the free model"})
-	in.AddPriorities([]string{"teploy ships first"})
+	in.ProposeConstraints([]string{"neutron stays on the free model"})
+	in.ProposePriorities([]string{"teploy ships first"})
 	in.AddNotes([]string{"an ordinary observation"})
 	in.Close()
 

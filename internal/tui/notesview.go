@@ -34,10 +34,30 @@ func (m *Model) renderNotes() string {
 		width = 20
 	}
 
+	rules := m.inbox.Rules()
+
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("supervisor memory"))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render(fmt.Sprintf("  %d of %d kept — written by the supervisor, yours to delete", len(notes), inbox.MaxNotes)))
+	b.WriteString("\n\n")
+
+	// Ratified rules first, and visibly apart. These came from config — from
+	// you — and they are the only things here that bind the supervisor.
+	if len(rules) > 0 {
+		b.WriteString(mutedStyle.Render("  in force — from your config, edit the file to change them"))
+		b.WriteString("\n")
+		for _, r := range rules {
+			b.WriteString("  ")
+			b.WriteString(waitingStyle.Render(fmt.Sprintf("%-10s", string(r.Kind))))
+			b.WriteString(" ")
+			b.WriteString(truncateOneLine(r.Text, width))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString(mutedStyle.Render(fmt.Sprintf(
+		"  %d of %d written by the supervisor — a proposal binds nothing until you accept it",
+		len(notes), inbox.MaxNotes)))
 	b.WriteString("\n\n")
 
 	if len(notes) == 0 {
@@ -57,15 +77,14 @@ func (m *Model) renderNotes() string {
 			kind = string(inbox.KindFact)
 		}
 		style := mutedStyle
-		if n.Kind.Standing() {
-			// Standing rules are styled apart because they behave apart: they
-			// are injected whatever the turn is about and outlive the projects
-			// they name. A list that renders them identically to observations
-			// hides the one property worth checking.
-			style = waitingStyle
+		if n.Proposed {
+			// A proposal is styled apart because accepting one is the only
+			// action in this program that changes what binds the supervisor.
+			style = errorStyle
+			kind += "?"
 		}
 		b.WriteString(marker)
-		b.WriteString(style.Render(fmt.Sprintf("%-10s", kind)))
+		b.WriteString(style.Render(fmt.Sprintf("%-11s", kind)))
 		b.WriteString(" ")
 		b.WriteString(truncateOneLine(n.Text, width))
 		b.WriteString("\n")
@@ -74,14 +93,30 @@ func (m *Model) renderNotes() string {
 			if len(n.Projects) > 0 {
 				meta += "  ·  " + strings.Join(n.Projects, ", ")
 			}
+			if n.Proposed {
+				meta += "  ·  proposed by the supervisor; not in force"
+			}
 			b.WriteString(mutedStyle.Render(truncateOneLine(meta, width)))
 			b.WriteString("\n")
 		}
 	}
 
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("  j/k move  d delete  esc back"))
+	if hasProposal(notes) {
+		b.WriteString(mutedStyle.Render("  j/k move  a accept (writes to config)  d delete  esc back"))
+	} else {
+		b.WriteString(mutedStyle.Render("  j/k move  d delete  esc back"))
+	}
 	return b.String()
+}
+
+func hasProposal(notes []inbox.Note) bool {
+	for _, n := range notes {
+		if n.Proposed {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) handleNotesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -99,6 +134,30 @@ func (m *Model) handleNotesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "k", "up":
 		if m.notesCursor > 0 {
+			m.notesCursor--
+		}
+		return m, nil
+
+	case "a":
+		// Accepting is the only action in this program that changes what binds
+		// the supervisor, so it is an explicit keypress on a specific line and
+		// it writes to config — the file you own — rather than to the store the
+		// supervisor dictates to.
+		if m.notesCursor < 0 || m.notesCursor >= len(notes) {
+			return m, nil
+		}
+		if !notes[m.notesCursor].Proposed {
+			m.toast = "only a proposed rule can be accepted"
+			m.toastAt = time.Now()
+			return m, nil
+		}
+		if err := m.inbox.RatifyRule(notes[m.notesCursor].Text); err != nil {
+			m.toast = err.Error()
+		} else {
+			m.toast = "in force, and written to config"
+		}
+		m.toastAt = time.Now()
+		if m.notesCursor > 0 && m.notesCursor >= len(notes)-1 {
 			m.notesCursor--
 		}
 		return m, nil
