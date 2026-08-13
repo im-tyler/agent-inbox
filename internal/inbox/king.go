@@ -272,6 +272,8 @@ func sameDispatch(a, b map[string]string) bool {
 func (in *Inbox) applyNoteDirectives(response string) {
 	in.DropNotes(ParseKingNoteDrops(response))
 	in.AddNotes(ParseKingNotes(response))
+	in.AddConstraints(ParseKingConstraints(response))
+	in.AddPriorities(ParseKingPriorities(response))
 }
 
 // formatKingState builds the context injected into a king turn: what it has
@@ -303,15 +305,35 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 		lowerNames[strings.ToLower(n)] = true
 	}
 	if notes := in.NotesFor(lowerNames); len(notes) > 0 {
-		if len(nameSet) == 0 {
-			b.WriteString("What you have noted:\n")
-		} else {
-			b.WriteString("What you have noted about this fleet:\n")
-		}
+		// Standing rules lead, and are separated from observations. A rule and
+		// a fact read identically in a bulleted list, and only one of them is
+		// allowed to override what this turn decides to do.
+		var rules, facts []Note
 		for _, n := range notes {
-			b.WriteString("- " + n.Text + "\n")
+			if n.Kind.Standing() {
+				rules = append(rules, n)
+				continue
+			}
+			facts = append(facts, n)
 		}
-		b.WriteString("\n")
+		if len(rules) > 0 {
+			b.WriteString("Standing rules — these bind you regardless of what is asked:\n")
+			for _, n := range rules {
+				b.WriteString("- " + string(n.Kind) + ": " + n.Text + "\n")
+			}
+			b.WriteString("\n")
+		}
+		if len(facts) > 0 {
+			if len(nameSet) == 0 {
+				b.WriteString("What you have noted:\n")
+			} else {
+				b.WriteString("What you have noted about this fleet:\n")
+			}
+			for _, n := range facts {
+				b.WriteString("- " + n.Text + "\n")
+			}
+			b.WriteString("\n")
+		}
 	}
 
 	// Capacity, when a source is configured. Stated as burn and labelled as an
@@ -403,9 +425,15 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 		b.WriteString(" Not status — you are given that fresh every turn.")
 	}
 	b.WriteString("\n")
+	b.WriteString("Two other kinds, for things that are not observations:\n")
+	b.WriteString("[constraint: neutron stays on the free model]\n")
+	b.WriteString("[priority: teploy ships before anything else]\n")
+	b.WriteString("These are given to you on every turn regardless of which projects it is about,")
+	b.WriteString(" because a rule that only applies when its subject is present is not a rule.")
+	b.WriteString(" Use them for what the user has decided, not for what you have observed.\n")
 	b.WriteString("When a note above turns out to be wrong or out of date, retract it:\n")
 	b.WriteString("[note drop: teploy depends on Neutron]\n")
-	b.WriteString("The text just has to match part of the note. Retract and restate to correct one.\n")
+	b.WriteString("The text just has to match part of the note, whatever its kind. Retract and restate to correct one.\n")
 	b.WriteString("Everything else in your response is shown to the user.\n")
 	return b.String()
 }

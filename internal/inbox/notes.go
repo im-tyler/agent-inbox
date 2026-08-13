@@ -30,9 +30,38 @@ const (
 	maxNoteLen = 240
 )
 
-// Note is one durable fact the supervisor recorded.
+// Kind separates the things a supervisor remembers, because they are not
+// interchangeable and one of them must not be filtered.
+type Kind string
+
+const (
+	// KindFact is something true about the fleet. Filtered by relevance: a
+	// fact about a project you are not talking to is context spent on nothing.
+	KindFact Kind = "fact"
+	// KindConstraint is a rule the supervisor must respect. Never filtered.
+	//
+	// "neutron stays on the free model" is not a fact about neutron that can be
+	// dropped when neutron is absent from a turn's fleet — it is a standing
+	// rule, and a rule that only applies when its subject happens to be present
+	// is not a rule. Filtering these was the difference between memory and
+	// governance.
+	KindConstraint Kind = "constraint"
+	// KindPriority is what matters most right now. Never filtered either: the
+	// point of stating a priority is to weigh work against everything else,
+	// which cannot happen if it is only shown alongside its own subject.
+	KindPriority Kind = "priority"
+)
+
+// Standing reports a kind that is injected regardless of which projects a turn
+// is about.
+func (k Kind) Standing() bool { return k == KindConstraint || k == KindPriority }
+
+// Note is one durable thing the supervisor recorded.
 type Note struct {
 	Text string `json:"text"`
+	// Kind defaults to KindFact when absent, so notes written before kinds
+	// existed keep behaving exactly as they did.
+	Kind Kind `json:"kind,omitempty"`
 	// Projects are the fleet members this note names, detected when it was
 	// written. Empty means it is a cross-cutting fact — those are the
 	// architectural ones, and they outlive any single project.
@@ -43,6 +72,10 @@ type Note struct {
 // mentions reports whether the note is about one of the given projects, or is
 // general enough to be about all of them.
 func (n Note) mentions(names map[string]bool) bool {
+	// A standing rule applies whether or not its subject is in the room.
+	if n.Kind.Standing() {
+		return true
+	}
 	if len(n.Projects) == 0 {
 		return true
 	}
@@ -70,6 +103,18 @@ func ParseKingNoteDrops(response string) []string {
 	return parseBracketed(response, "[note drop:")
 }
 
+// ParseKingConstraints and ParseKingPriorities extract the two standing kinds.
+// Separate directives rather than one with a label, because the supervisor has
+// to choose the kind deliberately: a rule and an observation read the same in
+// prose, and only one of them should override what a turn decides to do.
+func ParseKingConstraints(response string) []string {
+	return parseBracketed(response, "[constraint:")
+}
+
+func ParseKingPriorities(response string) []string {
+	return parseBracketed(response, "[priority:")
+}
+
 func parseBracketed(response, prefix string) []string {
 	var out []string
 	for _, line := range strings.Split(response, "\n") {
@@ -92,7 +137,14 @@ func parseBracketed(response, prefix string) []string {
 // AddNotes records new facts, skipping ones already known. Deduplication is
 // what stops a king that repeats itself each round from filling the store
 // with one fact.
-func (in *Inbox) AddNotes(texts []string) {
+func (in *Inbox) AddNotes(texts []string) { in.addNotes(texts, KindFact) }
+
+// AddConstraints records standing rules, and AddPriorities what matters most.
+// Both are injected into every turn regardless of which projects it is about.
+func (in *Inbox) AddConstraints(texts []string) { in.addNotes(texts, KindConstraint) }
+func (in *Inbox) AddPriorities(texts []string)  { in.addNotes(texts, KindPriority) }
+
+func (in *Inbox) addNotes(texts []string, kind Kind) {
 	if len(texts) == 0 {
 		return
 	}
@@ -110,6 +162,7 @@ func (in *Inbox) AddNotes(texts []string) {
 		known[strings.ToLower(t)] = true
 		in.notes = append(in.notes, Note{
 			Text:      t,
+			Kind:      kind,
 			Projects:  in.projectsNamedIn(t),
 			CreatedAt: time.Now(),
 		})
@@ -197,22 +250,31 @@ func evict(notes []Note, live map[string]bool) []Note {
 	}
 	kept := notes[:0]
 	for _, n := range notes {
-		if len(n.Projects) > 0 && !n.mentions(live) {
+		// A standing rule outlives the project it names. "neutron stays on the
+		// free model" is still the rule for whatever replaces neutron, and
+		// dropping it because a project was renamed silently repeals it.
+		if !n.Kind.Standing() && len(n.Projects) > 0 && !n.mentions(live) {
 			continue // about nothing that still exists
 		}
 		kept = append(kept, n)
 	}
 	notes = kept
-	// Still over: drop oldest tagged notes, then oldest of anything.
-	for _, taggedOnly := range []bool{true, false} {
+	// Still over: oldest tagged facts first, then oldest untagged fact, and
+	// only then a standing rule. Giving up a constraint to make room for an
+	// observation is the wrong trade in every case — the observation will be
+	// re-derived from the next status line, the rule will not.
+	for _, pass := range []func(Note) bool{
+		func(n Note) bool { return !n.Kind.Standing() && len(n.Projects) > 0 },
+		func(n Note) bool { return !n.Kind.Standing() },
+		func(Note) bool { return true },
+	} {
 		for len(notes) > maxNotes {
 			idx := -1
 			for i, n := range notes {
-				if taggedOnly && len(n.Projects) == 0 {
-					continue
+				if pass(n) {
+					idx = i
+					break
 				}
-				idx = i
-				break
 			}
 			if idx < 0 {
 				break
@@ -271,6 +333,14 @@ func (in *Inbox) forgetProject(name string) {
 	for _, n := range in.notes {
 		if len(n.Projects) == 0 {
 			kept = append(kept, n) // cross-cutting; not about any one project
+			continue
+		}
+		// A standing rule outlives the project it names. Removing a project
+		// deletes what was observed about it; it does not repeal a decision the
+		// user made, and silently repealing one is how a fleet ends up back on
+		// a paid model because a repository was renamed.
+		if n.Kind.Standing() {
+			kept = append(kept, n)
 			continue
 		}
 		remaining := n.Projects[:0]
