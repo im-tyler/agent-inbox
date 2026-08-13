@@ -327,14 +327,15 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 			}
 			status := string(p.Status)
 			switch {
-			case p.Activity != "":
-				status += ":" + p.Activity
 			case p.WaitReason.Blocking():
 				// "waiting" and "blocked on a permission prompt" are the same
 				// word to a supervisor that only sees the status, and they call
 				// for opposite actions: one has an answer to read, the other is
-				// stuck until a human says yes.
+				// stuck until a human says yes. A blocked turn is still
+				// "working", too, so this has to outrank the activity label.
 				status += ":" + string(p.WaitReason)
+			case p.Activity != "":
+				status += ":" + p.Activity
 			}
 			lastMsg := truncateForKing(p.LastMessage, 80)
 			switch {

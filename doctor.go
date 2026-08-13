@@ -192,7 +192,7 @@ func pathChecks(dataDir, cfgPath string) []check {
 	}
 	if os.Getenv("AGENT_INBOX_CONFIG") == "" && cfgPath != filepath.Join(dataDir, "config.json") {
 		out = append(out, check{"hook config", statusWarn,
-			"a --config path is in use but AGENT_INBOX_CONFIG is unset, so the Stop hook will read the default instead"})
+			"a --config path is in use but AGENT_INBOX_CONFIG is unset, so the hooks will read the default instead"})
 	}
 
 	for _, d := range []struct{ name, path string }{

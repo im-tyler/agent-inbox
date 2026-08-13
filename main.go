@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,7 +43,7 @@ func run() error {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "hook":
-			runHook()
+			runHook(os.Args[2:])
 			return nil
 		case "inbox":
 			runInbox(os.Args[2:])
@@ -151,14 +152,33 @@ func runAttach(argv []string, dir string) error {
 	return c.Run()
 }
 
-// runHook is invoked as a Claude Stop hook. It reads the hook payload from
-// stdin, no-ops unless the session's cwd is a federated project, and drops an
-// event file for the inbox to ingest.
-func runHook() {
+// runHook is invoked as a Claude hook. It reads the payload from stdin,
+// no-ops unless the session's cwd is a federated project, and drops an event
+// file for the inbox to ingest.
+//
+// Two hooks land here, and the difference between them is the point. Stop
+// fires when a turn finishes and the session has something to show. Notification
+// fires when it is stuck — waiting on permission, or on an answer — and a
+// session sitting on a prompt is not the same event as one that replied, even
+// though both leave the project "waiting".
+//
+// The kind is a flag rather than a payload field because Claude does not name
+// itself in the payload, and registering the same binary twice is how the two
+// hooks are distinguished at the point of registration.
+func runHook(args []string) {
+	fs := flag.NewFlagSet("hook", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	kind := fs.String("kind", "stop", "which hook fired: stop or notification")
+	if err := fs.Parse(args); err != nil {
+		return
+	}
+
 	var p struct {
 		SessionID      string `json:"session_id"`
 		TranscriptPath string `json:"transcript_path"`
 		CWD            string `json:"cwd"`
+		// Notification carries the prompt text; Stop does not send it.
+		Message string `json:"message"`
 	}
 	if json.NewDecoder(os.Stdin).Decode(&p) != nil {
 		return
@@ -178,10 +198,31 @@ func runHook() {
 	if !known {
 		return // not a federated project — stay silent
 	}
-	// The tool is "claude" because this is a Claude Stop hook, not because of
-	// what the project is configured to use. Labelling a Claude session with a
-	// Codex project's tool let a manually-run Claude session in a Codex
-	// project's directory overwrite that project's Codex session id.
+
+	ev := inbox.Event{
+		SessionID: p.SessionID,
+		Dir:       p.CWD,
+		// The tool is "claude" because this is a Claude hook, not because of
+		// what the project is configured to use. Labelling a Claude session
+		// with a Codex project's tool let a manually-run Claude session in a
+		// Codex project's directory overwrite that project's Codex session id.
+		Tool: "claude",
+		TS:   time.Now().UnixNano(),
+	}
+
+	if *kind == "notification" {
+		reason, detail := classifyNotification(p.Message)
+		// A notification that is neither a permission prompt nor a question is
+		// Claude's idle nudge. Filing it would flip a working project to
+		// waiting while its turn is still running.
+		if reason == "" {
+			return
+		}
+		ev.Reason, ev.Detail = reason, detail
+		_ = inbox.WriteEvent(filepath.Join(dd, "events"), ev)
+		return
+	}
+
 	msg, err := inbox.LastAssistantText(p.TranscriptPath)
 	if err != nil {
 		// A transcript we cannot read means we do not know what was said. An
@@ -189,13 +230,28 @@ func runHook() {
 		// reply against a new turn.
 		return
 	}
-	_ = inbox.WriteEvent(filepath.Join(dd, "events"), inbox.Event{
-		SessionID: p.SessionID,
-		Dir:       p.CWD,
-		Tool:      "claude",
-		Message:   msg,
-		TS:        time.Now().UnixNano(),
-	})
+	ev.Reason = inbox.ReasonDone
+	ev.Message = msg
+	_ = inbox.WriteEvent(filepath.Join(dd, "events"), ev)
+}
+
+// classifyNotification decides what a Notification payload means, returning an
+// empty reason for the ones that are not worth an event.
+//
+// Claude sends this hook for two different situations behind one message
+// field: a permission request, and a sixty-second idle nudge. Only the first is
+// a state change — the second says the user has not typed lately, which is not
+// something the fleet should render as a project needing attention.
+func classifyNotification(msg string) (inbox.Reason, string) {
+	low := strings.ToLower(msg)
+	switch {
+	case strings.Contains(low, "permission"), strings.Contains(low, "approve"):
+		return inbox.ReasonPermission, strings.TrimSpace(msg)
+	case strings.Contains(low, "waiting for your input"):
+		return inbox.ReasonQuestion, strings.TrimSpace(msg)
+	default:
+		return "", ""
+	}
 }
 
 func repl(in *inbox.Inbox, eventsDir string) {

@@ -209,3 +209,59 @@ func projectNamed(t *testing.T, in *Inbox, name string) Project {
 	t.Fatalf("no project %q", name)
 	return Project{}
 }
+
+// A permission prompt fires *during* a turn, which is the one case the
+// mid-turn guard has to make an exception for: a turn stuck on a prompt looks
+// exactly like one doing slow work until it times out half an hour later.
+//
+// The exception is narrow. The turn keeps its status and its history; only the
+// reason is recorded, so the running subprocess is still the only thing that
+// can finish it.
+func TestAPermissionEventReachesAWorkingProject(t *testing.T) {
+	in, dir := reasonFixture(t)
+	in.mu.Lock()
+	p, _ := in.projectByName("omni")
+	p.Status = driver.StatusWorking
+	p.LastMessage = "an earlier reply"
+	before := len(p.History)
+	in.mu.Unlock()
+
+	spool(t, in, Event{
+		SessionID: "sess-1", Dir: dir, Tool: "claude",
+		Reason: ReasonPermission, Detail: "Bash(rm -rf /)", TS: time.Now().UnixNano(),
+	})
+
+	got := projectNamed(t, in, "omni")
+	if got.Status != driver.StatusWorking {
+		t.Errorf("status = %s — the turn's own state was taken from it", got.Status)
+	}
+	if got.WaitReason != ReasonPermission {
+		t.Errorf("WaitReason = %q, want permission", got.WaitReason)
+	}
+	if got.LastMessage != "an earlier reply" {
+		t.Errorf("LastMessage was overwritten: %q", got.LastMessage)
+	}
+	if len(got.History) != before {
+		t.Errorf("history grew by %d; a mid-turn event must not write to it", len(got.History)-before)
+	}
+}
+
+// Everything else still yields to a running turn.
+func TestANonBlockingEventStillCannotInterruptATurn(t *testing.T) {
+	in, dir := reasonFixture(t)
+	in.mu.Lock()
+	p, _ := in.projectByName("omni")
+	p.Status = driver.StatusWorking
+	in.mu.Unlock()
+
+	updated := spool(t, in, Event{
+		SessionID: "sess-1", Dir: dir, Tool: "claude",
+		Reason: ReasonDone, Message: "done", TS: time.Now().UnixNano(),
+	})
+	if len(updated) != 0 {
+		t.Errorf("a done event interrupted a running turn: %v", updated)
+	}
+	if got := projectNamed(t, in, "omni"); got.Status != driver.StatusWorking {
+		t.Errorf("status = %s, want working", got.Status)
+	}
+}

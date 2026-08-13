@@ -512,12 +512,15 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 		// has to show why, or the ✗ is a fact with no cause attached.
 		sub := p.LastMessage
 		switch {
+		case p.WaitReason.Blocking():
+			// Ahead of the activity line, because a turn stuck on a prompt is
+			// still "working" and would otherwise read as slow progress right
+			// up until it times out. A blocked project has also not said
+			// anything, so its previous reply here would read as the thing
+			// needing attention.
+			sub = blockedPreview(p)
 		case p.Status == driver.StatusWorking && p.Activity != "":
 			sub = p.Activity
-		case p.WaitReason.Blocking():
-			// A blocked project has not said anything; showing its previous
-			// reply here reads as that reply being what needs attention.
-			sub = blockedPreview(p)
 		case p.Status == driver.StatusError && p.LastErr != "":
 			sub = p.LastErr
 		}

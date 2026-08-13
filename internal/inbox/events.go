@@ -177,13 +177,27 @@ func (in *Inbox) applyEvent(ev Event) (string, bool) {
 		if p.SessionID == "" || ev.SessionID != p.SessionID {
 			continue
 		}
+		ts := time.Unix(0, ev.TS)
 		// A turn the inbox is running owns this project's state. An event
 		// arriving mid-turn would flip it to waiting, let the UI send again,
 		// and leave the original subprocess to have its result discarded.
 		if in.active[p.Name] != nil || p.Status == driver.StatusWorking {
+			// A permission prompt is the exception, and it is the case the
+			// notification hook exists for: it fires *during* a turn, and a
+			// turn stuck on a prompt looks exactly like one doing slow work
+			// until it hits the timeout half an hour later. So record why it
+			// is stuck without taking the turn's state away from it — status
+			// stays Working, nothing is written to history, and the running
+			// subprocess remains the only thing that can finish this turn.
+			if ParseReason(string(ev.Reason)).Blocking() {
+				p.WaitReason = ParseReason(string(ev.Reason))
+				p.WaitDetail = ev.Detail
+				p.Activity = "blocked"
+				p.UpdatedAt = ts
+				return p.Name, true
+			}
 			continue
 		}
-		ts := time.Unix(0, ev.TS)
 		// Reject an event older than what we already have. Files are ingested
 		// oldest-first, but a hook can be slow to write and arrive out of
 		// order relative to a turn that completed here.
