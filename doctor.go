@@ -13,6 +13,7 @@ import (
 	"github.com/im-tyler/agent-inbox/internal/config"
 	"github.com/im-tyler/agent-inbox/internal/fsutil"
 	"github.com/im-tyler/agent-inbox/internal/sources"
+	"github.com/im-tyler/agent-inbox/internal/usage"
 )
 
 // doctor exists because this program is mostly a consumer of other people's
@@ -62,6 +63,7 @@ func runDoctor(args []string) error {
 	checks = append(checks, toolChecks()...)
 	checks = append(checks, helperChecks()...)
 	checks = append(checks, pathChecks(dd, *cfgPath)...)
+	checks = append(checks, usageCheck())
 	checks = append(checks, sourceChecks()...)
 
 	worst := statusOK
@@ -276,4 +278,27 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// usageCheck reports whether the capacity figures have anything to read.
+//
+// It exists for the same reason the rest of this command does: when the source
+// is unreadable the capacity line simply does not appear, which is the right
+// UI and an indistinguishable one from "you have not used anything yet". This
+// is the place that tells the two apart.
+func usageCheck() check {
+	var src usage.Claude
+	snap, err := src.Read()
+	switch {
+	case err != nil:
+		return check{"usage", statusWarn, "cannot read Claude Code transcripts: " + err.Error()}
+	case snap.Block.Empty() && snap.Week.Empty():
+		return check{"usage", statusOK, "no usage in the last 7 days (capacity will not be shown)"}
+	default:
+		detail := fmt.Sprintf("~%s tokens this week", usage.Compact(snap.Week.Total()))
+		if snap.Account != "" {
+			detail += ", account " + snap.Account
+		}
+		return check{"usage", statusOK, detail + " (estimated)"}
+	}
 }

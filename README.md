@@ -444,11 +444,14 @@ the timeout half an hour later.
 
 ```
 main.go            entry: TUI (default), legacy REPL (--repl), or hook
-supervisor.go      provisions the supervisor's folder, brief and project
+supervisor.go      provisions each group's supervisor: folder, brief, project
 inbox_cmd.go       `agent-inbox inbox` — the reader, headless or --json
-internal/config    config.json (projects + per-tool settings)
+internal/config    config.json (projects, groups, per-tool settings)
 internal/inbox     project state, mutex-guarded; background sends; persistence
+                   groups, notes/constraints, the git + usage refresh, autonomy
 internal/driver    Driver interface + adapters (mock, claude, opencode, codex)
+internal/git       read-only tree inspection and the fixed [git: ] queries
+internal/usage     what has been spent against the rate limit, deduplicated
 internal/feed      the teploy.inbox/v1 item shape, merge and sort
 internal/sources   session discovery per tool
 internal/mux       zellij/tmux pane detection and injection
