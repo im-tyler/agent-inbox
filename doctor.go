@@ -105,7 +105,11 @@ func toolChecks() []check {
 		{
 			name: "opencode", bin: "opencode", versionArgs: []string{"--version"},
 			probe: []string{"run", "--help"},
-			want:  []string{"--session", "--interactive"},
+			// --format is what the streaming path reads its events from. It
+			// went unchecked while this driver ignored run's output; now that
+			// the reply and the session id both come from there, its absence
+			// would strand every OpenCode turn.
+			want: []string{"--session", "--interactive", "--format"},
 		},
 		{
 			name: "codex", bin: "codex", versionArgs: []string{"--version"},

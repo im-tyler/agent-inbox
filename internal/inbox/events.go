@@ -15,15 +15,74 @@ import (
 	"github.com/im-tyler/agent-inbox/internal/ident"
 )
 
-// Event is what a Stop hook drops on disk for the inbox to ingest. It lets
-// sessions the inbox did not spawn (e.g. a Claude session you run by hand)
-// report their state into the central inbox.
+// Event is what a hook drops on disk for the inbox to ingest. It lets sessions
+// the inbox did not spawn (e.g. a Claude session you run by hand) report their
+// state into the central inbox.
 type Event struct {
 	SessionID string `json:"session_id"`
 	Dir       string `json:"dir"`
 	Tool      string `json:"tool"`
 	Message   string `json:"message"`
 	TS        int64  `json:"ts"`
+
+	// Reason is why the session stopped. An event used to carry a message and
+	// nothing else, so everything that reached the inbox became the same
+	// undifferentiated "waiting" — and the supervisor, whose whole job is
+	// deciding what to do about a stalled project, could tell that one was
+	// stalled but never why.
+	//
+	// Empty means ReasonDone: events written by an older binary, or by a hook
+	// that predates this field, still ingest as what they were.
+	Reason Reason `json:"reason,omitempty"`
+
+	// Detail is the specific ask when Reason needs one — the tool a permission
+	// prompt is blocked on, the question being posed. One line, not a
+	// transcript.
+	Detail string `json:"detail,omitempty"`
+}
+
+// Reason is the closed set of ways a session can stop.
+//
+// Closed because the supervisor branches on it and the fleet renders it: a
+// value invented by a hook would reach both as an unhandled case. Anything
+// unrecognised is normalised to ReasonDone on ingest.
+type Reason string
+
+const (
+	// ReasonDone: the turn finished and the session is idle.
+	ReasonDone Reason = "done"
+	// ReasonPermission: the agent is blocked asking to do something. This is
+	// the one that most needs to be distinguishable — it is not progress, it
+	// is a decision waiting on a human, and it stays blocked indefinitely.
+	ReasonPermission Reason = "permission"
+	// ReasonQuestion: the agent asked something and cannot continue until it
+	// is answered.
+	ReasonQuestion Reason = "question"
+	// ReasonError: the turn failed.
+	ReasonError Reason = "error"
+)
+
+// ParseReason normalises a reason from disk. An unknown value becomes
+// ReasonDone rather than an error: an event that reached the spool describes
+// something that really happened, and discarding it over a label loses the
+// event entirely.
+func ParseReason(s string) Reason {
+	switch Reason(strings.ToLower(strings.TrimSpace(s))) {
+	case ReasonPermission:
+		return ReasonPermission
+	case ReasonQuestion:
+		return ReasonQuestion
+	case ReasonError:
+		return ReasonError
+	default:
+		return ReasonDone
+	}
+}
+
+// Blocking reports whether a reason means the session is stuck on a human
+// rather than finished with its turn.
+func (r Reason) Blocking() bool {
+	return r == ReasonPermission || r == ReasonQuestion
 }
 
 // eventSeq disambiguates two events written in the same nanosecond by the same
@@ -131,15 +190,44 @@ func (in *Inbox) applyEvent(ev Event) (string, bool) {
 		if !p.UpdatedAt.IsZero() && ts.Before(p.UpdatedAt) {
 			continue
 		}
+		reason := ParseReason(string(ev.Reason))
 		p.Status = driver.StatusWaiting
+		if reason == ReasonError {
+			p.Status = driver.StatusError
+			if p.LastErr = ev.Detail; p.LastErr == "" {
+				p.LastErr = "the session reported an error"
+			}
+		}
+		p.WaitReason = reason
+		p.WaitDetail = ev.Detail
 		if ev.Message != "" {
 			p.LastMessage = ev.Message
 			p.appendHistory(Message{Role: "assistant", Content: ev.Message, Timestamp: ts})
+		}
+		// A blocked session has not said anything — it is sitting on a prompt.
+		// Without a line here the fleet shows the previous turn's reply beside
+		// a badge saying something needs attention, which reads as that reply
+		// being what needs attention.
+		if reason.Blocking() {
+			p.appendHistory(Message{Role: "system", Content: blockedLine(reason, ev.Detail), Timestamp: ts})
 		}
 		p.UpdatedAt = ts
 		return p.Name, true
 	}
 	return "", false
+}
+
+// blockedLine is what a blocked session's thread says, since the session
+// itself said nothing.
+func blockedLine(r Reason, detail string) string {
+	what := "waiting on a decision from you"
+	if r == ReasonPermission {
+		what = "blocked asking permission"
+	}
+	if detail != "" {
+		return what + ": " + detail
+	}
+	return what
 }
 
 func shortID(s string) string {

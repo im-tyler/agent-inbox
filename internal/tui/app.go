@@ -353,6 +353,20 @@ func demarkdown(line string) (string, bool) {
 	return strings.TrimRight(line, " "), heading
 }
 
+// blockedPreview is the sidebar line for a project sitting on a prompt. It
+// leads with what is blocked rather than the detail, because at twenty columns
+// the detail is the half that gets cut.
+func blockedPreview(p inbox.Project) string {
+	head := "needs a decision"
+	if p.WaitReason == inbox.ReasonPermission {
+		head = "needs permission"
+	}
+	if p.WaitDetail != "" {
+		return head + ": " + p.WaitDetail
+	}
+	return head
+}
+
 // buildTabLine renders one tab per group, or "" when the fleet is not split.
 //
 // A strip labelling a single tab is chrome that tells you nothing, and most
@@ -500,6 +514,10 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 		switch {
 		case p.Status == driver.StatusWorking && p.Activity != "":
 			sub = p.Activity
+		case p.WaitReason.Blocking():
+			// A blocked project has not said anything; showing its previous
+			// reply here reads as that reply being what needs attention.
+			sub = blockedPreview(p)
 		case p.Status == driver.StatusError && p.LastErr != "":
 			sub = p.LastErr
 		}

@@ -399,11 +399,15 @@ Every claim here was checked by running the tool, not by reading its docs.
   `--output-format stream-json` emits NDJSON `system` / `assistant` / `result`
   events. `--resume <id> --fork-session` seeds a new session from a live one and
   returns the new id.
-- **OpenCode 1.18.11** — `opencode run --format json` is **empty on success**, so
-  the adapter ignores run output and reads the reply via `opencode export <id>`.
-  A new session's id is recovered by set-difference of `session list` around the
-  run, serialized so concurrent projects cannot claim each other's. There is no
-  event stream on `run`; `opencode serve` exists for a future adapter.
+- **OpenCode 1.18.18** — `opencode run --format json` emits NDJSON:
+  `step_start` / `tool_use` / `text` / `step_finish`, and **every event carries
+  `sessionID`**. That is what the adapter streams from, and it is why the
+  session id needs no recovering. `step_finish` also reports `reason` (`stop`
+  ends the turn, `tool-calls` ends a step) plus token counts and cost.
+  Up to 1.18.11 `--format json` was empty on success, so the blocking path —
+  still reached when a turn cannot stream — reads the reply via `opencode
+  export <id>` and recovers a new session's id by set-difference of `session
+  list` around the run.
 - **Codex CLI 0.146.0** — `codex exec --json` emits `thread.started` /
   `item.started` / `item.completed` / `turn.completed`. The conversation id is
   **`thread_id`**, not `session_id`; resume with `codex exec resume <thread_id>`.
@@ -414,10 +418,9 @@ Every claim here was checked by running the tool, not by reading its docs.
 
 - **Permission policy** — the decision that determines whether this reduces load
   or relocates it. Currently passes through each tool's own mode.
-- **OpenCode streaming** — no event stream exists on `run`; real streaming means
-  driving `opencode serve` over SSE, which is a different transport.
-- **OpenCode / Codex stop-equivalents** — OpenCode's CLI has no Stop hook.
-  Codex has a config-driven hooks system, not yet wired.
+- **OpenCode / Codex stop-equivalents** — a session you run by hand only reports
+  in through a Claude Stop hook. OpenCode's `session.idle` event and Codex's
+  config-driven hooks are both usable and neither is wired.
 - **Autonomous supervision** — the supervisor acts only when you message it. An
   event-driven king that reacts when a project finishes on its own is the next
   real feature.

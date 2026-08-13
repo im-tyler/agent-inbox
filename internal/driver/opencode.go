@@ -19,14 +19,24 @@ import (
 // without configuring a paid provider.
 const DefaultOpenCodeModel = "opencode/deepseek-v4-flash-free"
 
-// OpenCode drives `opencode run`. Verified against opencode 1.15.11/1.16.2
-// and 1.18.11:
-//   - `opencode run --format json` is EMPTY on success, so we ignore run output
-//     and read the reply back via `opencode export <id>` (clean structured JSON).
+// OpenCode drives `opencode run`.
+//
+// There are two paths, and the streaming one in opencode_stream.go is the one
+// that normally runs — the inbox prefers StreamSend wherever a driver offers
+// it. What follows is the blocking path, which is still reached when a turn
+// cannot stream.
+//
+// Verified against opencode 1.15.11/1.16.2 and 1.18.11:
+//   - `opencode run --format json` was EMPTY on success, so this path ignores
+//     run output and reads the reply back via `opencode export <id>`. As of
+//     1.18.18 that is no longer true — it emits NDJSON events — which is what
+//     the streaming path reads, and why it needs none of the recovery below.
 //   - `run` cannot create a session with a preset id, and `session list` is
 //     recency-ordered, so a new session's id is found by set-difference of
 //     session ids around the run, serialized via mu so only one new session is
 //     created at a time (safe under concurrent projects; resumes are unlocked).
+//     The streaming path does not need this either: every event it reads
+//     carries the session id.
 type OpenCode struct {
 	Model           string
 	SkipPermissions bool

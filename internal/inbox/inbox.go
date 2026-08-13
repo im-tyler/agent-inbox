@@ -29,6 +29,14 @@ type Project struct {
 	UpdatedAt   time.Time     `json:"updated_at"`
 	History     []Message     `json:"history,omitempty"`
 
+	// WaitReason is why this project is waiting, when a hook was specific
+	// enough to say. Persisted, because a session blocked on a permission
+	// prompt is still blocked after a restart, and coming back as an
+	// undifferentiated "waiting" loses the one fact that decides what to do
+	// about it. WaitDetail is the specific ask, when there is one.
+	WaitReason Reason `json:"wait_reason,omitempty"`
+	WaitDetail string `json:"wait_detail,omitempty"`
+
 	// ForkFrom names a session belonging to something else — the live agent
 	// this project was adopted from. The first send seeds a new session with
 	// its history rather than resuming it, and clears this once it has a
@@ -678,6 +686,10 @@ func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driver
 	}
 	p.Status = driver.StatusWorking
 	p.LastErr = ""
+	// Sending is the answer to whatever it was blocked on, or at least
+	// supersedes it. A reason left behind would keep the badge up through the
+	// next turn and the one after.
+	p.WaitReason, p.WaitDetail = "", ""
 	p.UpdatedAt = time.Now()
 	// Append the DISPLAY text (user's original message) to history —
 	// NOT the driverText which may include injected state context.
@@ -984,6 +996,7 @@ func (in *Inbox) Cancel(idx int) error {
 		previous := p.Status
 		p.Status = driver.StatusIdle
 		p.Activity = ""
+		p.WaitReason, p.WaitDetail = "", ""
 		// Don't clear LastErr/LastMessage — the detail view should still
 		// show what happened. Just the "waiting" / "error" indicator clears.
 		p.UpdatedAt = time.Now()
@@ -1280,10 +1293,15 @@ func LoadState(path string, projects []*Project) {
 		p.Status = s.Status
 		p.LastMessage = s.LastMessage
 		p.LastErr = s.LastErr
+		p.WaitReason = s.WaitReason
+		p.WaitDetail = s.WaitDetail
 		p.UpdatedAt = s.UpdatedAt
 		p.History = s.History
 		if p.Status == driver.StatusWorking {
 			p.Status = driver.StatusIdle // a send can't survive a restart
+			// The reason belonged to that turn, not to the idle project left
+			// behind.
+			p.WaitReason, p.WaitDetail = "", ""
 		}
 	}
 }

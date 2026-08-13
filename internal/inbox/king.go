@@ -326,16 +326,25 @@ func (in *Inbox) formatKingState(connectedNames []string) string {
 				firstProject = p.Name
 			}
 			status := string(p.Status)
-			if p.Activity != "" {
+			switch {
+			case p.Activity != "":
 				status += ":" + p.Activity
+			case p.WaitReason.Blocking():
+				// "waiting" and "blocked on a permission prompt" are the same
+				// word to a supervisor that only sees the status, and they call
+				// for opposite actions: one has an answer to read, the other is
+				// stuck until a human says yes.
+				status += ":" + string(p.WaitReason)
 			}
 			lastMsg := truncateForKing(p.LastMessage, 80)
-			if lastMsg == "" {
-				if p.LastErr != "" {
-					lastMsg = "error: " + truncateForKing(p.LastErr, 60)
-				} else {
-					lastMsg = "no recent activity"
-				}
+			switch {
+			case p.WaitReason.Blocking():
+				lastMsg = blockedLine(p.WaitReason, truncateForKing(p.WaitDetail, 60))
+			case lastMsg != "":
+			case p.LastErr != "":
+				lastMsg = "error: " + truncateForKing(p.LastErr, 60)
+			default:
+				lastMsg = "no recent activity"
 			}
 			// The tree, when there is one. This costs nothing to inject and
 			// answers a question that would otherwise cost a whole agent turn
