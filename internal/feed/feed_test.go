@@ -116,12 +116,16 @@ func TestNormalizeBackfillsMissingTimestampsFromEachOther(t *testing.T) {
 
 func TestSinceTimeFallsBackRatherThanDroppingTheItem(t *testing.T) {
 	i := Item{Since: "not-a-date", UpdatedAt: "2026-07-01T00:00:00Z"}
-	if i.SinceTime().IsZero() {
+	if _, ok := i.SinceTime(); !ok {
 		t.Fatal("a malformed since should fall back to updated_at")
 	}
+	// An item whose timestamps are all unparseable has an unknown age, which
+	// is reported as such rather than as the zero time. Sort treats unknown as
+	// "last within the band", not "older than everything" — otherwise omitting
+	// a date is a way to pin yourself to the top of somebody else's inbox.
 	bad := Item{Since: "nope", UpdatedAt: "also-nope"}
-	if !bad.SinceTime().IsZero() {
-		t.Fatal("unparseable timestamps should sort to the top, not error")
+	if _, ok := bad.SinceTime(); ok {
+		t.Fatal("unparseable timestamps should report unknown, not a time")
 	}
 }
 

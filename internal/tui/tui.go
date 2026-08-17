@@ -18,7 +18,9 @@ import (
 
 	"github.com/im-tyler/agent-inbox/internal/board"
 	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/ident"
 	"github.com/im-tyler/agent-inbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/termtext"
 )
 
 // viewMode controls which screen the TUI is rendering.
@@ -31,6 +33,7 @@ const (
 	viewToolPicker
 	viewMain  // king-first split-pane layout (default)
 	viewInbox // the session inbox, hosted rather than run as its own program
+	viewNotes // the supervisor's memory: what it remembers, and a way to delete it
 )
 
 // Model is the Bubble Tea model for the agent-inbox dashboard.
@@ -66,6 +69,15 @@ type Model struct {
 	focusSidebar  bool
 	sidebarCursor int // 1-based project index currently highlighted in sidebar
 
+	// activeGroup is which supervisor's tab is open, 0-based. Every view in the
+	// main screen is scoped to it: the conversation is that group's king, the
+	// sidebar is that group's fleet, and a message goes to that king with that
+	// fleet as its allowlist.
+	activeGroup int
+
+	// notesCursor is the highlighted row in the memory view.
+	notesCursor int
+
 	toast   string
 	toastAt time.Time
 
@@ -78,10 +90,22 @@ type Model struct {
 	height int
 }
 
+// projectNameAt resolves a 1-based index against a snapshot, or "" if it is
+// out of range.
+func projectNameAt(snap []inbox.Project, idx int) string {
+	if idx < 1 || idx > len(snap) {
+		return ""
+	}
+	return snap[idx-1].Name
+}
+
 // attachArgs describes a pending interactive attach request.
 type attachArgs struct {
 	Argv []string
 	Dir  string
+	// Project names the project being attached to, so the caller can record
+	// that the session advanced outside the dashboard's view of it.
+	Project string
 }
 
 // New constructs a Model bound to the given inbox.
@@ -141,8 +165,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.sendInput.Width = max(60, msg.Width-30)
-		m.mainInput.SetWidth(max(40, msg.Width-8))
+		// Clamp to the terminal, do not impose a minimum larger than it.
+		// max(60, W-30) gave a 60-column input inside a 30-column terminal.
+		m.sendInput.Width = clampInputWidth(msg.Width, 30, 60)
+		m.mainInput.SetWidth(clampInputWidth(msg.Width, 8, 40))
 		if m.view == viewInbox {
 			return m.forwardToBoard(msg)
 		}
@@ -153,27 +179,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = fmt.Sprintf("waiting: %s", strings.Join(upd, ", "))
 			m.toastAt = time.Now()
 		}
+		// A stateful session manager that cannot write its state must say so.
+		// This went to stderr, which is behind the alternate screen and so is
+		// seen by nobody until the program exits.
+		if err := m.inbox.SaveErr(); err != nil {
+			m.toast = "state not saved: " + err.Error()
+			m.toastAt = time.Now()
+		}
 		// Auto-scroll: pin to bottom.
 		if m.mainAutoScroll {
 			m.mainScrollFromBottom = 0
 		}
 		// Clamp scroll to prevent blank conversation.
+		//
+		// The bound comes from the same line builder the renderer uses. It was
+		// estimated by counting newlines in the raw content, which undercounts
+		// every message that wraps — so on a narrow terminal the clamp pulled
+		// the view back toward the bottom on each tick and the top of a long
+		// history could not be reached.
 		if m.mainScrollFromBottom > 0 {
-			snap := m.inbox.Snapshot()
-			if m.kingIndex() >= 1 && m.kingIndex() <= len(snap) {
-				king := snap[m.kingIndex()-1]
-				lineCount := 2
-				for _, msg := range king.History {
-					lineCount += 1 + strings.Count(msg.Content, "\n") + 1 + 1
-				}
-				bodyH := m.height - 7
-				maxScroll := lineCount - bodyH
-				if maxScroll < 0 {
-					maxScroll = 0
-				}
-				if m.mainScrollFromBottom > maxScroll {
-					m.mainScrollFromBottom = maxScroll
-				}
+			if maxScroll := m.mainMaxScroll(); m.mainScrollFromBottom > maxScroll {
+				m.mainScrollFromBottom = maxScroll
 			}
 		}
 		// Catch a turn that started without going through a keypress —
@@ -229,6 +255,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleToolPickerKey(msg)
 	case viewInbox:
 		return m.handleInboxKey(msg)
+	case viewNotes:
+		return m.handleNotesKey(msg)
 	}
 	return m, nil
 }
@@ -269,7 +297,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toastAt = time.Now()
 			return m, nil
 		}
-		m.attachRequest = &attachArgs{Argv: args, Dir: dir}
+		m.attachRequest = &attachArgs{Argv: args, Dir: dir, Project: projectNameAt(m.inbox.Snapshot(), m.selected)}
 		return m, tea.Quit
 
 	case "j", "down":
@@ -356,6 +384,8 @@ func (m Model) View() string {
 		return m.renderDeleteConfirm()
 	case viewToolPicker:
 		return m.renderToolPicker()
+	case viewNotes:
+		return m.renderNotes()
 	case viewInbox:
 		return m.board.View()
 	default:
@@ -363,61 +393,83 @@ func (m Model) View() string {
 	}
 }
 
+// detailWidth is the body width inside the detail frame. One definition, so
+// the renderer and the scroll bound cannot disagree about it.
+func (m Model) detailWidth() int {
+	w := m.width - 6
+	if w < 20 {
+		w = 20
+	}
+	return w
+}
+
+// detailBodyLines builds the detail view's body as the exact lines it will
+// render. Both the renderer and the scroll bound call this: the bound used to
+// be a second, approximate implementation, and the two disagreed on every
+// message that wrapped.
+func (m Model) detailBodyLines() []string {
+	snap := m.inbox.Snapshot()
+	if m.selected < 1 || m.selected > len(snap) {
+		return nil
+	}
+	p := snap[m.selected-1]
+	detailW := m.detailWidth()
+
+	var lines []string
+	head := fmt.Sprintf("dir: %s   session: %s   turns: %d",
+		shortPath(p.Dir), shortSession(p.SessionID), len(p.History))
+	// The detail view has the width the sidebar does not, so this is where the
+	// tree gets stated in full rather than compressed to a star.
+	if g := p.Git.Summary(); g != "" {
+		head += "   git: " + g
+	}
+	lines = append(lines, mutedStyle.Render(head))
+	lines = append(lines, "")
+
+	if len(p.History) == 0 {
+		lines = append(lines, mutedStyle.Render("(no messages yet)"))
+	} else {
+		// Same rendering as the king's thread, except that directive
+		// stripping is the supervisor's alone: this view is the full
+		// transcript of a project, and a project quoting the syntax is
+		// saying something, not issuing an instruction.
+		isKing := m.inbox.IsKing(p.Name)
+		for _, msg := range p.History {
+			body := displayContent(isKing, msg.Content)
+			if body == "" {
+				continue
+			}
+			glyph, label, style := speaker(msg.Role, p.Tool)
+			lines = append(lines, speakerLine(glyph, label, msg.Timestamp.Format(time.Kitchen), style, detailW))
+			lines = append(lines, wrapBody(body, detailW)...)
+			lines = append(lines, "")
+		}
+	}
+
+	if p.Status == driver.StatusWorking {
+		lines = append(lines, speakerLine(m.frame(), p.Tool, workingLabel(p.Activity), workingStyle, detailW))
+		if p.StreamingText != "" {
+			lines = append(lines, wrapBody(p.StreamingText, detailW)...)
+		}
+	}
+	return lines
+}
+
 func (m Model) viewDetail() string {
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
+		return m.tooSmall()
+	}
 	snap := m.inbox.Snapshot()
 	if m.selected < 1 || m.selected > len(snap) {
 		m.view = viewMain
 		return m.renderMain()
 	}
 	p := snap[m.selected-1]
-
-	// Frame borders and padding take four columns.
-	detailW := m.width - 6
-	if detailW < 20 {
-		detailW = 20
-	}
-
-	var b strings.Builder
-
-	// Metadata block (compact, 2 lines).
-	b.WriteString(mutedStyle.Render(fmt.Sprintf("dir: %s   session: %s   turns: %d",
-		shortPath(p.Dir), shortSession(p.SessionID), len(p.History))))
-	b.WriteString("\n\n")
-
-	// Full history (not truncated — scrollable).
-	if len(p.History) == 0 {
-		b.WriteString(mutedStyle.Render("(no messages yet)"))
-		b.WriteString("\n")
-	} else {
-		// Same rendering as the king's thread. This view is where the full
-		// replies live, so it is the last place that should hand back the
-		// raw "## Heading" and "[send to ...]" the other one strips.
-		for _, msg := range p.History {
-			body := stripDirectives(msg.Content)
-			if body == "" {
-				continue
-			}
-			glyph, label, style := speaker(msg.Role, p.Tool)
-			b.WriteString(speakerLine(glyph, label, msg.Timestamp.Format(time.Kitchen), style, detailW))
-			b.WriteString("\n")
-			b.WriteString(strings.Join(wrapBody(body, detailW), "\n"))
-			b.WriteString("\n\n")
-		}
-	}
-
-	// Live streaming text (if currently working).
-	if p.Status == driver.StatusWorking {
-		b.WriteString(speakerLine(m.frame(), p.Tool, workingLabel(p.Activity), workingStyle, detailW))
-		b.WriteString("\n")
-		if p.StreamingText != "" {
-			b.WriteString(strings.Join(wrapBody(p.StreamingText, detailW), "\n"))
-			b.WriteString("\n")
-		}
-	}
+	detailW := m.detailWidth()
+	_ = detailW
 
 	// Build full body and apply scroll.
-	body := b.String()
-	bodyLines := strings.Split(body, "\n")
+	bodyLines := m.detailBodyLines()
 
 	// Available height for body inside the frame.
 	availH := m.height - 6
@@ -463,33 +515,67 @@ func (m Model) viewDetail() string {
 	return renderFrame(m.width, m.height, title, visible, footer)
 }
 
+// shortPath keeps the tail of a path, which is the part that identifies it.
+// Measured in terminal cells and cut on rune boundaries: byte slicing could
+// split a multi-byte character and emit invalid UTF-8.
 func shortPath(dir string) string {
-	if len(dir) > 40 {
-		return "…" + dir[len(dir)-38:]
+	const max = 40
+	if termtext.Width(dir) <= max {
+		return dir
 	}
-	return dir
+	r := []rune(dir)
+	for i := range r {
+		if tail := string(r[i:]); termtext.Width(tail) <= max-1 {
+			return "…" + tail
+		}
+	}
+	return "…"
 }
 
-// detailBodyLineCount estimates how many lines the detail-view body will
-// occupy for the currently-selected project. Used by detailMaxScroll and
-// clampDetailScroll to bound the scroll offset.
-func (m Model) detailBodyLineCount() int {
+// mainMaxScroll is how far the king conversation can scroll up, measured in
+// the same rendered lines the renderer emits.
+func (m Model) mainMaxScroll() int {
 	snap := m.inbox.Snapshot()
-	if m.selected < 1 || m.selected > len(snap) {
+	contentW := m.width - 4
+	if contentW < 20 {
+		contentW = 20
+	}
+	sidebarW := contentW / 4
+	if sidebarW < 20 {
+		sidebarW = 20
+	}
+	if sidebarW > 35 {
+		sidebarW = 35
+	}
+	convW := contentW - sidebarW - 2
+	if convW < 20 {
+		convW = 20
+	}
+	inputH := m.mainInput.Height()
+	if inputH < 1 {
+		inputH = 1
+	}
+	bodyH := m.height - 6 - inputH
+	if bodyH < 3 {
+		bodyH = 3
+	}
+	maxScroll := len(m.buildConversationLines(snap, convW)) - bodyH
+	if maxScroll < 0 {
 		return 0
 	}
-	p := snap[m.selected-1]
-	lines := 2 // metadata (1 line) + blank
-	for _, msg := range p.History {
-		lines += 2 // header + blank
-		lines += strings.Count(msg.Content, "\n") + 1
-	}
-	if p.Status == driver.StatusWorking && p.StreamingText != "" {
-		lines += 2 + strings.Count(p.StreamingText, "\n")
-	} else if p.Status == driver.StatusWorking {
-		lines += 1
-	}
-	return lines
+	return maxScroll
+}
+
+// detailBodyLineCount is how many lines the detail-view body occupies for the
+// currently-selected project, counted from the exact rendered lines rather
+// than estimated from the source text. Used by detailMaxScroll and
+// clampDetailScroll to bound the scroll offset.
+//
+// The estimate it replaces counted one row per newline, so a paragraph that
+// wrapped to a dozen terminal rows counted as one: G stopped short of the
+// bottom and PgUp could not reach the first message.
+func (m Model) detailBodyLineCount() int {
+	return len(m.detailBodyLines())
 }
 
 func (m Model) detailMaxScroll() int {
@@ -528,18 +614,34 @@ func ageHuman(d time.Duration) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
+// truncateOneLine flattens s to one line of at most max terminal cells.
+//
+// It measured bytes and sliced bytes, so a multibyte rune could be cut in
+// half — producing invalid UTF-8 — and a CJK or emoji string was measured at
+// two to four times its real width, overflowing the column it was sized for.
 func truncateOneLine(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.TrimSpace(s)
-	if len(s) <= max {
-		return s
+	return termtext.Truncate(termtext.OneLine(s), max)
+}
+
+// clampInputWidth sizes a text input for the terminal: the preferred width
+// where it fits, never wider than the terminal minus its chrome.
+func clampInputWidth(termWidth, chrome, preferred int) int {
+	avail := termWidth - chrome
+	if termWidth <= 0 {
+		return preferred // no size reported yet
 	}
-	return s[:max-1] + "…"
+	if avail < preferred {
+		if avail < 10 {
+			return 10
+		}
+		return avail
+	}
+	return preferred
 }
 
 func shortSession(id string) string {
-	if len(id) > 12 {
-		return id[:12] + "…"
+	if r := []rune(id); len(r) > 12 {
+		return string(r[:12]) + "…"
 	}
 	if id == "" {
 		return "(none — send a message first)"
@@ -560,14 +662,17 @@ func helpText() string {
 		"    alt+enter     newline",
 		"    pgup/pgdn     scroll the conversation",
 		"    tab           focus the fleet",
+		"    shift+tab     next group (when the fleet is split)",
 		"    ?             close this help",
 		"    ctrl+c        quit",
 		"",
 		"  fleet focused (tab):",
 		"    j/k or ↑↓     move through the fleet",
+		"    h/l or [ ]    previous / next group",
 		"    enter         open the project's detail view",
 		"    i             session inbox",
 		"    n             new project",
+		"    m             supervisor memory — accept or delete what it remembers",
 		"    d             delete project",
 		"    t             change tool",
 		"    a             attach to the session",
@@ -585,7 +690,8 @@ func helpText() string {
 
 // (max is the Go 1.21+ builtin — no local definition needed.)
 
-// kingIndex resolves the supervisor's position in the current project list.
+// kingIndex resolves the active group's supervisor to a position in the
+// current project list.
 //
 // Resolved on each use rather than stored. The old code kept two integers —
 // one hardcoded to 1 for the dashboard, one set by pressing K — which could
@@ -595,4 +701,98 @@ func helpText() string {
 //
 // Returns 0 when there is no supervisor, which callers must treat as "no
 // conversation to show" rather than as an index.
-func (m Model) kingIndex() int { return m.inbox.KingIndex() }
+func (m Model) kingIndex() int { return m.inbox.KingIndexOf(m.activeGroup) }
+
+// groupMembers is the projects the active tab shows, as 1-based indices into
+// the snapshot: this group's supervisor first, then its fleet in project order.
+//
+// Indices stay global rather than per-tab. Every inbox call the sidebar makes —
+// Cancel, AttachArgs, Detail, RemoveProject — addresses a project by its
+// position in the whole list, and a second numbering scheme that had to be
+// translated at each of those call sites is exactly how off-by-one bugs get in.
+func (m Model) groupMembers(snap []inbox.Project) []int {
+	ki := m.kingIndex()
+	out := make([]int, 0, len(snap))
+	if ki >= 1 && ki <= len(snap) {
+		out = append(out, ki)
+	}
+	fleet := m.inbox.FleetNamesOf(m.activeGroup)
+	want := make(map[string]bool, len(fleet))
+	for _, n := range fleet {
+		want[ident.Name(n)] = true
+	}
+	for i, p := range snap {
+		if i+1 == ki {
+			continue
+		}
+		if want[ident.Name(p.Name)] {
+			out = append(out, i+1)
+		}
+	}
+	return out
+}
+
+// selectableMembers is the active group's rows the cursor may land on: its
+// fleet, without the supervisor. The supervisor's row is a label for the
+// conversation already on screen, not somewhere to navigate to.
+func (m Model) selectableMembers(snap []inbox.Project) []int {
+	ki := m.kingIndex()
+	members := m.groupMembers(snap)
+	sel := make([]int, 0, len(members))
+	for _, idx := range members {
+		if idx != ki {
+			sel = append(sel, idx)
+		}
+	}
+	return sel
+}
+
+// moveSidebar steps the cursor through the active group's fleet.
+//
+// A cursor that is not in the current selection — stale after a tab switch or
+// a removal — snaps to the first row rather than being treated as position
+// zero, which would silently skip a project on the first keypress.
+func (m *Model) moveSidebar(snap []inbox.Project, delta int) {
+	sel := m.selectableMembers(snap)
+	if len(sel) == 0 {
+		m.sidebarCursor = 0
+		return
+	}
+	pos, found := 0, false
+	for i, idx := range sel {
+		if idx == m.sidebarCursor {
+			pos, found = i, true
+			break
+		}
+	}
+	if !found {
+		m.sidebarCursor = sel[0]
+		return
+	}
+	pos = min(max(pos+delta, 0), len(sel)-1)
+	m.sidebarCursor = sel[pos]
+}
+
+// selectGroup switches tabs, wrapping at both ends, and puts the sidebar
+// cursor on something that exists in the new tab. A cursor left pointing into
+// the previous tab's fleet would highlight nothing.
+func (m *Model) selectGroup(g int) {
+	n := m.inbox.GroupCount()
+	if n < 1 {
+		n = 1
+	}
+	m.activeGroup = ((g % n) + n) % n
+	m.resetSidebarCursor()
+	m.mainScrollFromBottom = 0
+	m.mainAutoScroll = true
+}
+
+// resetSidebarCursor points the cursor at the active group's first project,
+// or at nothing when the group has no fleet.
+func (m *Model) resetSidebarCursor() {
+	if sel := m.selectableMembers(m.inbox.Snapshot()); len(sel) > 0 {
+		m.sidebarCursor = sel[0]
+		return
+	}
+	m.sidebarCursor = 0
+}

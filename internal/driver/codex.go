@@ -1,7 +1,6 @@
 package driver
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -158,10 +157,15 @@ func (c Codex) StreamSend(ctx context.Context, dir, sessionID, prompt string) <-
 		ch <- StreamEvent{Kind: StreamStarted, Activity: "starting", SessionID: sessionID}
 
 		var failure string
-		sc := bufio.NewScanner(stdout)
-		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for sc.Scan() {
-			line := bytes.TrimSpace(sc.Bytes())
+		// See jsonl.go: a Scanner that stops on a long line leaves the pipe
+		// undrained and deadlocks the Wait below.
+		jr := newJSONLReader(stdout, maxJSONLine)
+		for {
+			raw, readErr := jr.Next()
+			if readErr != nil {
+				break
+			}
+			line := bytes.TrimSpace(raw)
 			if len(line) == 0 || line[0] != '{' {
 				continue
 			}
@@ -239,9 +243,11 @@ func diagSuffix(s string) string {
 	if s == "" {
 		return ""
 	}
+	// Rune-bounded: this text goes into an error message that is rendered,
+	// and a half-written rune renders as a replacement character.
 	const max = 240
-	if len(s) > max {
-		s = s[:max] + "…"
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + "…"
 	}
 	return "\n" + s
 }

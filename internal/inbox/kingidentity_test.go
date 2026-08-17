@@ -23,8 +23,8 @@ func identityFixture(t *testing.T) *Inbox {
 // which made the supervisor an accident of config ordering.
 func TestKingResolvesByName(t *testing.T) {
 	in := identityFixture(t)
-	if got := in.KingIndex(); got != 1 {
-		t.Errorf("KingIndex() = %d, want 1", got)
+	if got := in.KingIndexOf(0); got != 1 {
+		t.Errorf("KingIndexOf(0) = %d, want 1", got)
 	}
 	if !in.IsKing("SUPERVISOR") {
 		t.Error("IsKing is case sensitive")
@@ -44,15 +44,15 @@ func TestKingIndexFollowsRemoval(t *testing.T) {
 		WithKing("supervisor")
 	t.Cleanup(in.Close)
 
-	if got := in.KingIndex(); got != 2 {
-		t.Fatalf("KingIndex() = %d, want 2", got)
+	if got := in.KingIndexOf(0); got != 2 {
+		t.Fatalf("KingIndexOf(0) = %d, want 2", got)
 	}
 	if err := in.RemoveProject(1); err != nil {
 		t.Fatalf("RemoveProject: %v", err)
 	}
 	// A stored index would still say 2 and read off the end of the slice.
-	if got := in.KingIndex(); got != 1 {
-		t.Errorf("KingIndex() = %d after removal, want 1", got)
+	if got := in.KingIndexOf(0); got != 1 {
+		t.Errorf("KingIndexOf(0) = %d after removal, want 1", got)
 	}
 }
 
@@ -60,7 +60,7 @@ func TestKingIndexFollowsRemoval(t *testing.T) {
 // way to get one back.
 func TestKingCannotBeRemoved(t *testing.T) {
 	in := identityFixture(t)
-	if err := in.RemoveProject(in.KingIndex()); err == nil {
+	if err := in.RemoveProject(in.KingIndexOf(0)); err == nil {
 		t.Fatal("the supervisor was removed")
 	}
 	if len(in.Snapshot()) != 3 {
@@ -72,9 +72,9 @@ func TestKingCannotBeRemoved(t *testing.T) {
 // itself would wait for a reply from the session doing the waiting.
 func TestFleetExcludesTheKing(t *testing.T) {
 	in := identityFixture(t)
-	got := in.FleetNames()
+	got := in.FleetNamesOf(0)
 	if len(got) != 2 || got[0] != "omni" || got[1] != "akiroo" {
-		t.Errorf("FleetNames() = %v, want [omni akiroo]", got)
+		t.Errorf("FleetNamesOf(0) = %v, want [omni akiroo]", got)
 	}
 }
 
@@ -82,13 +82,13 @@ func TestFleetExcludesTheKing(t *testing.T) {
 // the state a plain project list is in before a supervisor exists.
 func TestNoKingConfigured(t *testing.T) {
 	in := identityFixture(t).WithKing("")
-	if got := in.KingIndex(); got != 0 {
-		t.Errorf("KingIndex() = %d, want 0", got)
+	if got := in.KingIndexOf(0); got != 0 {
+		t.Errorf("KingIndexOf(0) = %d, want 0", got)
 	}
 	if in.IsKing("supervisor") {
 		t.Error("IsKing true with no king configured")
 	}
-	if got := in.FleetNames(); len(got) != 3 {
-		t.Errorf("FleetNames() = %v, want all three", got)
+	if got := in.FleetNamesOf(0); len(got) != 3 {
+		t.Errorf("FleetNamesOf(0) = %v, want all three", got)
 	}
 }

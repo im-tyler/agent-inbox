@@ -1,7 +1,6 @@
 package driver
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -51,7 +50,25 @@ func (c Claude) SendForked(ctx context.Context, dir, sourceSessionID, prompt str
 	if sourceSessionID == "" {
 		return c.Send(ctx, dir, "", prompt)
 	}
-	return c.send(ctx, dir, sourceSessionID, prompt, []string{"--resume", sourceSessionID, "--fork-session"})
+	// The fallback id is empty, not the source. Passing the source as the
+	// fallback meant a fork that failed — or that succeeded without reporting
+	// a new id — returned the *borrowed* session as this project's own. The
+	// project then held an id belonging to somebody else's live agent, and
+	// resuming it would have put two writers on that transcript.
+	res := c.send(ctx, dir, "", prompt, []string{"--resume", sourceSessionID, "--fork-session"})
+	if res.Err != nil {
+		res.SessionID = ""
+		return res
+	}
+	// A fork that reports no id, or reports the source's, has not given this
+	// project a session of its own. Treat that as a failure so ForkFrom is
+	// kept and the next attempt tries again, rather than silently adopting a
+	// session we do not own.
+	if res.SessionID == "" || res.SessionID == sourceSessionID {
+		return Result{Status: StatusError,
+			Err: fmt.Errorf("claude: fork of %s did not report a new session id", sourceSessionID)}
+	}
+	return res
 }
 
 func (c Claude) Send(ctx context.Context, dir, sessionID, prompt string) Result {
@@ -138,16 +155,26 @@ func (c Claude) StreamSend(ctx context.Context, dir, sessionID, prompt string) <
 
 		var finalText strings.Builder
 		sawTerminal := false
-		sc := bufio.NewScanner(stdout)
-		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
+		// jsonlReader rather than bufio.Scanner: a Scanner stops on a line
+		// longer than its buffer, and the Wait below would then block forever
+		// against a child still trying to write it. See jsonl.go.
+		jr := newJSONLReader(stdout, maxJSONLine)
+		for {
+			raw, err := jr.Next()
+			if err != nil {
+				break
+			}
+			line := strings.TrimSpace(string(raw))
 			if line == "" {
 				continue
 			}
 			if classifyClaudeStreamLine(line, ch, &finalText, &sessionID) {
 				sawTerminal = true
 			}
+		}
+		if jr.Skipped > 0 {
+			ch <- StreamEvent{Kind: StreamToolCall, SessionID: sessionID,
+				Activity: fmt.Sprintf("skipped %d oversized event(s)", jr.Skipped)}
 		}
 
 		waitErr := cmd.Wait()

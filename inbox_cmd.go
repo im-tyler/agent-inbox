@@ -48,7 +48,12 @@ Flags:
 		fmt.Fprintf(os.Stderr, "sources: %v\n", err)
 		os.Exit(1)
 	}
-	built := cfg.Build()
+	built, problems := cfg.BuildWithDiagnostics()
+	// A source that was skipped for a typo used to vanish without a word, so
+	// "kind": "opencdoe" looked exactly like an empty inbox.
+	for _, p := range problems {
+		fmt.Fprintf(os.Stderr, "! sources: %v\n", p)
+	}
 	if len(built) == 0 {
 		fmt.Fprintf(os.Stderr, "no usable sources configured (%s)\n", *cfgPath)
 		os.Exit(1)
@@ -57,13 +62,29 @@ Flags:
 	if *asJSON {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		items, results := sources.FetchAll(ctx, built)
+		agg := sources.Fetch(ctx, built)
 		// Unreachable sources go to stderr so stdout stays a clean feed for
 		// whatever is parsing it.
-		for _, bad := range sources.Errors(results) {
+		for _, bad := range sources.Errors(agg.Results) {
 			fmt.Fprintf(os.Stderr, "! %v\n", bad.Err)
 		}
-		out, err := json.MarshalIndent(feed.Feed{Schema: feed.Schema, Items: items}, "", "  ")
+		for _, r := range agg.Results {
+			for _, w := range r.Warnings {
+				fmt.Fprintf(os.Stderr, "! %v\n", w)
+			}
+		}
+		// truncated is the machine-readable half of those warnings. This
+		// command is meant for scripts and agents, and a valid envelope that
+		// silently omits the one source holding a pending decision reads as
+		// "nothing is waiting" — a failure that looks like an answer.
+		if len(problems) > 0 {
+			agg.Truncated = true
+		}
+		out, err := json.MarshalIndent(feed.Feed{
+			Schema:    feed.Schema,
+			Items:     agg.Items,
+			Truncated: agg.Truncated,
+		}, "", "  ")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "encode: %v\n", err)
 			os.Exit(1)

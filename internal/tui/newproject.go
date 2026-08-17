@@ -74,7 +74,7 @@ func (m *Model) renderNewProject() string {
 		b.WriteString(np.folder.Value())
 		b.WriteString("\n\n")
 		b.WriteString("  agent:  ")
-		for i, tool := range config.KnownTools {
+		for i, tool := range config.SelectableTools() {
 			marker := "  "
 			if np.agent == tool {
 				marker = "> "
@@ -147,8 +147,8 @@ func (m *Model) handleNpFolderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.np.errMsg = ""
 		m.np.step = npAgent
 		// Default the agent to first known tool (claude).
-		if len(config.KnownTools) > 0 && m.np.agent == "" {
-			m.np.agent = config.KnownTools[0]
+		if len(config.SelectableTools()) > 0 && m.np.agent == "" {
+			m.np.agent = config.SelectableTools()[0]
 		}
 		return m, nil
 	}
@@ -175,20 +175,20 @@ func (m *Model) handleNpAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "1", "2", "3", "4":
 		var n int
 		fmt.Sscanf(msg.String(), "%d", &n)
-		if n >= 1 && n <= len(config.KnownTools) {
-			m.np.agent = config.KnownTools[n-1]
+		if n >= 1 && n <= len(config.SelectableTools()) {
+			m.np.agent = config.SelectableTools()[n-1]
 		}
 		return m, nil
 	case "up", "left", "h":
-		i := indexOf(config.KnownTools, m.np.agent)
+		i := indexOf(config.SelectableTools(), m.np.agent)
 		if i > 0 {
-			m.np.agent = config.KnownTools[i-1]
+			m.np.agent = config.SelectableTools()[i-1]
 		}
 		return m, nil
 	case "down", "right", "l":
-		i := indexOf(config.KnownTools, m.np.agent)
-		if i >= 0 && i < len(config.KnownTools)-1 {
-			m.np.agent = config.KnownTools[i+1]
+		i := indexOf(config.SelectableTools(), m.np.agent)
+		if i >= 0 && i < len(config.SelectableTools())-1 {
+			m.np.agent = config.SelectableTools()[i+1]
 		}
 		return m, nil
 	}

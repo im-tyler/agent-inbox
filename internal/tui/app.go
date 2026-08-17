@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 	"github.com/muesli/reflow/wordwrap"
 
 	"github.com/im-tyler/agent-inbox/internal/driver"
+	"github.com/im-tyler/agent-inbox/internal/ident"
 	"github.com/im-tyler/agent-inbox/internal/inbox"
+	"github.com/im-tyler/agent-inbox/internal/usage"
 )
 
 // renderMain draws the split-pane king-first layout with EXACT width/height
@@ -21,7 +24,39 @@ import (
 // characters so nothing wraps. bodyH = terminalHeight - 7 (the exact
 // count of non-body lines: top border, title, blank, blank, input, hint,
 // bottom border).
+const (
+	// minWidth and minHeight are the smallest terminal this layout is built
+	// for. Below them the frame's arithmetic stops describing the screen: the
+	// minimum clamps on the composer and the two panes add up to more than the
+	// terminal has, so every row overflows and the borders break apart.
+	//
+	// Saying so is better than rendering a 40-column composer into 20 columns
+	// and letting the user work out why it looks like that.
+	minWidth  = 40
+	minHeight = 10
+)
+
+// tooSmall is the whole screen when the terminal cannot hold the layout.
+func (m Model) tooSmall() string {
+	// Built by hand rather than through the frame, because the frame is the
+	// thing that does not fit.
+	lines := []string{"agent-inbox", "terminal too small", fmt.Sprintf("need %dx%d", minWidth, minHeight)}
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		if m.height > 0 && len(out) >= m.height {
+			break
+		}
+		out = append(out, truncateOneLine(ln, m.width))
+	}
+	return strings.Join(out, "\n")
+}
+
 func (m Model) renderMain() string {
+	// A zero size is the frame before the first WindowSizeMsg arrives, not a
+	// tiny terminal.
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
+		return m.tooSmall()
+	}
 	snap := m.inbox.Snapshot()
 	W := m.width
 	H := m.height
@@ -118,13 +153,21 @@ func (m Model) renderMain() string {
 	}
 	inputLines = inputLines[:inputH]
 
-	// Contextual footer based on focus.
+	// Contextual footer based on focus. The group hint only appears when there
+	// is more than one — a key that does nothing is worse than an undocumented
+	// one, because it makes the user look for the behaviour it promises.
+	split := m.inbox.GroupCount() > 1
 	var footerText string
-	if m.focusSidebar {
-		footerText = "  ↑↓ move  enter detail  i inbox  n new  d del  t tool  a attach  x cancel  tab chat"
-	} else if m.helpMode {
+	switch {
+	case m.focusSidebar && split:
+		footerText = "  ↑↓ move  [ ] group  enter detail  i inbox  m memory  n new  d del  t tool  a attach  x cancel  tab chat"
+	case m.focusSidebar:
+		footerText = "  ↑↓ move  enter detail  i inbox  m memory  n new  d del  t tool  a attach  x cancel  tab chat"
+	case m.helpMode:
 		footerText = "  ? close help"
-	} else {
+	case split:
+		footerText = "  enter send  alt+enter newline  tab fleet  shift+tab group  ? help  ctrl+c quit"
+	default:
 		footerText = "  enter send  alt+enter newline  tab fleet  ? help  ctrl+c quit"
 	}
 	// Truncate before styling: lipgloss's Width wraps rather than cuts, so a
@@ -132,12 +175,18 @@ func (m Model) renderMain() string {
 	// the border.
 	hintLine := clampWidth(mutedStyle.Render(truncateOneLine(footerText, contentW)), contentW)
 
-	// Assemble the frame.
+	// Assemble the frame. The row under the title is the tab strip when the
+	// fleet is split, and blank when it is not — a single supervisor has no
+	// tab worth drawing, and the layout it had should not change to say so.
 	var b strings.Builder
 	dash := strings.Repeat("─", contentW+2)
 	b.WriteString("╭" + dash + "╮\n")
 	b.WriteString("│ " + clampWidth(titleStyle.Render("agent-inbox"), contentW) + " │\n")
-	b.WriteString("│" + strings.Repeat(" ", contentW+2) + "│\n")
+	if tabs := m.buildTabLine(snap, contentW); tabs != "" {
+		b.WriteString("│ " + clampWidth(tabs, contentW) + " │\n")
+	} else {
+		b.WriteString("│" + strings.Repeat(" ", contentW+2) + "│\n")
+	}
 	for _, ln := range bodyLines {
 		b.WriteString("│ " + ln + " │\n")
 	}
@@ -173,12 +222,21 @@ func (m Model) buildConversationLines(snap []inbox.Project, width int) []string 
 	}
 	trunc := lipgloss.NewStyle().MaxWidth(maxW)
 
+	// With one supervisor the pane is "king". With several, two tabs both
+	// headed "king" tell you nothing about which one you are talking to, so
+	// the group names itself.
+	label := "king"
+	if groups := m.inbox.Groups(); len(groups) > 1 {
+		if label = groups[m.activeGroup].Name; label == "" {
+			label = king.Name
+		}
+	}
 	var lines []string
-	lines = append(lines, trunc.Render(headerStyle.Render("king")+mutedStyle.Render("  "+king.Tool)))
+	lines = append(lines, trunc.Render(headerStyle.Render(label)+mutedStyle.Render("  "+king.Tool)))
 	lines = append(lines, "")
 
 	for _, msg := range king.History {
-		body := stripDirectives(msg.Content)
+		body := displayContent(true, msg.Content)
 		if body == "" {
 			// A turn that was nothing but directives has already been shown
 			// as the dispatch it caused. An empty bubble adds nothing.
@@ -296,6 +354,89 @@ func demarkdown(line string) (string, bool) {
 	return strings.TrimRight(line, " "), heading
 }
 
+// blockedPreview is the sidebar line for a project sitting on a prompt. It
+// leads with what is blocked rather than the detail, because at twenty columns
+// the detail is the half that gets cut.
+func blockedPreview(p inbox.Project) string {
+	head := "needs a decision"
+	if p.WaitReason == inbox.ReasonPermission {
+		head = "needs permission"
+	}
+	if p.WaitDetail != "" {
+		return head + ": " + p.WaitDetail
+	}
+	return head
+}
+
+// buildTabLine renders one tab per group, or "" when the fleet is not split.
+//
+// A strip labelling a single tab is chrome that tells you nothing, and most
+// installs have one supervisor, so they keep the layout they had.
+//
+// Each tab carries its own attention count. The reason to split a fleet is
+// that you are no longer looking at all of it, so a project that needs you in
+// a tab you do not have open has to be able to say so from here — otherwise
+// splitting the fleet means losing track of half of it.
+func (m Model) buildTabLine(snap []inbox.Project, width int) string {
+	groups := m.inbox.Groups()
+	if len(groups) < 2 {
+		return ""
+	}
+
+	byIndex := make(map[string]int, len(snap))
+	for i, p := range snap {
+		byIndex[ident.Name(p.Name)] = i
+	}
+
+	var parts []string
+	for gi, g := range groups {
+		label := g.Name
+		if label == "" {
+			label = g.King
+		}
+		waiting, working := 0, 0
+		for _, n := range m.inbox.FleetNamesOf(gi) {
+			i, ok := byIndex[ident.Name(n)]
+			if !ok {
+				continue
+			}
+			switch snap[i].Status {
+			case driver.StatusWaiting, driver.StatusError:
+				waiting++
+			case driver.StatusWorking:
+				working++
+			}
+		}
+		// Waiting outranks working: one is a thing to do, the other is a thing
+		// happening. Only one of them fits in a tab.
+		switch {
+		case waiting > 0:
+			label += " " + waitingStyle.Render(fmt.Sprintf("%d●", waiting))
+		case working > 0:
+			label += " " + workingStyle.Render(m.frame())
+		}
+		// Underlined as well as bright. Bold-against-muted is the whole
+		// distinction on a terminal with a good palette and none of it on one
+		// without, and which tab you are typing into is not a detail to leave
+		// to the theme.
+		if gi == m.activeGroup {
+			parts = append(parts, activeTabStyle.Render(label))
+		} else {
+			parts = append(parts, mutedStyle.Render(label))
+		}
+	}
+	// Give back the separator's padding before letting the strip be cut. A
+	// narrow terminal losing the last tab entirely is worse than a cramped one
+	// that still names every group.
+	for _, sep := range []string{"  ·  ", " · ", " "} {
+		line := strings.Join(parts, mutedStyle.Render(sep))
+		if lipgloss.Width(line) <= width {
+			return line
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 // buildSidebarLines returns the fleet sidebar as a slice of lines.
 // When focusSidebar is true, the selected project is highlighted.
 func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
@@ -311,18 +452,19 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	lines = append(lines, "")
 
 	ki := m.kingIndex()
+	members := m.groupMembers(snap)
 
 	// The counts under a heading that says "fleet" are the fleet's. The
 	// supervisor was included in all three, so a fleet of two read as "3
 	// projects" and the supervisor thinking read as one of them working. Its
 	// own status is on its own row, next to the star.
 	waiting, working, fleetCount := 0, 0, 0
-	for i, p := range snap {
-		if i+1 == ki {
+	for _, idx := range members {
+		if idx == ki {
 			continue
 		}
 		fleetCount++
-		switch p.Status {
+		switch snap[idx-1].Status {
 		case driver.StatusWaiting, driver.StatusError:
 			waiting++
 		case driver.StatusWorking:
@@ -334,13 +476,14 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	// the names share a left edge. The per-row index that used to sit here
 	// selected nothing — the sidebar navigates with j/k — and it pushed the
 	// fleet's names two columns right of the king's.
-	for i, p := range snap {
-		isKing := i+1 == ki
+	for _, idx := range members {
+		p := snap[idx-1]
+		isKing := idx == ki
 		var marker string
 		switch {
 		case isKing:
 			marker = "★ "
-		case m.focusSidebar && i+1 == m.sidebarCursor:
+		case m.focusSidebar && idx == m.sidebarCursor:
 			marker = "▶ "
 		default:
 			marker = "  "
@@ -351,9 +494,16 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 		if nameW < 4 {
 			nameW = 4
 		}
-		name := truncateOneLine(p.Name, nameW)
+		// A trailing star means uncommitted changes. One column, no extra row,
+		// and it answers the question the status glyph cannot: an agent that
+		// reported it was done and left the tree clean did nothing.
+		label := p.Name
+		if p.Git.Dirty {
+			label += "*"
+		}
+		name := truncateOneLine(label, nameW)
 		entry := fmt.Sprintf("%s%-*s %s", marker, nameW, name, statusGlyph(p.Status, m.frame()))
-		if m.focusSidebar && i+1 == m.sidebarCursor && !isKing {
+		if m.focusSidebar && idx == m.sidebarCursor && !isKing {
 			lines = append(lines, trunc.Render(cursorStyle.Render(entry)))
 		} else {
 			lines = append(lines, trunc.Render(entry))
@@ -363,13 +513,20 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 		// has to show why, or the ✗ is a fact with no cause attached.
 		sub := p.LastMessage
 		switch {
+		case p.WaitReason.Blocking():
+			// Ahead of the activity line, because a turn stuck on a prompt is
+			// still "working" and would otherwise read as slow progress right
+			// up until it times out. A blocked project has also not said
+			// anything, so its previous reply here would read as the thing
+			// needing attention.
+			sub = blockedPreview(p)
 		case p.Status == driver.StatusWorking && p.Activity != "":
 			sub = p.Activity
 		case p.Status == driver.StatusError && p.LastErr != "":
 			sub = p.LastErr
 		}
 		if !isKing {
-			if s := truncateOneLine(previewText(sub), maxW-2); s != "" {
+			if s := truncateOneLine(previewText(sub, m.inbox.IsKing(p.Name)), maxW-2); s != "" {
 				lines = append(lines, trunc.Render(mutedStyle.Render("  "+s)))
 			}
 		}
@@ -385,14 +542,41 @@ func (m Model) buildSidebarLines(snap []inbox.Project, width int) []string {
 	for _, s := range fleetSummary(fleetCount, working, waiting, maxW) {
 		lines = append(lines, trunc.Render(mutedStyle.Render(s)))
 	}
+	// Capacity last, and only when there is something to say. An absent source
+	// renders as nothing rather than as a zero, because "no data" and "no usage
+	// yet" are the same number and opposite facts.
+	if u := m.inbox.Usage(); !u.Block.Empty() {
+		lines = append(lines, "")
+		for _, s := range capacityLines(u, maxW) {
+			lines = append(lines, trunc.Render(mutedStyle.Render(s)))
+		}
+	}
 	return lines
 }
 
-// fleetSummary is the count block under the sidebar. It counts every project
-// including the king — the king is one, and a total that silently excluded it
-// never matched the rows above. Kept to short lines because the sidebar is
-// twenty columns at its narrowest, where "3 projects  2 waiting" was cut to
-// "3 projects  2 wait".
+// capacityLines is the burn block under the sidebar, wrapped to the column
+// rather than truncated — the same rule as the fleet counts, for the same
+// reason: half a number is not a number.
+func capacityLines(u usage.Snapshot, width int) []string {
+	b := u.Block
+	total := "~" + usage.Compact(b.Input+b.Output+b.CacheCreate) + " this 5h"
+	out := []string{total}
+	if !u.ResetsAt.IsZero() {
+		resets := "resets " + u.ResetsAt.Local().Format("3:04PM")
+		if joined := total + "  " + resets; lipgloss.Width(joined) <= width {
+			return []string{joined}
+		}
+		out = append(out, resets)
+	}
+	return out
+}
+
+// fleetSummary is the count block under the sidebar. total is the fleet, which
+// does not include the supervisor: it is the thing managing them, and counting
+// it made a fleet of two read as "3 projects".
+//
+// Kept to short lines because the sidebar is twenty columns at its narrowest,
+// where "3 projects  2 waiting" was cut to "3 projects  2 wait".
 func fleetSummary(total, working, waiting, width int) []string {
 	out := []string{fmt.Sprintf("%d %s", total, plural(total, "project"))}
 	var parts []string
@@ -420,6 +604,12 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSidebarKey(msg)
 	}
 
+	// Tell the inbox whether a draft exists, so an autonomous supervisor does
+	// not start a turn under someone who is mid-message. Done on every key
+	// rather than on send, because the whole point is the window between
+	// starting to type and pressing enter.
+	defer func() { m.inbox.SetDraft(strings.TrimSpace(m.mainInput.Value()) != "") }()
+
 	// Chat-focused keys.
 	switch msg.String() {
 	case "enter":
@@ -427,16 +617,21 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		m.mainInput.Reset()
-		m.syncInputHeight()
 		// Everything but the supervisor. Asked of the inbox rather than
 		// derived from indices here, so one definition of "the fleet" serves
 		// the dashboard, the king panel and the dispatcher.
-		err := m.inbox.KingSend(m.kingIndex(), text, m.inbox.FleetNames())
-		if err != nil {
+		//
+		// The draft is only cleared once the turn has actually started. It
+		// used to be reset first, so a send rejected because the supervisor
+		// was already working threw away a message the user may have spent
+		// minutes writing — with nothing to paste back.
+		if err := m.inbox.KingSend(m.kingIndex(), text, m.inbox.FleetNamesOf(m.activeGroup)); err != nil {
 			m.toast = err.Error()
 			m.toastAt = time.Now()
+			return m, nil
 		}
+		m.mainInput.Reset()
+		m.syncInputHeight()
 		m.mainAutoScroll = true
 		m.mainScrollFromBottom = 0
 		// Start animating now rather than on the next second-tick, so the
@@ -447,17 +642,18 @@ func (m Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Focus the sidebar.
 		m.focusSidebar = true
 		m.mainInput.Blur()
-		// Ensure sidebarCursor points to a valid non-king project.
-		snap := m.inbox.Snapshot()
-		ki := m.kingIndex()
-		if m.sidebarCursor < 1 || m.sidebarCursor > len(snap) || m.sidebarCursor == ki {
-			for i := 1; i <= len(snap); i++ {
-				if i != ki {
-					m.sidebarCursor = i
-					break
-				}
-			}
+		// The cursor has to point at something in *this* tab. A cursor left
+		// over from another group is an index into a list this sidebar is not
+		// drawing, so it would highlight nothing.
+		if !slices.Contains(m.selectableMembers(m.inbox.Snapshot()), m.sidebarCursor) {
+			m.resetSidebarCursor()
 		}
+		return m, nil
+
+	case "shift+tab":
+		// Cycle tabs. Chat-focused, every printable key belongs to the
+		// composer, so switching groups needs one that cannot be typed.
+		m.selectGroup(m.activeGroup + 1)
 		return m, nil
 
 	case "esc":
@@ -568,25 +764,21 @@ func (m Model) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "j", "down":
-		// Next non-king project.
-		ki := m.kingIndex()
-		for i := m.sidebarCursor + 1; i <= len(snap); i++ {
-			if i != ki {
-				m.sidebarCursor = i
-				break
-			}
-		}
+		m.moveSidebar(snap, +1)
 		return m, nil
 
 	case "k", "up":
-		// Previous non-king project.
-		ki := m.kingIndex()
-		for i := m.sidebarCursor - 1; i >= 1; i-- {
-			if i != ki {
-				m.sidebarCursor = i
-				break
-			}
-		}
+		m.moveSidebar(snap, -1)
+		return m, nil
+
+	case "]", "l":
+		// Tab switching also works with the sidebar focused, where nothing is
+		// being typed and a bare bracket is free to mean something.
+		m.selectGroup(m.activeGroup + 1)
+		return m, nil
+
+	case "[", "h":
+		m.selectGroup(m.activeGroup - 1)
 		return m, nil
 
 	case "n":
@@ -602,6 +794,14 @@ func (m Model) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i":
 		// The inbox: every session on the machine, and the way to take one on.
 		return m, m.openInbox()
+
+	case "m":
+		// The supervisor's memory. Everything in it was written by model
+		// output, and a standing rule never ages out on its own, so there has
+		// to be somewhere to look at it and take one back.
+		m.notesCursor = 0
+		m.view = viewNotes
+		return m, nil
 
 	case "d":
 		// Delete selected project.
@@ -638,7 +838,7 @@ func (m Model) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toastAt = time.Now()
 			return m, nil
 		}
-		m.attachRequest = &attachArgs{Argv: args, Dir: dir}
+		m.attachRequest = &attachArgs{Argv: args, Dir: dir, Project: projectNameAt(m.inbox.Snapshot(), m.sidebarCursor)}
 		return m, tea.Quit
 
 	case "x":

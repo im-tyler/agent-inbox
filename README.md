@@ -91,6 +91,21 @@ carries the tag goreleaser stamped, a `go install` binary reads its module
 version from build info, and a working-tree build reports the tag it is ahead of
 plus `+dirty`.
 
+### Check the install
+
+```sh
+agent-inbox doctor
+```
+
+This program is mostly a consumer of other people's command-line interfaces, and
+those move. `doctor` reports each agent CLI it can find, probes it for the
+subcommands and flags this build actually passes, and lists the helper binaries
+the session sources shell out to — `sqlite3` for OpenCode's database, `lsof` for
+deciding which sessions are live. Without those two the inbox does not error; it
+quietly shows less. It also fetches every configured source once, so a parser
+that has stopped understanding its input reads as a failure rather than as an
+empty list.
+
 ## Quickstart
 
 ```sh
@@ -134,6 +149,83 @@ repository, and it cannot read the fleet's files.
    ...]` retracts one. Notes are injected into later turns and evicted by
    relevance rather than age — the oldest note is usually the most load-bearing
    one, so plain FIFO discards exactly the wrong end.
+4. **Standing rules, which you ratify.** `king.constraints` and
+   `king.priorities` in your config are injected into *every* turn regardless
+   of what it is about — a rule that only applies when its subject happens to
+   be in the room is not a rule.
+
+   The supervisor can *propose* one with `[constraint: ...]`, but a proposal
+   binds nothing. Press **`m`** from the fleet, then **`a`** to accept, which
+   writes it to your config. **`d`** deletes anything — proposal or fact.
+
+   The split is deliberate, and [Trust](#trust) explains why.
+5. **Free questions.** `[git: PROJECT status|diff|log]` is answered by
+   agent-inbox itself, from a subprocess. Everything else the supervisor wants
+   to know costs a model invocation in that project's session; this costs
+   milliseconds and no tokens, and returns the same answer every time. It is
+   told so explicitly, because a model that does not know the cheap path exists
+   will spend a turn on it.
+
+Every project's branch, divergence and dirty state also ride along in the
+injected fleet listing, so "is neutron actually mid-change" needs no question at
+all. A trailing `*` on a sidebar row means uncommitted changes — the one thing
+the status glyph cannot tell you, since an agent that reports it is done and
+leaves a clean tree did nothing.
+
+**Capacity.** How much has been spent against the five-hour rate limit is read
+from Claude Code's own transcripts and injected too, so the supervisor can
+prioritise instead of starting work that stops halfway. Three things about that
+number, because a resource figure that looks authoritative and is not gets
+trusted at exactly the wrong moment:
+
+- It is **burn, never remaining**. No published denominator exists, so
+  "remaining" would be invented. It is labelled as an estimate everywhere.
+- It is **deduplicated** on message and request id. The same message really is
+  written more than once — twice in a row in one transcript, and again when a
+  session is resumed — so summing naively inflates every figure silently.
+- Cache reads are **named separately** rather than folded into one total. On
+  real transcripts they outweigh everything else fifty to one, and a single
+  number would read as fifty times the work actually done.
+
+With no readable source the line is absent rather than zero: "no data" and "no
+usage" are the same number and opposite facts. The signed-in account is shown
+when it can be determined and reads as unknown when it cannot — attributing one
+account's burn to another is worse than admitting ignorance. Switching accounts
+is yours to do; the supervisor can recommend it and never performs it.
+
+## Trust
+
+The supervisor's replies are shaped by what its projects say, and what its
+projects say is shaped by the repositories, issues and web pages those agents
+read. So everything the supervisor writes is untrusted-derived, and the design
+follows from taking that literally.
+
+**Actions.** `[send to ...]` and `[git: ...]` are allowlisted in code, not
+trusted to the prompt: the target must be in that turn's fleet, and git's
+subcommand comes from a closed set of three. A name appearing in model output is
+a name, not authorisation. Nothing assembled from that text reaches git, which
+runs as argv and never through a shell.
+
+**Beliefs.** The same stance, applied to memory — which is the part conventional
+injection defences miss, because they screen actions rather than what an agent
+comes to believe. So:
+
+- **The supervisor cannot author policy.** It proposes; you ratify; ratified
+  rules live in `config.json`, the file you own. There is no path from a model
+  response to a rule that binds.
+- **Observations stay cheap.** Facts are model-written, but they are filtered by
+  relevance, age out of a bounded store, and override nothing — they carry their
+  own limits, which is exactly what a rule does not.
+- **A project's own words are marked wherever they appear**, with a per-line
+  `<<<`, in the fleet listing as well as in the fenced reply block. Truncating a
+  snippet to 80 characters is no defence: an instruction fits in far fewer.
+
+Deliberately **not** done: screening rule text for anything suspicious.
+Published evaluations put detection of this class at roughly half, and weak
+signals — a plausible fabricated "the team decided X" with no instruction in it
+— are close to indistinguishable from legitimate content. A filter that catches
+some of it reads as a guarantee and is not one. Nothing here inspects the text;
+the only control is who signed it.
 
 **Round budget.** By default the supervisor gets one dispatch round per message:
 ask, read every reply, answer you. `king.rounds` (max 5) lets it act on what a
@@ -147,6 +239,86 @@ silence.
 **Adoption.** OpenCode and Codex sessions are resumed directly. A Claude Code
 row is always a live process, so it is *forked* (`--fork-session`): the new
 session inherits the original's history and the original is left untouched.
+
+## Autonomy — the supervisor noticing on its own
+
+Off by default. Switched on, the supervisor starts a turn nobody asked for when
+a project in its fleet finishes or gets stuck:
+
+```json
+"king": { "rounds": 1, "autonomous": true, "wakes_per_hour": 4 }
+```
+
+This is the only thing in agent-inbox that spends money while nobody is
+watching, and a supervisor making mediocre decisions unattended is worse than
+no supervisor. So the guardrails are the feature, not a later hardening pass:
+
+- **A wake budget per hour**, separate from the round budget — they bound
+  different things: how often it may start, and how far it may go once started.
+  Exhausting it is written into the thread, never silent.
+- **Never while you are typing.** An unsent draft blocks every wake. You are
+  mid-thought, and a turn starting under you changes the fleet your message was
+  about between writing it and sending it.
+- **Coalesced.** Three projects finishing within a few seconds produce one turn
+  that sees all of it, not three that each see a slice and dispatch against a
+  fleet still in motion.
+- **Never while that supervisor is already working**, and only to the group that
+  owns the project that changed.
+- **Every wake is recorded.** A line goes into the supervisor's own thread
+  naming what woke it, before it says anything. A supervisor that acted
+  overnight and cannot say why is not auditable, and an unauditable one cannot
+  be trusted with more authority than this.
+
+The turn it gets is a different shape from your messages, because there is no
+question to answer and nobody watching. It must pick one of four: **unblock**,
+**reprompt**, **park**, **escalate** — and it is told to default to park, since
+a turn that was not needed costs more than a delay. Only escalate produces text
+for you.
+
+## Groups — more than one supervisor
+
+A supervisor's context is rebuilt from scratch on every turn out of its fleet's
+status lines and the notes that mention them. That is what makes supervision
+accurate, and it is also what degrades as the fleet grows: seven projects means
+seven status lines and every note about any of them, on every message you send.
+
+Groups split the fleet. Each one gets a supervisor of its own and a tab of its
+own, so two conversations stay about different things.
+
+```json
+"groups": [
+  { "name": "infra",   "projects": ["teploy", "infra"] },
+  { "name": "product", "projects": ["neutron", "fylun"] }
+]
+```
+
+```
+╭──────────────────────────────────────────────────────────────╮
+│ agent-inbox                                                  │
+│ infra 1●  ·  product ⠋                                       │
+│ infra  claude                              fleet             │
+│                                            ★ supervisor-infra│
+│                                              teploy        ● │
+│                                              infra         · │
+│                                            2 projects        │
+│                                            1 waiting         │
+```
+
+Each group's supervisor is provisioned the same way the single one is — named
+`supervisor-<group>`, in a folder of its own. Override any of that with a
+`king` block inside the group (`name`, `tool`, `dir`).
+
+A project belongs to exactly one group, and validation rejects a config where
+one is claimed twice. A project no group names — including one added later from
+the dashboard — joins the first group, so a project is never left in the fleet
+with no supervisor able to see it.
+
+`shift+tab` cycles tabs from the composer; `[` and `]` (or `h`/`l`) do it with
+the fleet focused. Each tab carries its own count of what is waiting, so a
+project needing you in a tab you do not have open still says so.
+
+Omit `groups` entirely for one supervisor over everything, which is the default
+and what most installs want.
 
 ## Session inbox — `i`, or headless
 
@@ -196,6 +368,7 @@ unreachable source reports itself and never blanks the rest of the list.
   "opencode": { "model": "opencode/deepseek-v4-flash-free", "skip_permissions": false },
   "codex":    { "sandbox": "workspace-write" },
   "king":     { "rounds": 1 },
+  "turn_timeout_seconds": 0,
   "projects": [
     { "name": "tebian",  "tool": "claude",   "dir": "/path/to/tebian" },
     { "name": "neutron", "tool": "opencode", "dir": "/path/to/neutron" },
@@ -204,10 +377,23 @@ unreachable source reports itself and never blanks the rest of the list.
 }
 ```
 
-`projects` may be empty — a supervisor with nothing to supervise is a usable
-state you add to with `n`. Under `king`, `rounds` is the dispatch budget and the
-optional `name`, `tool` and `dir` override the supervisor. OpenCode defaults to a
-**free, no-key** model so those projects work without configuring a provider.
+There need not be a config file at all: a missing one means the defaults, which
+is a supervisor and nothing to supervise. `projects` may likewise be empty — you
+add to it with `n`. Under `king`, `rounds` is the dispatch budget and the
+optional `name`, `tool` and `dir` override the supervisor; its name is reserved,
+so a project may not claim it. `turn_timeout_seconds` bounds one agent turn — 0
+means the 30-minute default, -1 means no limit. OpenCode defaults to a **free,
+no-key** model so those projects work without configuring a provider. An
+optional `groups` array splits the fleet between several supervisors — see
+[Groups](#groups--more-than-one-supervisor).
+
+Everything under the data directory is written `0600` in directories written
+`0700`: it holds assistant output and the paths of your repositories.
+
+If you run with a `--config` somewhere other than the default, set
+`AGENT_INBOX_CONFIG` to the same path. The Stop hook is a separate process and
+cannot see the flag, so without the variable it reads the default config and
+silently matches none of your projects.
 
 ## Keybindings
 
@@ -222,6 +408,7 @@ always shows the keys for whichever one you are in.
 | `Alt+Enter` | newline |
 | `PgUp` / `PgDn` | scroll the conversation |
 | `Tab` | focus the fleet |
+| `Shift+Tab` | next group, when the fleet is split |
 | `?` | help |
 | `Ctrl+C` | quit |
 
@@ -230,8 +417,10 @@ always shows the keys for whichever one you are in.
 | Key | Action |
 |---|---|
 | `j` / `k` | move through the fleet |
+| `[` / `]` or `h` / `l` | previous / next group |
 | `Enter` | open the selected project's detail view |
 | `i` | session inbox |
+| `m` | supervisor memory — what it remembers, and `d` to forget one |
 | `n` | new project |
 | `d` | delete · `t` change tool |
 | `a` | attach — hands the terminal to the agent, relaunches on exit |
@@ -241,36 +430,55 @@ always shows the keys for whichever one you are in.
 **Detail view**: `j`/`k` scroll · `PgDn`/`PgUp` jump 10 · `g`/`G` top/bottom ·
 `s` follow-up · `a` attach · `Esc` back.
 
-## Stop hook — push instead of poll
+## Hooks — push instead of poll
 
-Register `agent-inbox hook` as a Claude `Stop` hook and any Claude session in a
-configured project reports "I'm waiting" into the inbox — **including sessions
-you run by hand**. It no-ops for any cwd that is not a configured project, so it
-is safe to register globally.
+Register `agent-inbox hook` and any Claude session in a configured project
+reports into the inbox — **including sessions you run by hand**. It no-ops for
+any cwd that is not a configured project, so it is safe to register globally.
 
 ```json
 {
   "hooks": {
     "Stop": [
       { "hooks": [ { "type": "command", "command": "/abs/path/to/agent-inbox hook" } ] }
+    ],
+    "Notification": [
+      { "hooks": [ { "type": "command", "command": "/abs/path/to/agent-inbox hook --kind notification" } ] }
     ]
   }
 }
 ```
 
-Session stops → the hook matches cwd to a project (symlink-tolerant), extracts
-the last assistant turn, drops an event file in `events/` → the running inbox
-ingests it within a second, flips the project to `waiting`, and notifies.
+**Stop** means the turn finished. The hook matches cwd to a project
+(symlink-tolerant), extracts the last assistant turn, drops an event file in
+`events/` → the running inbox ingests it within a second and flips the project
+to `waiting`.
+
+**Notification** means it is stuck — on a permission prompt, or on a question.
+That is a different event from a reply, even though both leave a project
+"waiting", because they call for opposite actions: one has an answer to read,
+the other stays stuck until a human says yes. The reason and the specific ask
+reach the fleet view and the supervisor's status line, and Claude's
+sixty-second idle nudge is filtered out, since "the user has not typed lately"
+is not a project needing attention.
+
+This is also the one event allowed to reach a project mid-turn — recording
+*why* it is stuck without taking the turn's state from it. A turn blocked on a
+prompt otherwise looks exactly like one doing slow work, right up until it hits
+the timeout half an hour later.
 
 ## Architecture
 
 ```
 main.go            entry: TUI (default), legacy REPL (--repl), or hook
-supervisor.go      provisions the supervisor's folder, brief and project
+supervisor.go      provisions each group's supervisor: folder, brief, project
 inbox_cmd.go       `agent-inbox inbox` — the reader, headless or --json
-internal/config    config.json (projects + per-tool settings)
+internal/config    config.json (projects, groups, per-tool settings)
 internal/inbox     project state, mutex-guarded; background sends; persistence
+                   groups, notes/constraints, the git + usage refresh, autonomy
 internal/driver    Driver interface + adapters (mock, claude, opencode, codex)
+internal/git       read-only tree inspection and the fixed [git: ] queries
+internal/usage     what has been spent against the rate limit, deduplicated
 internal/feed      the teploy.inbox/v1 item shape, merge and sort
 internal/sources   session discovery per tool
 internal/mux       zellij/tmux pane detection and injection
@@ -304,11 +512,15 @@ Every claim here was checked by running the tool, not by reading its docs.
   `--output-format stream-json` emits NDJSON `system` / `assistant` / `result`
   events. `--resume <id> --fork-session` seeds a new session from a live one and
   returns the new id.
-- **OpenCode 1.18.11** — `opencode run --format json` is **empty on success**, so
-  the adapter ignores run output and reads the reply via `opencode export <id>`.
-  A new session's id is recovered by set-difference of `session list` around the
-  run, serialized so concurrent projects cannot claim each other's. There is no
-  event stream on `run`; `opencode serve` exists for a future adapter.
+- **OpenCode 1.18.18** — `opencode run --format json` emits NDJSON:
+  `step_start` / `tool_use` / `text` / `step_finish`, and **every event carries
+  `sessionID`**. That is what the adapter streams from, and it is why the
+  session id needs no recovering. `step_finish` also reports `reason` (`stop`
+  ends the turn, `tool-calls` ends a step) plus token counts and cost.
+  Up to 1.18.11 `--format json` was empty on success, so the blocking path —
+  still reached when a turn cannot stream — reads the reply via `opencode
+  export <id>` and recovers a new session's id by set-difference of `session
+  list` around the run.
 - **Codex CLI 0.146.0** — `codex exec --json` emits `thread.started` /
   `item.started` / `item.completed` / `turn.completed`. The conversation id is
   **`thread_id`**, not `session_id`; resume with `codex exec resume <thread_id>`.
@@ -319,13 +531,9 @@ Every claim here was checked by running the tool, not by reading its docs.
 
 - **Permission policy** — the decision that determines whether this reduces load
   or relocates it. Currently passes through each tool's own mode.
-- **OpenCode streaming** — no event stream exists on `run`; real streaming means
-  driving `opencode serve` over SSE, which is a different transport.
-- **OpenCode / Codex stop-equivalents** — OpenCode's CLI has no Stop hook.
-  Codex has a config-driven hooks system, not yet wired.
-- **Autonomous supervision** — the supervisor acts only when you message it. An
-  event-driven king that reacts when a project finishes on its own is the next
-  real feature.
+- **OpenCode / Codex stop-equivalents** — a session you run by hand only reports
+  in through a Claude Stop hook. OpenCode's `session.idle` event and Codex's
+  config-driven hooks are both usable and neither is wired.
 - **Multi-host** — projects on other machines over Tailscale.
 
 ## License

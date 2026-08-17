@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# The gate. Run this before tagging; CI runs it too, on both branches and tags.
+#
+# It exists because a tag used to be able to publish binaries from a commit
+# that had never passed CI: the release workflow only ran GoReleaser, so
+# "GoReleaser could build it" was the entire quality bar.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+fail() { printf '\n%s\n' "$1" >&2; exit 1; }
+
+echo "== gofmt"
+unformatted=$(gofmt -l .)
+[ -z "$unformatted" ] || fail "not gofmt'd:
+$unformatted"
+
+echo "== go mod tidy (must be a no-op)"
+cp go.mod go.mod.verify-backup
+cp go.sum go.sum.verify-backup
+restore() { mv go.mod.verify-backup go.mod; mv go.sum.verify-backup go.sum; }
+trap restore EXIT
+go mod tidy
+diff -u go.mod.verify-backup go.mod || fail "go.mod is not tidy — run 'go mod tidy'"
+diff -u go.sum.verify-backup go.sum || fail "go.sum is not tidy — run 'go mod tidy'"
+restore
+trap - EXIT
+
+echo "== go vet"
+go vet ./...
+
+echo "== go build"
+go build ./...
+
+echo "== go test"
+go test ./...
+
+echo "== go test -race -count=5"
+# Repeated because the bugs this guards against are races in turn identity and
+# persistence ordering, and those do not reproduce on a single pass.
+go test -race -count=5 ./...
+
+echo
+echo "all checks passed"

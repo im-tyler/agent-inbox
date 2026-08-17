@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,6 +32,36 @@ func (m *Model) renderDeleteConfirm() string {
 	return b.String()
 }
 
+// normalizeSelection brings both cursors back into range after the project
+// list changes, and keeps the sidebar off the supervisor — which is not one of
+// the projects those keys act on.
+func (m *Model) normalizeSelection() {
+	snap := m.inbox.Snapshot()
+	n := len(snap)
+	if n == 0 {
+		m.selected, m.sidebarCursor = 1, 1
+		return
+	}
+	clamp := func(v int) int {
+		if v > n {
+			return n
+		}
+		if v < 1 {
+			return 1
+		}
+		return v
+	}
+	m.selected = clamp(m.selected)
+	m.sidebarCursor = clamp(m.sidebarCursor)
+	// The cursor has to land on a row this tab is drawing. Clamping to the
+	// whole project list is not enough once the fleet is split: an in-range
+	// index can name a project belonging to another supervisor, which the
+	// sidebar is not showing and which a/d/t/x would then act on unseen.
+	if !slices.Contains(m.selectableMembers(snap), m.sidebarCursor) {
+		m.resetSidebarCursor()
+	}
+}
+
 func (m *Model) handleDeleteConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
@@ -41,14 +72,12 @@ func (m *Model) handleDeleteConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.view = viewMain
 			return m, nil
 		}
-		// Clamp selection to the new list length.
-		snap := m.inbox.Snapshot()
-		if m.selected > len(snap) {
-			m.selected = len(snap)
-		}
-		if m.selected < 1 {
-			m.selected = 1
-		}
+		// Clamp both selections to the new list length. sidebarCursor was
+		// missed here, and it is the one the delete was launched from: after
+		// removing the last fleet project it could still point past the end,
+		// leaving no row highlighted and every subsequent a/d/t/x aimed at an
+		// index that no longer exists.
+		m.normalizeSelection()
 		m.toast = "deleted"
 		m.toastAt = time.Now()
 		m.view = viewMain
@@ -76,7 +105,7 @@ func (m *Model) renderToolPicker() string {
 	b.WriteString("\n\n")
 	b.WriteString(mutedStyle.Render(fmt.Sprintf("  current: %s", current)))
 	b.WriteString("\n\n")
-	for i, tool := range config.KnownTools {
+	for i, tool := range config.SelectableTools() {
 		marker := "  "
 		if tool == pending {
 			marker = "> "
@@ -121,8 +150,8 @@ func (m *Model) handleToolPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "1", "2", "3", "4":
 		var n int
 		fmt.Sscanf(msg.String(), "%d", &n)
-		if n >= 1 && n <= len(config.KnownTools) {
-			m.pendingTool = config.KnownTools[n-1]
+		if n >= 1 && n <= len(config.SelectableTools()) {
+			m.pendingTool = config.SelectableTools()[n-1]
 		}
 		return m, nil
 	}

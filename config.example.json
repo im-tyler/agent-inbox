@@ -2,10 +2,24 @@
   "claude":   { "permission_mode": "default" },
   "opencode": { "model": "opencode/deepseek-v4-flash-free", "skip_permissions": false },
   "codex":    { "model": "", "sandbox": "workspace-write", "skip_approvals": false },
+
+  "_comment_turn_timeout": "Seconds one agent turn may run before it is killed. Omit for 30 minutes; -1 for no limit. A build or a test suite legitimately runs long, and cancel already exists for a turn that has genuinely hung.",
+  "turn_timeout_seconds": 0,
+
+  "_comment_king": "The supervisor is provisioned, not configured — it gets a folder of its own under the data dir. Override its name, tool or dir here if you want to. Its name is reserved: a project may not claim it.",
+  "_comment_autonomous": "autonomous lets the supervisor start a turn nobody asked for, when a project finishes or gets stuck. Off by default: it is the only thing here that spends money while nobody is watching. wakes_per_hour bounds how often it may start (default 4, capped at 30) and is separate from rounds, which bounds how far it may go once started. Every wake writes a line into the supervisor's thread naming what woke it.",
+  "_comment_rules": "Standing rules the supervisor must respect, injected into every turn. They live here, in the file you own, because the supervisor's replies are shaped by what its projects say — which is shaped by whatever those agents read. It can propose a rule with [constraint: ...]; you accept it with 'a' in the memory view (m), which is what writes it here. Nothing it writes binds until then.",
+  "king": { "rounds": 1, "autonomous": false, "wakes_per_hour": 4, "constraints": [], "priorities": [] },
+
   "projects": [
-    { "name": "demo",    "tool": "mock",     "dir": "/tmp" },
     { "name": "project-a", "tool": "claude",   "dir": "/path/to/your/project-a" },
     { "name": "project-b", "tool": "opencode", "dir": "/path/to/your/project-b" },
     { "name": "project-c", "tool": "codex",    "dir": "/path/to/your/project-c" }
+  ],
+
+  "_comment_groups": "Optional. Split the fleet between several supervisors, one per tab. A supervisor's context is rebuilt from its fleet on every turn, so six projects means six status lines on every message; two supervisors over three each are cheaper and sharper. Each group gets its own provisioned supervisor named supervisor-<group>. A project not named by any group joins the first one. Omit this entirely for a single supervisor over everything.",
+  "groups": [
+    { "name": "infra",   "projects": ["project-a", "project-b"] },
+    { "name": "product", "projects": ["project-c"] }
   ]
 }

@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/im-tyler/agent-inbox/internal/feed"
+	"github.com/im-tyler/agent-inbox/internal/sources"
 )
 
 // Adoption turns a row in the inbox into a project. The inbox already knows
@@ -64,17 +67,31 @@ func adoptSession(source, id string) (sessionID, forkFrom string) {
 	return id, ""
 }
 
-// candidateFrom derives an adoptable project from an inbox row, reporting
-// false for rows the supervisor could never drive: a deploy, a CI run, or any
-// session that never said which folder it is in.
-func candidateFrom(item feed.Item) (candidate, bool) {
+// candidateFrom derives an adoptable project from an inbox row, reporting why
+// it cannot when it cannot: a deploy, a CI run, a session that never said which
+// folder it is in, or one belonging to an installation the managed runtime
+// cannot reach.
+func candidateFrom(item feed.Item) (candidate, error) {
 	tool := toolFor(item.Source)
 	if tool == "" {
-		return candidate{}, false
+		return candidate{}, errNotAdoptable
 	}
 	dir := item.Context["cwd"]
 	if dir == "" {
-		return candidate{}, false
+		return candidate{}, errNotAdoptable
+	}
+	// A project records which *vendor* drives it, not which installation. So a
+	// session discovered through a customised source — a fork's binary, an
+	// alternate database — would be resumed by the default binary, which has
+	// never heard of that session id.
+	//
+	// Refusing is the honest answer until a project can name a driver profile.
+	// The row is still fully usable from the inbox itself: its reply and open
+	// actions invoke the configured binary, because the source built them.
+	if profile := item.Context[sources.ProfileKey]; profile != "" {
+		return candidate{}, fmt.Errorf(
+			"%s runs a customised %s (%s); the supervisor would resume it with the default %s, which does not know this session — reply to it from the inbox instead",
+			item.Origin, tool, profile, tool)
 	}
 	sessionID, forkFrom := adoptSession(item.Source, item.ID)
 	return candidate{
@@ -82,8 +99,12 @@ func candidateFrom(item feed.Item) (candidate, bool) {
 		Dir:       dir,
 		SessionID: sessionID,
 		ForkFrom:  forkFrom,
-	}, true
+	}, nil
 }
+
+// errNotAdoptable is a row that is simply not a session — no explanation is
+// more useful than the generic one.
+var errNotAdoptable = errors.New("no agent session to adopt on this row")
 
 // stripDirectives removes the king's machine syntax from what a human reads.
 // [send to X: Y] and [note: ...] are instructions to this program, not speech
@@ -93,11 +114,11 @@ func candidateFrom(item feed.Item) (candidate, bool) {
 // Only whole lines are dropped, matching how the parsers read them: prose
 // that merely mentions the syntax stays.
 // previewText flattens a message to one line for a sidebar row or a list
-// preview: directives out, markdown markers out, newlines collapsed. The
-// same cleanup the threads get, since a preview is a quote from one.
-func previewText(content string) string {
+// preview: markdown markers out, newlines collapsed. isKing selects whether
+// supervisor directives are also removed — see displayContent.
+func previewText(content string, isKing bool) string {
 	var parts []string
-	for _, raw := range strings.Split(stripDirectives(content), "\n") {
+	for _, raw := range strings.Split(displayContent(isKing, content), "\n") {
 		if t, _ := demarkdown(raw); strings.TrimSpace(t) != "" {
 			parts = append(parts, strings.TrimSpace(t))
 		}
@@ -105,12 +126,30 @@ func previewText(content string) string {
 	return strings.Join(parts, " ")
 }
 
+// displayContent is what a human should see of one message.
+//
+// Directive stripping applies only to the supervisor's own output. It was
+// applied to every project's history, so a coding agent that legitimately
+// wrote a line like "[note: this is the syntax]" — quoting documentation,
+// explaining the feature, or echoing a file — had that line silently deleted
+// from what is meant to be its full transcript. That also hides the evidence
+// when the text arrived through prompt injection, which is exactly when you
+// want to see it.
+func displayContent(isKing bool, content string) string {
+	if !isKing {
+		return strings.TrimSpace(content)
+	}
+	return stripDirectives(content)
+}
+
 func stripDirectives(content string) string {
 	lines := strings.Split(content, "\n")
 	kept := make([]string, 0, len(lines))
 	for _, ln := range lines {
 		t := strings.ToLower(strings.TrimSpace(ln))
-		if strings.HasSuffix(t, "]") && (strings.HasPrefix(t, "[send to ") || strings.HasPrefix(t, "[note")) {
+		if strings.HasSuffix(t, "]") && (strings.HasPrefix(t, "[send to ") ||
+			strings.HasPrefix(t, "[note") || strings.HasPrefix(t, "[git:") ||
+			strings.HasPrefix(t, "[constraint:") || strings.HasPrefix(t, "[priority:")) {
 			continue
 		}
 		kept = append(kept, ln)

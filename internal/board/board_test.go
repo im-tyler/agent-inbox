@@ -17,7 +17,7 @@ func TestSubstitutePlacesAFillAsExactlyOneArgument(t *testing.T) {
 	argv := []string{"teploy-ship", "deny", "run-1", "{reason}"}
 	// The whole security property: a reason full of shell metacharacters is
 	// one argument, not another command. Nothing here goes through a shell.
-	got := substitute(argv, []string{`nope; rm -rf / && echo "pwned"`})
+	got := substitute(argv, map[string]string{"reason": `nope; rm -rf / && echo "pwned"`})
 	if len(got) != 4 {
 		t.Fatalf("expected 4 args, got %d: %v", len(got), got)
 	}
@@ -28,7 +28,7 @@ func TestSubstitutePlacesAFillAsExactlyOneArgument(t *testing.T) {
 
 func TestSubstituteDropsAnArgumentWhoseFillIsEmpty(t *testing.T) {
 	// Denying with no reason should omit the argument rather than pass "".
-	got := substitute([]string{"teploy-ship", "deny", "run-1", "{reason}"}, []string{"  "})
+	got := substitute([]string{"teploy-ship", "deny", "run-1", "{reason}"}, map[string]string{"reason": "  "})
 	if join(got) != join([]string{"teploy-ship", "deny", "run-1"}) {
 		t.Fatalf("empty fill should drop the arg, got %v", got)
 	}
@@ -41,8 +41,9 @@ func TestSubstituteLeavesArgvWithoutPlaceholdersAlone(t *testing.T) {
 	}
 }
 
-func TestSubstituteFillsMultiplePlaceholdersInArgvOrder(t *testing.T) {
-	got := substitute([]string{"tool", "{choice}", "--why", "{reason}"}, []string{"deny", "not in prod"})
+func TestSubstituteFillsMultiplePlaceholdersByName(t *testing.T) {
+	got := substitute([]string{"tool", "{choice}", "--why", "{reason}"},
+		map[string]string{"choice": "deny", "reason": "not in prod"})
 	if join(got) != join([]string{"tool", "deny", "--why", "not in prod"}) {
 		t.Fatalf("got %v", got)
 	}

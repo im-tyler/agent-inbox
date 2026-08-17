@@ -5,12 +5,38 @@ on:
     tags:
       - "v*"
 
+# Least privilege by default; the release job asks for what it needs.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  # The tag is verified before anything is published.
+  #
+  # CI only ran on branches and pull requests, so a tag could point at a commit
+  # that had never passed it and still publish binaries as long as GoReleaser
+  # could build them. A failing test on a tagged commit must stop the release.
+  verify:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Install source dependencies
+        run: sudo apt-get update && sudo apt-get install -y sqlite3 lsof
+
+      - name: Verify
+        run: ./scripts/verify
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -25,7 +51,10 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          # Pinned. "latest" meant the tool that builds a release could change
+          # without any change to this repository, so the same tag could
+          # produce different artifacts on different days.
+          version: "~> v2.12"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

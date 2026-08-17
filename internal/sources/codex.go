@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -32,6 +33,8 @@ import (
 // without it the list fills with months of finished work that all looks like
 // it is waiting on you.
 type Codex struct {
+	// Label is the configured source name. Empty means the built-in default.
+	Label string
 	// Root defaults to ~/.codex/sessions.
 	Root string
 	// Bin is the codex executable. Defaults to "codex" on PATH.
@@ -53,7 +56,25 @@ const codexDefaultMaxAge = 7 * 24 * time.Hour
 // that a longer prompt does not silently drop the session.
 const metaLineMax = 4 * 1024 * 1024
 
-func (c Codex) Name() string { return "codex" }
+// Name is the configured instance name — see Claude.Name.
+func (c Codex) Name() string {
+	if c.Label != "" {
+		return c.Label
+	}
+	return "codex"
+}
+
+// profileNote — see Claude.profileNote.
+func (c Codex) profileNote() string {
+	var parts []string
+	if c.Bin != "" {
+		parts = append(parts, "bin "+c.Bin)
+	}
+	if c.Root != "" {
+		parts = append(parts, "root "+c.Root)
+	}
+	return strings.Join(parts, ", ")
+}
 
 func (c Codex) bin() string {
 	if c.Bin != "" {
@@ -98,10 +119,21 @@ type codexSession struct {
 // rollouts lists recent session files, newest first. The tree is
 // year/month/day so a full walk is cheap, but reading every file is not —
 // mtime does the filtering before anything is parsed.
-func (c Codex) rollouts() []string {
+// rollouts lists recent session files, newest first.
+//
+// A missing root is a legitimate empty answer — Codex may simply never have
+// run here. A root that exists but cannot be walked is a failure, and used to
+// be indistinguishable from the first case.
+func (c Codex) rollouts() ([]string, error) {
 	root := c.root()
 	if root == "" {
-		return nil
+		return nil, nil
+	}
+	if _, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("codex sessions root %s: %w", root, err)
 	}
 	maxAge := c.MaxAge
 	if maxAge <= 0 {
@@ -114,8 +146,15 @@ func (c Codex) rollouts() []string {
 		mod  time.Time
 	}
 	var found []entry
-	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
+	var walkErr error
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			// One unreadable subdirectory should not cost the rest, but it is
+			// worth reporting if nothing else works.
+			walkErr = err
+			return nil
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 			return nil
 		}
 		info, err := d.Info()
@@ -125,13 +164,19 @@ func (c Codex) rollouts() []string {
 		found = append(found, entry{path, info.ModTime()})
 		return nil
 	})
+	if err != nil {
+		return nil, fmt.Errorf("codex sessions root %s: %w", root, err)
+	}
 	sort.Slice(found, func(i, j int) bool { return found[i].mod.After(found[j].mod) })
 
 	paths := make([]string, 0, len(found))
 	for _, e := range found {
 		paths = append(paths, e.path)
 	}
-	return paths
+	if len(paths) == 0 && walkErr != nil {
+		return nil, fmt.Errorf("codex sessions root %s: %w", root, walkErr)
+	}
+	return paths, nil
 }
 
 // scanRollout reads a session's id and cwd from the head, then its ending
@@ -247,7 +292,7 @@ func (c Codex) item(s codexSession) feed.Item {
 		State:     state,
 		Since:     s.last.UTC().Format(time.RFC3339),
 		UpdatedAt: s.last.UTC().Format(time.RFC3339),
-		Context:   map[string]string{"project": project, "cwd": s.cwd},
+		Context:   c.contextFor(project, s.cwd),
 	}
 	if s.lastEvent != "" {
 		item.Context["last_event"] = s.lastEvent
@@ -263,7 +308,8 @@ func (c Codex) item(s codexSession) feed.Item {
 				// Like opencode and unlike Claude Code, codex accepts a
 				// prompt into an existing session.
 				{Label: "reply", Run: []string{c.bin(), "exec", "resume", s.id, "{message}"}, Dir: s.cwd},
-				{Label: "open", Run: []string{c.bin(), "resume", s.id}, Dir: s.cwd},
+				// See the OpenCode source: open is interactive, reply is not.
+				{Label: "open", Run: []string{c.bin(), "resume", s.id}, Dir: s.cwd, Interactive: true},
 			},
 		}
 	}
@@ -271,36 +317,75 @@ func (c Codex) item(s codexSession) feed.Item {
 }
 
 func (c Codex) Fetch(ctx context.Context) (feed.Feed, error) {
-	paths := c.rollouts()
+	paths, err := c.rollouts()
+	if err != nil {
+		return feed.Feed{}, err
+	}
 
+	var counts map[string]int
 	var dirs map[string]bool
 	if !c.AnyDirectory {
-		dirs = liveDirs(ctx, "codex", c.timeout())
+		// The configured binary, not the literal "codex" — see the same
+		// comment in the OpenCode source.
+		var err error
+		counts, err = liveDirCounts(ctx, c.bin(), c.timeout())
+		if err != nil {
+			return feed.Feed{}, fmt.Errorf("%s: %w", c.Name(), err)
+		}
+		dirs = make(map[string]bool, len(counts))
+		for d := range counts {
+			dirs[d] = true
+		}
 	}
 
 	// Newest rollout per directory: a tab has one conversation you care
 	// about, not every one that ran in that repo this week.
-	newest := map[string]codexSession{}
+	//
+	// parsed and failed are counted so that "Codex has no active sessions" and
+	// "the Codex adapter can no longer read any of your sessions" can be told
+	// apart. They need opposite responses from the user, and both used to
+	// render as an ordinary empty list.
+	parsed, failed := 0, 0
+	byDir := map[string][]codexSession{}
 	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil {
+			failed++
 			continue
 		}
 		s, ok := c.scanRollout(path, info.ModTime())
 		if !ok {
+			failed++
 			continue
 		}
+		parsed++
 		if dirs != nil && !liveNear(dirs, s.cwd) {
 			continue
 		}
-		if prev, seen := newest[s.cwd]; !seen || s.last.After(prev.last) {
-			newest[s.cwd] = s
-		}
+		byDir[s.cwd] = append(byDir[s.cwd], s)
 	}
 
-	f := feed.Feed{Schema: feed.Schema, Items: make([]feed.Item, 0, len(newest))}
-	for _, s := range newest {
-		f.Items = append(f.Items, c.item(s))
+	// Every candidate failed the same way: that is schema drift, not an empty
+	// inbox.
+	if parsed == 0 && failed > 0 {
+		return feed.Feed{}, fmt.Errorf(
+			"codex: none of %d recent session file(s) could be parsed — the rollout format has probably changed", failed)
 	}
+
+	// Newest rollouts per directory, bounded by the number of codex processes
+	// actually running there — see the same reasoning in the OpenCode source.
+	f := feed.Feed{Schema: feed.Schema, Items: make([]feed.Item, 0, len(byDir))}
+	for dir, group := range byDir {
+		sort.Slice(group, func(i, j int) bool { return group[i].last.After(group[j].last) })
+		limit := perDirLimit(counts, dir)
+		if limit > len(group) {
+			limit = len(group)
+		}
+		for _, s := range group[:limit] {
+			f.Items = append(f.Items, c.item(s))
+		}
+	}
+	// Some parsed and some did not: usable, but say the list is partial.
+	f.Truncated = failed > 0
 	return f, nil
 }

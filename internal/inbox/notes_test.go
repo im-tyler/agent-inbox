@@ -106,9 +106,9 @@ func TestNotesLeadTheFleetBlock(t *testing.T) {
 
 	got := in.formatKingState([]string{"omni"})
 	noteAt := strings.Index(got, "omni runs on glm-5.2")
-	fleetAt := strings.Index(got, "Your fleet:")
-	if noteAt < 0 {
-		t.Fatalf("note missing from fleet state:\n%s", got)
+	fleetAt := strings.Index(got, "Your fleet.")
+	if noteAt < 0 || fleetAt < 0 {
+		t.Fatalf("note or fleet block missing from state:\n%s", got)
 	}
 	if noteAt > fleetAt {
 		t.Errorf("notes came after the fleet listing:\n%s", got)
