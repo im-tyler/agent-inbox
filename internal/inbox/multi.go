@@ -317,7 +317,11 @@ func quarantineState(path string) string {
 // because the same name repointed at another directory is a different project
 // and must not inherit this one's session.
 func sameProject(a, b Project) bool {
-	return a.Tool == b.Tool && ident.SameDir(a.Dir, b.Dir)
+	// Absolute on both sides: a relative dir's meaning changes with the
+	// working directory, so matching it restores a session into whatever
+	// repository the CLI happens to run from today.
+	return filepath.IsAbs(a.Dir) && filepath.IsAbs(b.Dir) &&
+		a.Tool == b.Tool && ident.SameDir(a.Dir, b.Dir)
 }
 
 // adoptPersisted copies the durable fields from d onto p, leaving p's

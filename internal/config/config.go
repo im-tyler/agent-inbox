@@ -271,6 +271,9 @@ func Validate(s *Settings) error {
 				g.Name, prev+1, s.Projects[prev].Name)
 		}
 	}
+	if err := validateAbsoluteDirs(s); err != nil {
+		return err
+	}
 	return validateGroupMembership(s, names)
 }
 
