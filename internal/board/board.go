@@ -139,9 +139,12 @@ func (m Model) Selected() (feed.Item, bool) { return m.selected() }
 
 // Reload refetches every source. The host calls this after a change it knows
 // the sources cannot see yet.
+// Reload goes through startLoad like every other refresh: it must bump the
+// load generation, or a completion from an in-flight older fetch carries the
+// same generation, is accepted, and replaces the fresher list with stale rows.
 func (m Model) Reload() (Model, tea.Cmd) {
-	m.loading = true
-	return m, m.load()
+	cmd := m.startLoad()
+	return m, cmd
 }
 
 // visible is what the list renders: only what wants something from you,

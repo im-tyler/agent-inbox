@@ -154,14 +154,28 @@ func (c Claude) StreamSend(ctx context.Context, dir, sessionID, prompt string) <
 
 		var finalText strings.Builder
 		sawTerminal := false
+		reportedSkipped := 0
 		// jsonlReader rather than bufio.Scanner: a Scanner stops on a line
 		// longer than its buffer, and the Wait below would then block forever
 		// against a child still trying to write it. See jsonl.go.
 		jr := newJSONLReader(stdout, maxJSONLine)
 		for {
 			raw, err := jr.Next()
+
+			// Diagnostics publish before the next event, never after a
+			// terminal one: a progress event emitted after StreamDone made
+			// the inbox set a completed project back to working, and its
+			// next send was refused.
+			if !sawTerminal && jr.Skipped > reportedSkipped {
+				ch <- StreamEvent{Kind: StreamToolCall, SessionID: sessionID,
+					Activity: fmt.Sprintf("skipped %d oversized event(s)", jr.Skipped)}
+				reportedSkipped = jr.Skipped
+			}
 			if err != nil {
 				break
+			}
+			if sawTerminal {
+				continue // drain remaining stdout; publish nothing further
 			}
 			line := strings.TrimSpace(string(raw))
 			if line == "" {
@@ -170,10 +184,6 @@ func (c Claude) StreamSend(ctx context.Context, dir, sessionID, prompt string) <
 			if classifyClaudeStreamLine(line, ch, &finalText, &sessionID) {
 				sawTerminal = true
 			}
-		}
-		if jr.Skipped > 0 {
-			ch <- StreamEvent{Kind: StreamToolCall, SessionID: sessionID,
-				Activity: fmt.Sprintf("skipped %d oversized event(s)", jr.Skipped)}
 		}
 
 		waitErr := cmd.Wait()

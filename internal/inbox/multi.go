@@ -80,6 +80,14 @@ func (in *Inbox) mergeState() error {
 	}
 	in.mu.Unlock()
 
+	// A frontend whose cached projects no longer match the configuration
+	// must not write: its entries would revert newer tool or directory
+	// changes made by another process. Kings are exempt — they are
+	// provisioned, not configured.
+	if err := in.requireCurrentDefinitions(ours); err != nil {
+		return err
+	}
+
 	disk, derr := in.diskOrQuarantine()
 	if derr != nil {
 		return derr
@@ -393,7 +401,10 @@ func (in *Inbox) RefreshExternal() {
 			last := in.lastNotesMtime
 			in.mu.Unlock()
 			if fi.ModTime().After(last) {
-				in.loadNotes()
+				if err := in.loadNotes(); err != nil {
+					fmt.Fprintf(os.Stderr, "agent-inbox: notes not refreshed: %v\n", err)
+					return
+				}
 				in.rememberNotesMtime()
 			}
 		}
@@ -520,7 +531,11 @@ func (in *Inbox) notesRMW(fn func()) {
 		return
 	}
 	err := fsutil.WithFileLock(in.notesPath+".lock", lockWait, func() error {
-		in.loadNotes()
+		// Neither the mutation nor the save may run after a failed reload:
+		// writing would replace data this process failed to read.
+		if err := in.loadNotes(); err != nil {
+			return err
+		}
 		fn()
 		in.saveNotes()
 		return nil

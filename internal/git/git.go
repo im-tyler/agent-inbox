@@ -16,7 +16,6 @@ package git
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -251,8 +250,14 @@ func run(ctx context.Context, dir string, cap int, args ...string) (string, erro
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	// Capped while capturing: an ordinary buffer held the whole output in
+	// memory and only the returned answer was bounded afterwards, so a large
+	// log consumed unbounded memory under an advertised 64KiB limit. The
+	// capped buffers drain the pipes fully — a full undrained pipe would
+	// deadlock the child — while storing at most the limit.
+	stdout := newCappedBuffer(cap)
+	stderr := newCappedBuffer(16 << 10)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
 
 	if err != nil {
@@ -282,7 +287,7 @@ func run(ctx context.Context, dir string, cap int, args ...string) (string, erro
 		}
 		return "", fmt.Errorf("git %s: %s", args[0], msg)
 	}
-	return truncate(stdout.String(), cap), nil
+	return stdout.String(), nil
 }
 
 // truncate caps s at n bytes on a rune boundary, saying that it did.
