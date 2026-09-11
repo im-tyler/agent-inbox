@@ -242,7 +242,13 @@ func TestLiveNearMatchesExactAndOneLevelButNotAShallowAncestor(t *testing.T) {
 // is the confusion between "nothing found" and "cannot read" this package
 // exists to avoid, arriving in the command written to detect it.
 func TestNoLiveProcessesIsNotAFailure(t *testing.T) {
-	counts, err := liveDirCounts(t.Context(), "a-command-that-cannot-be-running", 5*time.Second)
+	// The fake name must stay under 16 characters: Linux caps process names
+	// at 15, and lsof there refuses a -c pattern longer than that — writing
+	// to stderr, which this package reads as "lsof broke" rather than
+	// "nothing matched". A 32-char name passed on macOS and failed every
+	// Linux run. It must also not prefix-match a real command (agent-inbox
+	// itself, go test binaries), or a busy machine makes the test flaky.
+	counts, err := liveDirCounts(t.Context(), "zz-no-such-cmd", 5*time.Second)
 	if err != nil {
 		t.Fatalf("no matching process reported as an error: %v", err)
 	}
