@@ -23,6 +23,8 @@
 package claim
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,6 +75,11 @@ func New(dir string) *Set { return &Set{dir: dir} }
 // filesystem: ".", ".." and separator-bearing names must never become paths,
 // because Join(dir, "..") is the parent of the claims directory and a stale
 // reclaim of it would recursively delete the data directory.
+//
+// The lock directory's name is reserved case-insensitively: on a
+// case-insensitive filesystem (macOS, Windows) ".LOCKS" and ".locks" are the
+// same directory, and a claim under that name would make the reclaim path
+// delete the flock files — splitting serialisation across two inodes.
 func (s *Set) projectDir(name string) (string, error) {
 	if name == "" || name == "." || name == ".." {
 		return "", fmt.Errorf("claim: %q is not a valid project name", name)
@@ -80,8 +87,14 @@ func (s *Set) projectDir(name string) (string, error) {
 	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) || strings.ContainsRune(name, '\\') {
 		return "", fmt.Errorf("claim: project name %q contains a path separator", name)
 	}
-	if name == lockDirName {
+	if strings.EqualFold(name, lockDirName) {
 		return "", fmt.Errorf("claim: project name %q is reserved", name)
+	}
+	// Long names would overflow the filesystem component limit once the
+	// release suffix or the lock extension is appended — an un-releasable
+	// claim blocks its project until the stale window reclaims it.
+	if len(name) > 200 {
+		return "", fmt.Errorf("claim: project name is %d bytes; the limit is 200", len(name))
 	}
 	dir := filepath.Join(s.dir, name)
 	if filepath.Dir(dir) != filepath.Clean(s.dir) {
@@ -91,9 +104,16 @@ func (s *Set) projectDir(name string) (string, error) {
 }
 
 // contained reports whether path is a direct child of the claims directory —
-// the last check before any recursive removal.
+// the last check before any recursive removal. The lock directory is never a
+// removal target, whatever case it was spelled in.
 func (s *Set) contained(path string) bool {
-	return path != "" && filepath.Dir(path) == filepath.Clean(s.dir)
+	if path == "" {
+		return false
+	}
+	if strings.EqualFold(path, filepath.Join(s.dir, lockDirName)) {
+		return false
+	}
+	return filepath.Dir(path) == filepath.Clean(s.dir)
 }
 
 // withProjectLock runs fn while holding an exclusive advisory lock on name's
@@ -148,13 +168,33 @@ func (s *Set) Acquire(name, turn, tool string) error {
 	})
 }
 
-// mkdirClaim creates the claim directory and writes its info file.
+// mkdirClaim creates the claim directory and publishes its info file
+// atomically (temp + rename inside the directory). A partially written
+// claim.json is indistinguishable from corruption at read time, so it must
+// never exist: a failed write rolls the whole directory back rather than
+// leaving a mid-write claim that blocks retries.
 func (s *Set) mkdirClaim(dir, turn, tool string) error {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "claim.json"),
-		mustJSON(Info{Pid: os.Getpid(), Turn: turn, Tool: tool, Taken: time.Now()}), 0o600)
+	info := Info{Pid: os.Getpid(), Turn: turn, Tool: tool, Taken: time.Now()}
+	if err := writeClaimInfo(filepath.Join(dir, "claim.json"), mustJSON(info)); err != nil {
+		if s.contained(dir) {
+			os.RemoveAll(dir)
+		}
+		return fmt.Errorf("claim could not be published (rolled back): %w", err)
+	}
+	return nil
+}
+
+// writeClaimInfo publishes claim bytes atomically. A var so tests can inject
+// a write failure and assert the rollback.
+var writeClaimInfo = func(path string, b []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // acquireLocked is the lock-held acquire: mkdir fast path, stale-reclaim slow
@@ -189,18 +229,28 @@ func (e *HeldError) Error() string {
 // the read-remove-recreate sequence cannot interleave with another contender
 // doing the same: whoever reclaims first installs a live claim, and the next
 // contender reads that one and obeys it.
+//
+// Only a claim that was never published is reclaimable by age. A claim that
+// exists but cannot be read — permissions, I/O, corrupt JSON — may belong to
+// a live process whose metadata rotted, and deleting it would install a
+// second owner over a running one. That fails closed: it is refused until a
+// human inspects it.
 func (s *Set) takeHeld(dir, turn, tool string) error {
 	info, rerr := s.read(dir)
 	switch {
-	case rerr != nil && ageOf(dir) > staleAfter:
-		// Unreadable and old: a crash between mkdir and write. Reclaim.
+	case errors.Is(rerr, errNoClaim) && ageOf(dir) > staleAfter:
+		// A crash between mkdir and publish. The atomic publish means an
+		// established claim never looks like this, so age is the only
+		// question left.
 		if s.contained(dir) {
 			os.RemoveAll(dir)
 		}
 		return s.mkdirClaim(dir, turn, tool)
-	case rerr != nil:
-		return fmt.Errorf("project claim is unreadable (held %.0fs) — retry shortly or remove %s",
+	case errors.Is(rerr, errNoClaim):
+		return fmt.Errorf("project claim is mid-write (held %.0fs) — retry shortly or remove %s",
 			ageOf(dir).Seconds(), dir)
+	case rerr != nil:
+		return fmt.Errorf("project claim exists but is unreadable and cannot be reclaimed automatically — inspect %s (it may belong to a live process): %v", dir, rerr)
 	case !pidAlive(info.Pid):
 		if s.contained(dir) {
 			os.RemoveAll(dir)
@@ -218,13 +268,18 @@ func (s *Set) takeHeld(dir, turn, tool string) error {
 //
 // The removal renames the directory out of the way before deleting it.
 // RemoveAll alone removes the file inside first, so an acquire arriving in
-// that instant sees a directory with no claim.json — "unreadable, held 0s" —
-// and refuses, correctly by its own rules, over a release that was already
+// that instant sees a directory with no claim.json — "mid-write" — and
+// refuses, correctly by its own rules, over a release that was already
 // happening. Rename is atomic: an acquire either sees the claim intact or
-// sees no directory at all. The rename target carries the releasing pid and
-// a timestamp, so it can never collide with another project's live claim —
-// including a project literally named "alpha.releasing" — and a failed rename
-// aborts the release instead of deleting whatever sits at the target.
+// sees no directory at all. The rename target is a fixed-length,
+// never-colliding transient name, so it cannot land on another project's
+// live claim — including a project literally named "alpha.releasing" — nor
+// overflow the filesystem's component limit on long project names.
+//
+// Errors are propagated, not swallowed: reporting a successful release while
+// the claim may still be held leaves a project blocked with nobody knowing
+// why. Confirmed absence and a genuinely different turn are the only silent
+// successes.
 func (s *Set) Release(name, turn string) error {
 	if s == nil {
 		return nil
@@ -234,19 +289,52 @@ func (s *Set) Release(name, turn string) error {
 		return err
 	}
 	return s.withProjectLock(name, func() error {
-		info, err := s.read(dir)
-		if err != nil || info.Turn != turn {
+		info, rerr := s.read(dir)
+		switch {
+		case errors.Is(rerr, errNoClaim):
+			// No metadata to compare against: nothing established to release.
+			return nil
+		case rerr != nil:
+			return fmt.Errorf("cannot release %q — its claim is unreadable and may still be held; inspect the claim directory: %v", name, rerr)
+		}
+		if info.Turn != turn {
 			return nil
 		}
-		doomed := fmt.Sprintf("%s.releasing.%d.%d", dir, os.Getpid(), time.Now().UnixNano())
-		if err := os.Rename(dir, doomed); err != nil {
-			return fmt.Errorf("claim release rename %s: %w", name, err)
-		}
-		if s.contained(doomed) {
-			os.RemoveAll(doomed)
+		var doomed string
+		// A unique name can still lose a cosmic lottery with a project named
+		// exactly like it; retry once with a fresh timestamp before failing.
+		for attempt := 0; attempt < 2; attempt++ {
+			doomed = releaseName(dir)
+			if err := os.Rename(dir, doomed); err == nil {
+				if s.contained(doomed) {
+					if rmErr := os.RemoveAll(doomed); rmErr != nil {
+						return fmt.Errorf("claim released but its tombstone at %s could not be removed: %w", doomed, rmErr)
+					}
+				}
+				return nil
+			} else if attempt == 1 {
+				return fmt.Errorf("claim release rename %s: %w", name, err)
+			}
 		}
 		return nil
 	})
+}
+
+// releaseName is the transient name a released claim is renamed to before
+// deletion. Two properties at once: unique per release (pid + nanoseconds),
+// so it can never land on another project's live claim — including one
+// literally named like a release path — and bounded, so a long project name
+// cannot push it past the filesystem's component limit and make every
+// release fail. Truncation keeps a hash of the full name, so two long
+// projects sharing a prefix still get distinct names.
+func releaseName(dir string) string {
+	base := filepath.Base(dir)
+	const budget = 200
+	if len(base) > budget {
+		sum := sha256.Sum256([]byte(base))
+		base = base[:budget-14] + "-" + hex.EncodeToString(sum[:6])
+	}
+	return filepath.Join(filepath.Dir(dir), fmt.Sprintf("%s.r%d-%x", base, os.Getpid(), time.Now().UnixNano()))
 }
 
 // Peek reports the current claim on a project without taking it: who holds
@@ -267,18 +355,29 @@ func (s *Set) Peek(name string) (Info, bool) {
 	return info, pidAlive(info.Pid)
 }
 
-// errUnreadable marks a claim whose contents cannot be established; the
-// directory's mtime stands in for its age.
-var errUnreadable = errors.New("claim unreadable")
+// errNoClaim marks a claim directory whose metadata was never published —
+// the crash window between mkdir and the atomic rename. Age distinguishes a
+// writer that may still be running from one that is provably gone.
+// errUnreadable marks a claim that exists but cannot be established:
+// permissions, I/O, or corrupt bytes. These are different situations with
+// opposite correct answers — the first may be reclaimed when old, the second
+// must never be, because its owner may be alive and merely unreadable.
+var (
+	errNoClaim    = errors.New("claim not published")
+	errUnreadable = errors.New("claim unreadable")
+)
 
 func (s *Set) read(dir string) (Info, error) {
 	b, err := os.ReadFile(filepath.Join(dir, "claim.json"))
 	if err != nil {
-		return Info{}, errUnreadable
+		if os.IsNotExist(err) {
+			return Info{}, errNoClaim
+		}
+		return Info{}, fmt.Errorf("%w: %v", errUnreadable, err)
 	}
 	var info Info
 	if json.Unmarshal(b, &info) != nil {
-		return Info{}, errUnreadable
+		return Info{}, fmt.Errorf("%w: corrupt claim.json", errUnreadable)
 	}
 	return info, nil
 }

@@ -1,6 +1,7 @@
 package claim
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,5 +177,153 @@ func TestReleaseSparesCollidingProject(t *testing.T) {
 	info, ok := s.Peek("alpha.releasing")
 	if !ok || info.Turn != "t9" {
 		t.Fatalf("alpha.releasing claim damaged by alpha's release: ok=%v info=%+v", ok, info)
+	}
+}
+
+// Round-2 findings from the focused re-audit, pinned to the rewritten claim
+// package.
+
+// A case-folded ".LOCKS" is the lock directory itself on case-insensitive
+// filesystems; a claim under that name would let the reclaim path delete the
+// flock files and split serialisation across two inodes.
+func TestReservedNameRejectedCaseInsensitively(t *testing.T) {
+	s := New(t.TempDir())
+	// The lock directory with a live sentinel file inside it.
+	lockDir := filepath.Join(s.dir, ".locks")
+	if err := os.MkdirAll(filepath.Join(lockDir, "live.lock"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(lockDir, "live.lock", "owner.json")
+	if err := os.WriteFile(sentinel, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".LOCKS", ".Locks", ".LoCkS"} {
+		if err := s.Acquire(name, "t1", "claude"); err == nil {
+			t.Errorf("Acquire(%q) succeeded; case-folded reserved names must be refused", name)
+		}
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("lock dir contents disturbed: %v", err)
+	}
+}
+
+// A claim that exists but cannot be read may belong to a live process whose
+// metadata rotted; deleting it installs a second owner over a running one.
+// Only the never-published crash window is reclaimable by age.
+func TestUnreadableClaimIsNeverReclaimed(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.Acquire("live", "t1", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := s.projectDir("live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimFile := filepath.Join(dir, "claim.json")
+
+	// Corrupt metadata, aged past every threshold: refused.
+	old := time.Now().Add(-5 * time.Minute)
+	if err := os.WriteFile(claimFile, []byte(`{"pid": `), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	err = s.Acquire("live", "t2", "claude")
+	if err == nil {
+		t.Fatal("a claim with corrupt metadata was reclaimed while its owner may be live")
+	}
+	if _, statErr := os.Stat(dir); statErr != nil {
+		t.Fatal("the unreadable claim was deleted by the refusal path")
+	}
+
+	// Unreadable by permissions, aged: refused, not reclaimed.
+	if err := os.Chmod(claimFile, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Acquire("live", "t3", "claude"); err == nil {
+		t.Fatal("a permission-denied claim was reclaimed while its owner may be live")
+	}
+	os.Chmod(claimFile, 0o600)
+
+	// The never-published window — no claim.json at all — stays reclaimable
+	// when old, so one killed process cannot block a project forever.
+	os.Remove(claimFile)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Acquire("live", "t4", "claude"); err != nil {
+		t.Fatalf("aged never-published claim not reclaimed: %v", err)
+	}
+}
+
+// Release reports failures honestly: an unreadable claim returns an error
+// rather than a silent success that may leave the project blocked.
+func TestReleaseReportsUnreadableClaim(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.Acquire("alpha", "t1", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := s.projectDir("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "claim.json"), []byte(`not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Release("alpha", "t1"); err == nil {
+		t.Fatal("release over an unreadable claim reported success")
+	}
+	// The claim directory survives for inspection.
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatal("unreadable claim was removed by a failed release")
+	}
+}
+
+// A name at the API's length limit must still be releasable: the release
+// path's own suffix has to stay inside the filesystem component limit.
+func TestLongNameAcquireRelease(t *testing.T) {
+	s := New(t.TempDir())
+	name := strings.Repeat("n", 200)
+	if err := s.Acquire(name, "t1", "claude"); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := s.Release(name, "t1"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if err := s.Acquire(name, "t2", "claude"); err != nil {
+		t.Fatalf("re-acquire after release: %v", err)
+	}
+	if err := s.Acquire(strings.Repeat("x", 201)+"-toolong", "t1", "claude"); err == nil {
+		t.Fatal("names beyond the 200-byte budget were accepted")
+	}
+}
+
+// A claim whose metadata write fails must not leave the directory behind —
+// a mid-write claim blocks retries for the whole stale window.
+func TestFailedClaimWriteRollsBack(t *testing.T) {
+	s := New(t.TempDir())
+	orig := writeClaimInfo
+	writeClaimInfo = func(path string, b []byte) error {
+		return fmt.Errorf("disk full")
+	}
+	t.Cleanup(func() { writeClaimInfo = orig })
+
+	err := s.Acquire("alpha", "t1", "claude")
+	if err == nil {
+		t.Fatal("acquire with a failing write succeeded")
+	}
+	dir, derr := s.projectDir("alpha")
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if _, serr := os.Stat(dir); serr == nil {
+		t.Fatal("failed acquisition left its directory behind")
+	}
+
+	// And the next attempt, with the write healthy again, succeeds.
+	writeClaimInfo = orig
+	if err := s.Acquire("alpha", "t2", "claude"); err != nil {
+		t.Fatalf("retry after rollback: %v", err)
 	}
 }
