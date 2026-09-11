@@ -13,36 +13,38 @@ Codex run in a third. Each holds context you cannot see without switching to it,
 and each stops to ask you something you will not notice until you do.
 
 agent-inbox puts all of them in one screen, and puts a supervisor in front of
-them that can ask them things on your behalf.
+them that can ask them things on your behalf. The supervisor can be the
+built-in one — or any agent harness you already use, driving the fleet through
+the same operations as CLI verbs or MCP tools ([Any harness as the king](#any-harness-as-the-king)).
 
 ```
-╭────────────────────────────────────────────────────────────────────╮
-│ agent-inbox                                                        │
-│                                                                    │
-│ king  claude                              fleet                    │
-│                                                                    │
-│ › you                             2:30PM  ★ supervisor           · │
-│   is anything blocked on neutron?                                  │
-│                                           ▸ neutron              ● │
-│ ▸ neutron                         2:31PM    api frozen until the   │
-│   api frozen until the db layer lands       db layer lands         │
-│                                                                    │
-│ ▸ teploy                          2:31PM    teploy               ⠹ │
-│   waiting on neutron's client                ⠹ Bash                │
-│                                                                    │
-│ ● claude                          2:32PM    tebian               ● │
-│   teploy is blocked on neutron's client      no commits today      │
-│   package. tebian is unaffected.                                   │
-│                                           3 projects               │
-│                                           1 working  2 waiting     │
-│                                                                    │
-│ type to talk to king...                                            │
-│ enter send  alt+enter newline  tab fleet  ? help  ctrl+c quit      │
-╰────────────────────────────────────────────────────────────────────╯
+╭─ agent-inbox ──────────────────────────────────────────────────╮
+│                                                                 │
+│  king · claude                              fleet               │
+│                                                                 │
+│  › you                        2:30PM       ★ supervisor         │
+│    is anything blocked?                      teploy  ● waiting  │
+│                                               neutron ⠸ working │
+│  ▸ neutron                    2:31PM                            │
+│    api frozen until the db layer lands                          │
+│                                                                 │
+│  ● king                       2:31PM                            │
+│    neutron is frozen until its db layer lands.                  │
+│    teploy is waiting on that. nothing else is blocked.          │
+│                                                                 │
+│  type to talk to king…                                          │
+│  enter send    tab fleet    ? help    ctrl+c quit               │
+╰─────────────────────────────────────────────────────────────────╯
 ```
 
-One message went out. The supervisor asked two projects, read both replies, and
+One message went out. The supervisor asked neutron, read the reply, and
 answered. You never left the screen.
+
+> **Any harness can be the king.** Every operation is also a CLI verb and an
+> MCP tool — `claude mcp add agent-inbox -- agent-inbox mcp` — so Claude Code,
+> OpenCode, or any MCP-speaking agent you already trust can supervise the fleet
+> instead. The built-in supervisor is optional. See
+> [Any harness as the king](#any-harness-as-the-king).
 
 ## Why this is not Claude Squad
 
@@ -193,6 +195,59 @@ when it can be determined and reads as unknown when it cannot — attributing on
 account's burn to another is worse than admitting ignorance. Switching accounts
 is yours to do; the supervisor can recommend it and never performs it.
 
+## Any harness as the king
+
+The supervisor above is one way to drive the fleet. It is also a CLI session
+you have to keep alive, with its own context bill and its own ceiling: status
+lines and 80-character snippets, rebuilt every turn. If you are already
+sitting in a capable agent — Claude Code, OpenCode, whatever speaks to you —
+that agent can be the supervisor instead, and agent-inbox becomes the layer
+underneath it:
+
+```sh
+agent-inbox status                  # the fleet, live: status, why waiting, git, last message
+agent-inbox status --json           # the same, for anything that parses
+agent-inbox send neutron "..."      # one real turn; prints the reply, exits
+agent-inbox git teploy diff         # the free questions, no agent involved
+agent-inbox log tebian --lines 40   # a project's recent conversation
+agent-inbox note list               # the durable cross-project facts
+agent-inbox add maccel claude ~/code/maccel
+```
+
+Every command is one process against the same state the dashboard uses —
+there is no daemon, and none is needed, because the three front-ends
+(dashboard, these verbs, MCP below) coordinate through the state files:
+saves merge per project instead of overwriting, a send *claims* its project
+in `~/.agent-inbox/claims/` so two processes can never put two writers on one
+session, and the dashboard adopts what other front-ends did within a second.
+A harness-driven send that lands while the dashboard is open shows up there
+while it runs.
+
+For harnesses that prefer native tools, `agent-inbox mcp` serves the same
+operations over the Model Context Protocol:
+
+```sh
+claude mcp add agent-inbox -- agent-inbox mcp
+```
+
+Eight tools: `fleet_status`, `send`, `git_query`, `history`, `notes_list`,
+`note_add`, `note_drop`, `add_project`. The server is stateless per call —
+every call is the same one-shot process the CLI verbs are — and it holds no
+conversation of its own.
+
+Two things a harness-king should know, because they are the terms:
+
+- **The harness's authority is the harness's.** The built-in supervisor is
+  deliberately low-authority — an empty folder, three git subcommands,
+  proposals that bind nothing. A harness-king runs with everything its
+  harness allows, and replies arriving through `send` are marked as reports
+  in the tool's description but nothing enforces that reading. If you would
+  not let the harness act unattended on one project's say-so, do not let it
+  do so on six.
+- **Facts stay facts.** `note add` records observations; it cannot write a
+  rule. Standing rules are still ratified by you, in config, whoever the
+  king is.
+
 ## Trust
 
 The supervisor's replies are shaped by what its projects say, and what its
@@ -275,210 +330,31 @@ question to answer and nobody watching. It must pick one of four: **unblock**,
 a turn that was not needed costs more than a delay. Only escalate produces text
 for you.
 
-## Groups — more than one supervisor
+## Reference
 
-A supervisor's context is rebuilt from scratch on every turn out of its fleet's
-status lines and the notes that mention them. That is what makes supervision
-accurate, and it is also what degrades as the fleet grows: seven projects means
-seven status lines and every note about any of them, on every message you send.
-
-Groups split the fleet. Each one gets a supervisor of its own and a tab of its
-own, so two conversations stay about different things.
-
-```json
-"groups": [
-  { "name": "infra",   "projects": ["teploy", "infra"] },
-  { "name": "product", "projects": ["neutron", "fylun"] }
-]
-```
-
-```
-╭──────────────────────────────────────────────────────────────╮
-│ agent-inbox                                                  │
-│ infra 1●  ·  product ⠋                                       │
-│ infra  claude                              fleet             │
-│                                            ★ supervisor-infra│
-│                                              teploy        ● │
-│                                              infra         · │
-│                                            2 projects        │
-│                                            1 waiting         │
-```
-
-Each group's supervisor is provisioned the same way the single one is — named
-`supervisor-<group>`, in a folder of its own. Override any of that with a
-`king` block inside the group (`name`, `tool`, `dir`).
-
-A project belongs to exactly one group, and validation rejects a config where
-one is claimed twice. A project no group names — including one added later from
-the dashboard — joins the first group, so a project is never left in the fleet
-with no supervisor able to see it.
-
-`shift+tab` cycles tabs from the composer; `[` and `]` (or `h`/`l`) do it with
-the fleet focused. Each tab carries its own count of what is waiting, so a
-project needing you in a tab you do not have open still says so.
-
-Omit `groups` entirely for one supervisor over everything, which is the default
-and what most installs want.
-
-## Session inbox — `i`, or headless
-
-The dashboard *drives* sessions. The inbox does the opposite: it only reads
-state the tools already wrote down, and merges it into one list of what is
-waiting on you.
-
-```sh
-agent-inbox inbox          # the reader, standalone
-agent-inbox inbox --json   # the merged feed, for scripts and agents
-```
-
-With no configuration it picks up whichever agent CLIs are installed:
-
-| Source | State signal | Reply from the inbox |
-|---|---|---|
-| **Claude Code** | `claude agents --json` reports `state: blocked`, with a one-line `needs` from `~/.claude/jobs/` | no — a live session cannot be written into |
-| **opencode** | last message's `finish` is `stop` | yes, `opencode run -s <id>` |
-| **codex** | rollout ends on a `task_complete` event | yes, `codex exec resume <id>` |
-| **teploy-ship** | parked durable runs | yes, approve/deny |
-
-Only sessions whose process is actually running are listed. Claude Code keeps
-reporting agents whose process is long gone, still carrying whatever state they
-last recorded, and opencode's database holds every session ever created with
-almost all of them ended on `stop`. Without a liveness check the list fills with
-months of finished work that all looks like it is waiting on you.
-
-Add your own sources in `~/.config/agent-inbox/sources.json` — see
-[`sources.example.json`](sources.example.json). Anything speaking the
-`teploy.inbox/v1` shape works, over a command or `GET /inbox`; the UI needs no
-change, because items carry their own resolve commands. An opencode fork such as
-fylun-code works through the `opencode` kind by pointing `opencode_db` at that
-build's database.
-
-Actions run as **argv, never through a shell**, so a denial reason full of shell
-metacharacters is one argument and can never become another command. A
-`{placeholder}` prompts you and is substituted as a single whole argument. An
-unreachable source reports itself and never blanks the rest of the list.
-
-## Config
-
-`~/.agent-inbox/config.json`:
-
-```json
-{
-  "claude":   { "permission_mode": "default" },
-  "opencode": { "model": "opencode/deepseek-v4-flash-free", "skip_permissions": false },
-  "codex":    { "sandbox": "workspace-write" },
-  "king":     { "rounds": 1 },
-  "turn_timeout_seconds": 0,
-  "projects": [
-    { "name": "tebian",  "tool": "claude",   "dir": "/path/to/tebian" },
-    { "name": "neutron", "tool": "opencode", "dir": "/path/to/neutron" },
-    { "name": "maccel",  "tool": "codex",    "dir": "/path/to/maccel" }
-  ]
-}
-```
-
-There need not be a config file at all: a missing one means the defaults, which
-is a supervisor and nothing to supervise. `projects` may likewise be empty — you
-add to it with `n`. Under `king`, `rounds` is the dispatch budget and the
-optional `name`, `tool` and `dir` override the supervisor; its name is reserved,
-so a project may not claim it. `turn_timeout_seconds` bounds one agent turn — 0
-means the 30-minute default, -1 means no limit. OpenCode defaults to a **free,
-no-key** model so those projects work without configuring a provider. An
-optional `groups` array splits the fleet between several supervisors — see
-[Groups](#groups--more-than-one-supervisor).
-
-Everything under the data directory is written `0600` in directories written
-`0700`: it holds assistant output and the paths of your repositories.
-
-If you run with a `--config` somewhere other than the default, set
-`AGENT_INBOX_CONFIG` to the same path. The Stop hook is a separate process and
-cannot see the flag, so without the variable it reads the default config and
-silently matches none of your projects.
-
-## Keybindings
-
-The main view has two focus modes and `Tab` swaps between them. The footer
-always shows the keys for whichever one you are in.
-
-**Composer focused** (the default) — you are talking to the supervisor:
-
-| Key | Action |
-|---|---|
-| `Enter` | send |
-| `Alt+Enter` | newline |
-| `PgUp` / `PgDn` | scroll the conversation |
-| `Tab` | focus the fleet |
-| `Shift+Tab` | next group, when the fleet is split |
-| `?` | help |
-| `Ctrl+C` | quit |
-
-**Fleet focused** (`Tab`) — the sidebar owns the keys:
-
-| Key | Action |
-|---|---|
-| `j` / `k` | move through the fleet |
-| `[` / `]` or `h` / `l` | previous / next group |
-| `Enter` | open the selected project's detail view |
-| `i` | session inbox |
-| `m` | supervisor memory — what it remembers, and `d` to forget one |
-| `n` | new project |
-| `d` | delete · `t` change tool |
-| `a` | attach — hands the terminal to the agent, relaunches on exit |
-| `x` | cancel an in-flight send, or dismiss a waiting/error badge |
-| `Tab` / `Esc` | back to the composer |
-
-**Detail view**: `j`/`k` scroll · `PgDn`/`PgUp` jump 10 · `g`/`G` top/bottom ·
-`s` follow-up · `a` attach · `Esc` back.
-
-## Hooks — push instead of poll
-
-Register `agent-inbox hook` and any Claude session in a configured project
-reports into the inbox — **including sessions you run by hand**. It no-ops for
-any cwd that is not a configured project, so it is safe to register globally.
-
-```json
-{
-  "hooks": {
-    "Stop": [
-      { "hooks": [ { "type": "command", "command": "/abs/path/to/agent-inbox hook" } ] }
-    ],
-    "Notification": [
-      { "hooks": [ { "type": "command", "command": "/abs/path/to/agent-inbox hook --kind notification" } ] }
-    ]
-  }
-}
-```
-
-**Stop** means the turn finished. The hook matches cwd to a project
-(symlink-tolerant), extracts the last assistant turn, drops an event file in
-`events/` → the running inbox ingests it within a second and flips the project
-to `waiting`.
-
-**Notification** means it is stuck — on a permission prompt, or on a question.
-That is a different event from a reply, even though both leave a project
-"waiting", because they call for opposite actions: one has an answer to read,
-the other stays stuck until a human says yes. The reason and the specific ask
-reach the fleet view and the supervisor's status line, and Claude's
-sixty-second idle nudge is filtered out, since "the user has not typed lately"
-is not a project needing attention.
-
-This is also the one event allowed to reach a project mid-turn — recording
-*why* it is stuck without taking the turn's state from it. A turn blocked on a
-prompt otherwise looks exactly like one doing slow work, right up until it hits
-the timeout half an hour later.
+- [Config](docs/CONFIG.md) — `config.json`, defaults, the data directory
+- [Groups](docs/GROUPS.md) — split the fleet between supervisors
+- [Session inbox](docs/SESSION_INBOX.md) — `i`, or headless `--json`
+- [Keybindings](docs/KEYBINDINGS.md) — every key, both focus modes
+- [Hooks](docs/HOOKS.md) — push instead of poll, including hand-run sessions
 
 ## Architecture
 
 ```
 main.go            entry: TUI (default), legacy REPL (--repl), or hook
 supervisor.go      provisions each group's supervisor: folder, brief, project
+fleet_cmd.go       the headless verbs — status/send/git/log/note/add
+mcp_cmd.go         `agent-inbox mcp` — the same operations as MCP tools
 inbox_cmd.go       `agent-inbox inbox` — the reader, headless or --json
 internal/config    config.json (projects, groups, per-tool settings)
 internal/inbox     project state, mutex-guarded; background sends; persistence
                    groups, notes/constraints, the git + usage refresh, autonomy
+                   and the multi-client layer: merged saves, send claims,
+                   cross-process adoption (multi.go)
 internal/driver    Driver interface + adapters (mock, claude, opencode, codex)
 internal/git       read-only tree inspection and the fixed [git: ] queries
 internal/usage     what has been spent against the rate limit, deduplicated
+internal/claim     the cross-process send guard — one writer per session
 internal/feed      the teploy.inbox/v1 item shape, merge and sort
 internal/sources   session discovery per tool
 internal/mux       zellij/tmux pane detection and injection
@@ -488,8 +364,14 @@ internal/tui       Bubble Tea dashboard (model/view/update, styles, run)
 
 The reader is one UI with two entry points, not two programs: `i` hosts
 `internal/board` as a view, and `agent-inbox inbox` runs the same model
-standalone. A second list of the same sessions would only have drifted from the
-first.
+standalone. A second list of the same sessions would only have drifted from
+the first.
+
+The same is true of the send path, one layer down: the dashboard, the fleet
+verbs and the MCP tools all drive one `Inbox`, and the front-ends are
+interchangeable exactly because none of them owns the state. A second
+implementation of "send to a project" would have been a second way of racing
+the first.
 
 Every adapter implements:
 
