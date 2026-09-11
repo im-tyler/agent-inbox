@@ -51,6 +51,10 @@ func run() error {
 			return nil
 		case "doctor":
 			return runDoctor(os.Args[2:])
+		case "status", "send", "git", "log", "note", "logbook", "follow", "add":
+			return runFleet(os.Args[1:], os.Stdout, os.Stderr)
+		case "mcp":
+			return runMCP(os.Args[2:], os.Stdout, os.Stderr)
 		case "version", "-version", "--version":
 			printVersion()
 			return nil
@@ -314,6 +318,9 @@ func poll(in *inbox.Inbox, eventsDir string, done <-chan struct{}) {
 				fmt.Printf("\a\n[notify] now waiting: %s\ninbox [%d waiting] > ",
 					strings.Join(upd, ", "), in.WaitingCount())
 			}
+			// The REPL shares the tick's one job with the TUI: notice what
+			// other front-ends are doing to the fleet.
+			in.RefreshExternal()
 		}
 	}
 }

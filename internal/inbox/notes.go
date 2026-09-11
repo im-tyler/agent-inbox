@@ -159,21 +159,23 @@ func parseBracketed(response, prefix string) []string {
 // match could take neighbours with it, and an index could name a different note
 // if the store moved between rendering the list and pressing the key.
 func (in *Inbox) DropNoteExact(text string) bool {
-	in.mu.Lock()
-	kept := in.notes[:0]
 	dropped := false
-	for _, n := range in.notes {
-		if !dropped && n.Text == text {
-			dropped = true
-			continue
+	in.notesRMW(func() {
+		in.mu.Lock()
+		kept := in.notes[:0]
+		for _, n := range in.notes {
+			if !dropped && n.Text == text {
+				dropped = true
+				continue
+			}
+			kept = append(kept, n)
 		}
-		kept = append(kept, n)
-	}
-	in.notes = kept
-	in.mu.Unlock()
-	if dropped {
-		in.saveNotes()
-	}
+		in.notes = kept
+		in.mu.Unlock()
+		if dropped {
+			in.saveNotes()
+		}
+	})
 	return dropped
 }
 
@@ -199,34 +201,36 @@ func (in *Inbox) addNotes(texts []string, kind Kind) {
 	if len(texts) == 0 {
 		return
 	}
-	in.mu.Lock()
-	known := make(map[string]bool, len(in.notes))
-	for _, n := range in.notes {
-		known[strings.ToLower(n.Text)] = true
-	}
-	added := false
-	for _, t := range texts {
-		t = truncateForKing(t, maxNoteLen)
-		if t == "" || known[strings.ToLower(t)] {
-			continue
+	in.notesRMW(func() {
+		in.mu.Lock()
+		known := make(map[string]bool, len(in.notes))
+		for _, n := range in.notes {
+			known[strings.ToLower(n.Text)] = true
 		}
-		known[strings.ToLower(t)] = true
-		in.notes = append(in.notes, Note{
-			Text: t,
-			Kind: kind,
-			// Every standing rule the supervisor writes starts as a proposal.
-			// There is no path from a model response to a rule that binds.
-			Proposed:  kind.Standing(),
-			Projects:  in.projectsNamedIn(t),
-			CreatedAt: time.Now(),
-		})
-		added = true
-	}
-	in.notes = evict(in.notes, in.liveNames())
-	in.mu.Unlock()
-	if added {
-		in.saveNotes()
-	}
+		added := false
+		for _, t := range texts {
+			t = truncateForKing(t, maxNoteLen)
+			if t == "" || known[strings.ToLower(t)] {
+				continue
+			}
+			known[strings.ToLower(t)] = true
+			in.notes = append(in.notes, Note{
+				Text: t,
+				Kind: kind,
+				// Every standing rule the supervisor writes starts as a proposal.
+				// There is no path from a model response to a rule that binds.
+				Proposed:  kind.Standing(),
+				Projects:  in.projectsNamedIn(t),
+				CreatedAt: time.Now(),
+			})
+			added = true
+		}
+		in.notes = evict(in.notes, in.liveNames())
+		in.mu.Unlock()
+		if added {
+			in.saveNotes()
+		}
+	})
 }
 
 // projectsNamedIn finds which fleet members a note is about. Callers hold mu.
@@ -345,29 +349,31 @@ func (in *Inbox) DropNotes(patterns []string) int {
 	if len(patterns) == 0 {
 		return 0
 	}
-	in.mu.Lock()
-	kept := in.notes[:0]
 	dropped := 0
-	for _, n := range in.notes {
-		match := false
-		for _, pat := range patterns {
-			pat = strings.TrimSpace(strings.ToLower(pat))
-			if pat != "" && strings.Contains(strings.ToLower(n.Text), pat) {
-				match = true
-				break
+	in.notesRMW(func() {
+		in.mu.Lock()
+		kept := in.notes[:0]
+		for _, n := range in.notes {
+			match := false
+			for _, pat := range patterns {
+				pat = strings.TrimSpace(strings.ToLower(pat))
+				if pat != "" && strings.Contains(strings.ToLower(n.Text), pat) {
+					match = true
+					break
+				}
 			}
+			if match {
+				dropped++
+				continue
+			}
+			kept = append(kept, n)
 		}
-		if match {
-			dropped++
-			continue
+		in.notes = kept
+		in.mu.Unlock()
+		if dropped > 0 {
+			in.saveNotes()
 		}
-		kept = append(kept, n)
-	}
-	in.notes = kept
-	in.mu.Unlock()
-	if dropped > 0 {
-		in.saveNotes()
-	}
+	})
 	return dropped
 }
 
@@ -381,44 +387,46 @@ func (in *Inbox) DropNotes(patterns []string) int {
 // deleting B afterwards then saw a two-element list again, so the note
 // survived both of its projects and was injected forever.
 func (in *Inbox) forgetProject(name string) {
-	in.mu.Lock()
-	kept := in.notes[:0]
 	changed := false
-	for _, n := range in.notes {
-		if len(n.Projects) == 0 {
-			kept = append(kept, n) // cross-cutting; not about any one project
-			continue
-		}
-		// A standing rule outlives the project it names. Removing a project
-		// deletes what was observed about it; it does not repeal a decision the
-		// user made, and silently repealing one is how a fleet ends up back on
-		// a paid model because a repository was renamed.
-		if n.Kind.Standing() {
-			kept = append(kept, n)
-			continue
-		}
-		remaining := n.Projects[:0]
-		for _, p := range n.Projects {
-			if !ident.SameName(p, name) {
-				remaining = append(remaining, p)
+	in.notesRMW(func() {
+		in.mu.Lock()
+		kept := in.notes[:0]
+		for _, n := range in.notes {
+			if len(n.Projects) == 0 {
+				kept = append(kept, n) // cross-cutting; not about any one project
+				continue
 			}
-		}
-		if len(remaining) == len(n.Projects) {
+			// A standing rule outlives the project it names. Removing a project
+			// deletes what was observed about it; it does not repeal a decision the
+			// user made, and silently repealing one is how a fleet ends up back on
+			// a paid model because a repository was renamed.
+			if n.Kind.Standing() {
+				kept = append(kept, n)
+				continue
+			}
+			remaining := n.Projects[:0]
+			for _, p := range n.Projects {
+				if !ident.SameName(p, name) {
+					remaining = append(remaining, p)
+				}
+			}
+			if len(remaining) == len(n.Projects) {
+				kept = append(kept, n)
+				continue
+			}
+			changed = true
+			if len(remaining) == 0 {
+				continue // was about this project and nothing else
+			}
+			n.Projects = remaining
 			kept = append(kept, n)
-			continue
 		}
-		changed = true
-		if len(remaining) == 0 {
-			continue // was about this project and nothing else
+		in.notes = kept
+		in.mu.Unlock()
+		if changed {
+			in.saveNotes()
 		}
-		n.Projects = remaining
-		kept = append(kept, n)
-	}
-	in.notes = kept
-	in.mu.Unlock()
-	if changed {
-		in.saveNotes()
-	}
+	})
 }
 
 // NotesFor returns the notes worth putting in front of the king this turn:
@@ -445,10 +453,12 @@ func (in *Inbox) Notes() []Note {
 // ClearNotes drops everything. Exposed so a wrong fact does not need a text
 // editor to remove.
 func (in *Inbox) ClearNotes() {
-	in.mu.Lock()
-	in.notes = nil
-	in.mu.Unlock()
-	in.saveNotes()
+	in.notesRMW(func() {
+		in.mu.Lock()
+		in.notes = nil
+		in.mu.Unlock()
+		in.saveNotes()
+	})
 }
 
 // WithNotesPath enables note persistence. Without it notes live only for the
@@ -456,6 +466,7 @@ func (in *Inbox) ClearNotes() {
 func (in *Inbox) WithNotesPath(p string) *Inbox {
 	in.notesPath = p
 	in.loadNotes()
+	in.rememberNotesMtime()
 	return in
 }
 
@@ -496,5 +507,7 @@ func (in *Inbox) saveNotes() {
 	}
 	if err := fsutil.WriteFileAtomic(in.notesPath, b, fsutil.FileMode); err != nil {
 		fmt.Fprintf(os.Stderr, "agent-inbox: notes not saved: %v\n", err)
+		return
 	}
+	in.rememberNotesMtime()
 }
