@@ -1,13 +1,11 @@
 package driver
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 )
 
@@ -74,7 +72,7 @@ func (o *OpenCode) stream(ctx context.Context, ch chan<- StreamEvent, dir, sessi
 	}
 	args = append(args, prompt)
 
-	cmd := exec.CommandContext(ctx, "opencode", args...)
+	cmd := startProcess(ctx, "opencode", args...)
 	cmd.Dir = dir
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -96,10 +94,19 @@ func (o *OpenCode) stream(ctx context.Context, ch chan<- StreamEvent, dir, sessi
 	acc := newTextAccumulator()
 	sawStop := false
 
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64<<10), maxEventLine)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
+	// jsonlReader rather than bufio.Scanner: a Scanner stops dead on a line
+	// longer than its buffer, and the Wait below would then block against a
+	// child still writing the rest of that line — an oversized frame wedged
+	// the whole turn until the deadline. See jsonl.go and F07.
+	jr := newJSONLReader(stdout, maxEventLine)
+	var readErr error
+	for {
+		var raw []byte
+		raw, readErr = jr.Next()
+		if readErr != nil {
+			break
+		}
+		line := bytes.TrimSpace(raw)
 		if len(line) == 0 || line[0] != '{' {
 			continue
 		}
@@ -134,7 +141,9 @@ func (o *OpenCode) stream(ctx context.Context, ch chan<- StreamEvent, dir, sessi
 			}
 		}
 	}
-	scanErr := sc.Err()
+	if readErr == io.EOF {
+		readErr = nil
+	}
 	waitErr := cmd.Wait()
 
 	final := strings.TrimSpace(cleanReply(acc.text()))
@@ -147,9 +156,16 @@ func (o *OpenCode) stream(ctx context.Context, ch chan<- StreamEvent, dir, sessi
 		}
 		ch <- StreamEvent{Kind: StreamError, SessionID: sessionID, Content: final,
 			Err: fmt.Errorf("opencode run: %v%s", waitErr, diagSuffix(strings.TrimSpace(stderr.String())))}
-	case scanErr != nil && !isClosedPipe(scanErr):
+	case jr.Skipped > 0:
+		// An oversized frame is a protocol violation: something in the turn's
+		// record was lost, and a reply assembled from the frames that
+		// happened to fit is not the agent's answer. Claiming success here
+		// would file a hole as a completion.
 		ch <- StreamEvent{Kind: StreamError, SessionID: sessionID, Content: final,
-			Err: fmt.Errorf("reading opencode events: %w", scanErr)}
+			Err: fmt.Errorf("opencode: %d event(s) exceeded %dMiB and were skipped; the turn's record is incomplete", jr.Skipped, maxEventLine>>20)}
+	case readErr != nil && !isClosedPipe(readErr):
+		ch <- StreamEvent{Kind: StreamError, SessionID: sessionID, Content: final,
+			Err: fmt.Errorf("reading opencode events: %w", readErr)}
 	case sessionID == "":
 		// Without an id this project cannot resume, and the next turn would
 		// silently start a new conversation. Better to fail the turn than to

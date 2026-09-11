@@ -176,7 +176,7 @@ func sendTool(ctx context.Context, req *mcp.CallToolRequest, args sendArgs) (*mc
 	if args.TimeoutSeconds > 0 {
 		timeout = time.Duration(args.TimeoutSeconds) * time.Second
 	}
-	res, ok := in.SendAndWait(args.Project, args.Message, timeout)
+	res, ok := in.SendAndWaitCtx(ctx, args.Project, args.Message, timeout)
 	errText := ""
 	if res.Err != nil {
 		errText = res.Err.Error()

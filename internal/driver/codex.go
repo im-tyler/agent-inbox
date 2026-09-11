@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -139,7 +138,7 @@ func (c Codex) StreamSend(ctx context.Context, dir, sessionID, prompt string) <-
 		tmp.Close()
 		defer os.Remove(tmpPath)
 
-		cmd := exec.CommandContext(ctx, "codex", append(c.args(sessionID, tmpPath), prompt)...)
+		cmd := startProcess(ctx, "codex", append(c.args(sessionID, tmpPath), prompt)...)
 		cmd.Dir = dir
 
 		stdout, err := cmd.StdoutPipe()

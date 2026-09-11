@@ -458,12 +458,14 @@ func TestCloseWaitsForBackgroundWork(t *testing.T) {
 	in.Close()
 
 	// Everything has stopped: the directory can be emptied and stays empty.
+	// RemoveAll because the claims dir legitimately retains per-project flock
+	// files (unlinking a flock file races contenders — see internal/claim).
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -479,3 +481,60 @@ func TestCloseIsIdempotent(t *testing.T) {
 	in.Close()
 	in.Close()
 }
+
+// F01: the shared round timeout must wake every waiter. A Timer.C delivers
+// one value, so with two unfinished targets only one timed out and the round
+// waited out the other turn — indefinitely, for a project with no deadline.
+func TestRoundTimeoutWakesEveryWaiter(t *testing.T) {
+	dir := t.TempDir()
+	block := make(chan struct{})
+	defer close(block)
+	slow := &blockingDriver{block: block}
+	projects := []*Project{
+		{Name: "one", Tool: "slow", Dir: filepath.Join(dir, "one"), Status: driver.StatusIdle},
+		{Name: "two", Tool: "slow", Dir: filepath.Join(dir, "two"), Status: driver.StatusIdle},
+	}
+	for _, p := range projects {
+		if err := os.MkdirAll(p.Dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	in := New(projects, map[string]driver.Driver{"slow": slow}, filepath.Join(dir, "state.json"))
+	t.Cleanup(in.Close)
+
+	items := make([]pending, 0, 2)
+	for _, p := range projects {
+		h, err := in.startSend(func() (*Project, error) { return in.projectByName(p.Name) }, "x", "x", true)
+		if err != nil {
+			t.Fatalf("start %s: %v", p.Name, err)
+		}
+		items = append(items, pending{name: p.Name, handle: &h})
+	}
+
+	start := time.Now()
+	replies := in.collectReplies(items, 50*time.Millisecond)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("round took %s — the shared timeout did not wake every waiter", d)
+	}
+	for _, r := range replies {
+		if !strings.Contains(r.content, "round timeout") {
+			t.Errorf("%s: %q — wanted the timeout answer", r.name, r.content)
+		}
+	}
+}
+
+// blockingDriver never finishes until released.
+type blockingDriver struct{ block chan struct{} }
+
+func (d *blockingDriver) Name() string { return "slow" }
+
+func (d *blockingDriver) Send(ctx context.Context, dir, sessionID, prompt string) driver.Result {
+	select {
+	case <-d.block:
+		return driver.Result{SessionID: sessionID, Final: "late", Status: driver.StatusWaiting}
+	case <-ctx.Done():
+		return driver.Result{SessionID: sessionID, Status: driver.StatusError, Err: ctx.Err()}
+	}
+}
+
+func (d *blockingDriver) AttachArgs(dir, sessionID string) []string { return nil }

@@ -85,6 +85,9 @@ func ValidateName(s string) error {
 	if s == "" {
 		return fmt.Errorf("name is required")
 	}
+	if s == "." || s == ".." {
+		return fmt.Errorf("name %q cannot be a project name", s)
+	}
 	if s != strings.TrimSpace(s) {
 		return fmt.Errorf("name %q has leading or trailing whitespace", s)
 	}

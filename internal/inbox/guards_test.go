@@ -19,7 +19,7 @@ func TestAttachIsRefusedWhileTheProjectIsWorking(t *testing.T) {
 	}}, map[string]driver.Driver{"mock": driver.Mock{}}, filepath.Join(t.TempDir(), "s.json"))
 	t.Cleanup(in.Close)
 
-	if _, _, err := in.AttachArgs(1); err == nil {
+	if _, _, _, err := in.BeginAttach(1); err == nil {
 		t.Fatal("attach was allowed during a turn")
 	}
 }
@@ -33,10 +33,11 @@ func TestAttachIsRefusedBeforeAnAdoptedSessionHasForked(t *testing.T) {
 	}}, map[string]driver.Driver{"mock": driver.Mock{}}, filepath.Join(t.TempDir(), "s.json"))
 	t.Cleanup(in.Close)
 
-	_, _, err := in.AttachArgs(1)
+	_, _, lease, err := in.BeginAttach(1)
 	if err == nil {
 		t.Fatal("attach was allowed into an unforked adopted session")
 	}
+	lease.Release()
 	if !strings.Contains(err.Error(), "forked") {
 		t.Errorf("the error should explain why: %v", err)
 	}
@@ -49,7 +50,7 @@ func TestAttachWorksOnceTheProjectIsIdleAndOwnsItsSession(t *testing.T) {
 	}}, map[string]driver.Driver{"mock": driver.Mock{}}, filepath.Join(t.TempDir(), "s.json"))
 	t.Cleanup(in.Close)
 
-	if _, _, err := in.AttachArgs(1); err != nil {
+	if _, _, _, err := in.BeginAttach(1); err != nil {
 		t.Fatalf("attach should be allowed: %v", err)
 	}
 }

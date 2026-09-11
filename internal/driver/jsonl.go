@@ -54,6 +54,13 @@ func (j *jsonlReader) Next() ([]byte, error) {
 }
 
 // readLine returns one whole line, nil if it was too long to keep.
+//
+// A final chunk can arrive together with io.EOF — ReadSlice returns both the
+// bytes it read and the error — and those bytes are the tail of the last
+// record. Dropping them (the error branch ignoring chunk) lost a short final
+// record outright and truncated a long one; accounting for chunk first, and
+// applying the limit to buf plus chunk, returns the complete final record
+// once and io.EOF on the next call.
 func (j *jsonlReader) readLine() ([]byte, error) {
 	var buf []byte
 	overLimit := false
@@ -61,14 +68,25 @@ func (j *jsonlReader) readLine() ([]byte, error) {
 		chunk, err := j.br.ReadSlice('\n')
 		if err == bufio.ErrBufferFull {
 			// Partial line. Keep it only while it still fits.
-			if !overLimit && len(buf)+len(chunk) <= j.limit {
-				buf = append(buf, chunk...)
-			} else if !overLimit {
+			if !overLimit {
+				if len(buf)+len(chunk) <= j.limit {
+					buf = append(buf, chunk...)
+				} else {
+					overLimit = true
+					j.Skipped++
+					buf = nil
+				}
+			}
+			continue
+		}
+		if !overLimit {
+			if len(buf)+len(chunk) > j.limit {
 				overLimit = true
 				j.Skipped++
 				buf = nil
+			} else if len(chunk) > 0 {
+				buf = append(buf, chunk...)
 			}
-			continue
 		}
 		if err != nil {
 			if len(buf) > 0 && !overLimit {
@@ -76,12 +94,9 @@ func (j *jsonlReader) readLine() ([]byte, error) {
 			}
 			return nil, err
 		}
-		if overLimit || len(buf)+len(chunk) > j.limit {
-			if !overLimit {
-				j.Skipped++
-			}
+		if overLimit {
 			return nil, nil
 		}
-		return append(buf, chunk...), nil
+		return buf, nil
 	}
 }

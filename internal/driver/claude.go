@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -84,7 +83,7 @@ func (c Claude) send(ctx context.Context, dir, sessionID, prompt string, sessArg
 		args = append(args, "--permission-mode", c.PermissionMode)
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd := startProcess(ctx, "claude", args...)
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -138,7 +137,7 @@ func (c Claude) StreamSend(ctx context.Context, dir, sessionID, prompt string) <
 			args = append(args, "--permission-mode", c.PermissionMode)
 		}
 
-		cmd := exec.CommandContext(ctx, "claude", args...)
+		cmd := startProcess(ctx, "claude", args...)
 		cmd.Dir = dir
 
 		stdout, err := cmd.StdoutPipe()
@@ -191,17 +190,18 @@ func (c Claude) StreamSend(ctx context.Context, dir, sessionID, prompt string) <
 		// reporting it as a completed turn (which an earlier version did,
 		// because it tested the channel buffer instead of what had been
 		// sent) files a truncated answer as though the agent had finished.
+		//
+		// The same goes for an exit-zero stream that produced assistant text
+		// but no validated terminal result: intermediate text is not a
+		// completion, and a truncated or malformed terminal frame must not
+		// be converted into a successful answer a king watcher could act on.
 		if waitErr != nil {
 			ch <- StreamEvent{Kind: StreamError, Content: finalText.String(), SessionID: sessionID,
 				Err: turnError(ctx, "claude", waitErr, "")}
 			return
 		}
-		if strings.TrimSpace(finalText.String()) == "" {
-			ch <- StreamEvent{Kind: StreamError, SessionID: sessionID,
-				Err: fmt.Errorf("claude: stream ended without a result")}
-			return
-		}
-		ch <- StreamEvent{Kind: StreamDone, Content: finalText.String(), SessionID: sessionID}
+		ch <- StreamEvent{Kind: StreamError, Content: finalText.String(), SessionID: sessionID,
+			Err: fmt.Errorf("claude: stream ended without a result event")}
 	}()
 
 	return ch

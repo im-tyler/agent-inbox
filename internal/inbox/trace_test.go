@@ -74,7 +74,7 @@ func TestTraceRecordsTheTurn(t *testing.T) {
 	}
 
 	// Persisted: a second process reads the same trace from state.json.
-	saved := readStateFile(env.state)
+	saved := readStateFileOrFatal(t, env.state)
 	if len(saved) != 1 || len(saved[0].Trace) != 2 {
 		t.Fatalf("trace not persisted: %+v", saved)
 	}

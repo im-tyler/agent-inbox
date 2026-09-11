@@ -1,11 +1,13 @@
 package inbox
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/im-tyler/agent-inbox/internal/claim"
@@ -78,17 +80,27 @@ func (in *Inbox) mergeState() error {
 	}
 	in.mu.Unlock()
 
-	disk := readStateFile(in.statePath)
+	disk, derr := in.diskOrQuarantine()
+	if derr != nil {
+		return derr
+	}
 	diskByName := make(map[string]Project, len(disk))
 	for _, d := range disk {
 		diskByName[ident.Name(d.Name)] = d
 	}
 
+	removed := readRemoved(in.statePath)
 	out := make([]Project, 0, len(ours)+len(disk))
 	written := make(map[string]bool, len(ours))
 	for i := range ours {
 		p := ours[i]
 		key := ident.Name(p.Name)
+		// A tombstoned project was deliberately removed; this memory is stale.
+		// Writing the entry back is the resurrection the tombstone exists to
+		// prevent (F14).
+		if _, gone := removed[key]; gone {
+			continue
+		}
 		written[key] = true
 		if d, ok := diskByName[key]; ok && !localTurn[key] && sameProject(d, p) && d.UpdatedAt.After(p.UpdatedAt) {
 			adoptPersisted(&p, d)
@@ -98,12 +110,18 @@ func (in *Inbox) mergeState() error {
 	// Entries only the other process knows about are kept, not dropped: a
 	// merge must never delete, because "absent from our memory" is also the
 	// state of a process that has not looked yet. Deletion is explicit —
-	// deleteStateEntry — and adoption of somebody else's deletion is
-	// RefreshExternal's job, where the intent can be told from the staleness.
+	// deleteStateEntry plus a tombstone — and adoption of somebody else's
+	// deletion is RefreshExternal's job, where the intent can be told from
+	// the staleness.
 	for _, d := range disk {
-		if !written[ident.Name(d.Name)] {
-			out = append(out, d)
+		key := ident.Name(d.Name)
+		if written[key] {
+			continue
 		}
+		if _, gone := removed[key]; gone {
+			continue // a resurrected entry, dropped again
+		}
+		out = append(out, d)
 	}
 
 	b, err := json.MarshalIndent(out, "", "  ")
@@ -117,6 +135,111 @@ func (in *Inbox) mergeState() error {
 	return nil
 }
 
+// diskOrQuarantine reads the state store for a write path. Damage is
+// quarantined, not written over: the evidence survives beside the live path
+// and the next save starts fresh from memory. Writing a merge (or a removal)
+// on top of an unreadable store is the "repair" that erased it (F17).
+func (in *Inbox) diskOrQuarantine() ([]Project, error) {
+	disk, derr := readStateFile(in.statePath)
+	if derr == nil {
+		return disk, nil
+	}
+	if q := quarantineState(in.statePath); q != "" {
+		return nil, fmt.Errorf("state file was damaged and is quarantined at %s; retry the operation to start a fresh store: %w", q, derr)
+	}
+	return nil, fmt.Errorf("state file damaged and could not be quarantined: %w", derr)
+}
+
+// Deletion tombstones (F14).
+//
+// A merge cannot express removal, and a merge must never delete — so a
+// removed project's state entry is gone but not forgotten: a second inbox
+// still holding the project in memory would append it right back on its next
+// save, and every other frontend then adopted the resurrection. The
+// tombstone store names what was deliberately removed, so a stale writer's
+// merge drops what it does not know was deleted, and adoption of disk-only
+// entries can tell "added elsewhere" from "removed elsewhere and resurrected".
+// Re-adding the project clears its tombstone: an explicit add is an explicit
+// add.
+
+// removedPath is the tombstone store beside state.json.
+func removedPath(statePath string) string {
+	return filepath.Join(filepath.Dir(statePath), "removed.json")
+}
+
+// maxTombstones bounds the store. Deletions are rare; the set only has to
+// outlive the staleness of every live process, not history.
+const maxTombstones = 128
+
+type removedEntry struct {
+	Name string    `json:"name"`
+	At   time.Time `json:"at"`
+}
+
+func readRemoved(statePath string) map[string]time.Time {
+	out := map[string]time.Time{}
+	if statePath == "" {
+		return out
+	}
+	b, err := os.ReadFile(removedPath(statePath))
+	if err != nil {
+		return out
+	}
+	var entries []removedEntry
+	if json.Unmarshal(b, &entries) != nil {
+		return out
+	}
+	for _, e := range entries {
+		out[ident.Name(e.Name)] = e.At
+	}
+	return out
+}
+
+func writeRemoved(statePath string, m map[string]time.Time) {
+	entries := make([]removedEntry, 0, len(m))
+	for name, at := range m {
+		entries = append(entries, removedEntry{Name: name, At: at})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].At.Before(entries[j].At) })
+	if len(entries) > maxTombstones {
+		entries = entries[len(entries)-maxTombstones:]
+	}
+	b, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = fsutil.WriteFileAtomic(removedPath(statePath), b, fsutil.FileMode)
+}
+
+// tombstoneProject records a deletion durably.
+func tombstoneProject(statePath, name string) {
+	if statePath == "" {
+		return
+	}
+	_ = fsutil.WithFileLock(removedPath(statePath)+".lock", lockWait, func() error {
+		m := readRemoved(statePath)
+		m[ident.Name(name)] = time.Now()
+		writeRemoved(statePath, m)
+		return nil
+	})
+}
+
+// untombstoneProject clears a deletion so an explicit re-add sticks.
+func untombstoneProject(statePath, name string) {
+	if statePath == "" {
+		return
+	}
+	_ = fsutil.WithFileLock(removedPath(statePath)+".lock", lockWait, func() error {
+		m := readRemoved(statePath)
+		if _, gone := m[ident.Name(name)]; !gone {
+			return nil
+		}
+		delete(m, ident.Name(name))
+		writeRemoved(statePath, m)
+		return nil
+	})
+}
+
 // deleteStateEntry removes one project's entry from disk, explicitly. The
 // counterpart to RemoveProject: a merge cannot express removal, so removal
 // does not go through the merge.
@@ -125,7 +248,10 @@ func (in *Inbox) deleteStateEntry(name string) {
 		return
 	}
 	err := fsutil.WithFileLock(in.statePath+".lock", lockWait, func() error {
-		disk := readStateFile(in.statePath)
+		disk, derr := in.diskOrQuarantine()
+		if derr != nil {
+			return derr
+		}
 		kept := disk[:0]
 		for _, d := range disk {
 			if !ident.SameName(d.Name, name) {
@@ -147,19 +273,36 @@ func (in *Inbox) deleteStateEntry(name string) {
 	}
 }
 
-// readStateFile parses state.json, tolerating absence and damage the way
-// LoadState always has: unreadable means empty, and the next write replaces
-// it rather than preserving a file this program cannot understand.
-func readStateFile(path string) []Project {
+// readStateFile parses state.json, distinguishing a store that does not exist
+// yet (normal, empty) from one that exists but cannot be read or parsed
+// (damage). Mapping damage to an empty slice made every absent project look
+// intentionally deleted, and the refresh path then destroyed notes and
+// membership over a file nobody had actually read (F17).
+func readStateFile(path string) ([]Project, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	var saved []Project
-	if json.Unmarshal(b, &saved) != nil {
-		return nil
+	if err := json.Unmarshal(b, &saved); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	return saved
+	return saved, nil
+}
+
+// quarantineState moves a damaged state file aside, preserving the evidence
+// before any fresh write replaces it. The renamed copy keeps what can be
+// inspected; the live path becomes absent, so the next save starts a fresh
+// store from current memory instead of failing forever.
+func quarantineState(path string) string {
+	q := fmt.Sprintf("%s.bad-%d", path, time.Now().UnixNano())
+	if os.Rename(path, q) != nil {
+		return ""
+	}
+	return q
 }
 
 // sameProject is the identity check LoadState uses: name alone is not enough,
@@ -181,8 +324,36 @@ func adoptPersisted(p *Project, d Project) {
 	p.WaitReason = d.WaitReason
 	p.WaitDetail = d.WaitDetail
 	p.UpdatedAt = d.UpdatedAt
+	p.Revision = d.Revision
 	p.History = d.History
 	p.Trace = d.Trace
+	// Union the dedup sets: an event this process applied and one the other
+	// process applied must both count as applied after adoption, or the
+	// loser's spool file double-applies on its next ingest.
+	p.SeenEvents = unionSeenEvents(p.SeenEvents, d.SeenEvents)
+}
+
+// unionSeenEvents merges two bounded dedup sets, newest last.
+func unionSeenEvents(a, b []string) []string {
+	out := append([]string(nil), a...)
+	for _, s := range b {
+		if !containsString(out, s) {
+			out = append(out, s)
+		}
+	}
+	if len(out) > maxSeenEvents {
+		out = out[len(out)-maxSeenEvents:]
+	}
+	return out
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // rememberStateMtime records the mtime of the file this process just wrote,
@@ -232,8 +403,19 @@ func (in *Inbox) RefreshExternal() {
 // adoptExternalState overlays the disk state onto memory for every project
 // this process is not mid-turn on, and adopts membership changes: a project
 // added by a harness appears here, one removed by a harness disappears.
+//
+// A store that cannot be read is not a fleet that shrank to nothing: damage
+// must leave memory alone and surface, not delete notes and membership over
+// a file nobody actually read (F17).
 func (in *Inbox) adoptExternalState() {
-	disk := readStateFile(in.statePath)
+	disk, derr := readStateFile(in.statePath)
+	if derr != nil {
+		in.mu.Lock()
+		in.saveErr = fmt.Errorf("state not refreshed: %v", derr)
+		in.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "agent-inbox: state file unreadable, keeping current view: %v\n", derr)
+		return
+	}
 	byName := make(map[string]Project, len(disk))
 	for _, d := range disk {
 		byName[ident.Name(d.Name)] = d
@@ -276,9 +458,15 @@ func (in *Inbox) adoptExternalState() {
 	}
 	// Projects we do not know: adopted from their entry. Config is the
 	// definition of the fleet, but the harness that added it wrote both, so
-	// the state entry carries everything adoption needs.
+	// the state entry carries everything adoption needs. A tombstoned name
+	// is not an addition — it is a removal somebody's stale write
+	// resurrected, and adopting it would undo the deletion everywhere.
+	tombstones := readRemoved(in.statePath)
 	for key, d := range byName {
 		if in.hasProjectLocked(key) {
+			continue
+		}
+		if _, gone := tombstones[key]; gone {
 			continue
 		}
 		if d.Status == driver.StatusWorking && !in.claimHeldBy(d.Name) {
@@ -321,10 +509,11 @@ func (in *Inbox) claimHeldBy(name string) bool {
 // process from being resurrected by a save from another that never saw it.
 //
 // Session-only notes (no path) have nothing to serialise on and run fn
-// directly. A lock that cannot be taken is reported and the operation
-// proceeds anyway: dropping a note the user asked to drop, or a fact the
-// supervisor took a turn to learn, costs more than the lost update this
-// risks, and the risk needs two writers in the same ten seconds.
+// directly. A lock that cannot be taken fails the operation: proceeding
+// unlocked committed a stale in-memory snapshot over whatever the lock holder
+// was writing — the exact lost update the lock exists to prevent (F18). The
+// caller's return value then reports that nothing happened, which the user
+// can retry; a dropped note is recoverable, a clobbered store is not.
 func (in *Inbox) notesRMW(fn func()) {
 	if in.notesPath == "" {
 		fn()
@@ -337,9 +526,7 @@ func (in *Inbox) notesRMW(fn func()) {
 		return nil
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent-inbox: notes lock: %v\n", err)
-		fn()
-		in.saveNotes()
+		fmt.Fprintf(os.Stderr, "agent-inbox: notes change skipped, store is busy or unreadable: %v\n", err)
 	}
 }
 
@@ -385,6 +572,46 @@ func (in *Inbox) acquireClaim(name, tool, key string) error {
 	return err
 }
 
+// refreshOwnedProject re-reads the persisted entry for name while the caller
+// holds the send claim, so a send runs against the session the last turn left
+// behind — not the snapshot this process happened to load who-knows-when.
+//
+// Winning the claim means nobody else is mid-turn on the project, so a disk
+// Working status is stale by definition: it is a writer that died before
+// filing an outcome, and adopting it verbatim would make our own second-pass
+// Working check refuse a send we own.
+func (in *Inbox) refreshOwnedProject(name string) {
+	if in.statePath == "" {
+		return
+	}
+	disk, derr := readStateFile(in.statePath)
+	if derr != nil {
+		// Damaged store: the claim is ours, so memory is the best available
+		// answer, and a failed read must not become a session reset.
+		return
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	p, err := in.projectByName(name)
+	if err != nil {
+		return
+	}
+	if _, live := in.active[p.Name]; live {
+		return
+	}
+	for _, d := range disk {
+		if !ident.SameName(d.Name, name) || !sameProject(d, *p) || !d.UpdatedAt.After(p.UpdatedAt) {
+			continue
+		}
+		adoptPersisted(p, d)
+		if p.Status == driver.StatusWorking {
+			p.Status = driver.StatusIdle
+			p.WaitReason, p.WaitDetail = "", ""
+		}
+		break
+	}
+}
+
 // SendAndWait sends one prompt to a project by name and waits for exactly
 // that turn — the headless front-end's primitive. It resolves when the turn
 // resolves: reply, error, or cancellation. A timeout bounds both the wait and
@@ -393,6 +620,15 @@ func (in *Inbox) acquireClaim(name, tool, key string) error {
 // ok is false when the turn could not be started or did not finish in bounds;
 // the outcome carries the reason either way.
 func (in *Inbox) SendAndWait(name, prompt string, timeout time.Duration) (TurnOutcome, bool) {
+	return in.SendAndWaitCtx(context.Background(), name, prompt, timeout)
+}
+
+// SendAndWaitCtx is SendAndWait bound to a caller's context — an MCP request,
+// a cancelled CLI pipe. Cancelling ctx cancels the turn itself (the child
+// dies with the group the driver owns), not just this process's wait for it,
+// so a disconnect does not leave the agent spending in the background (F11).
+// The outcome reports the cancellation; ok is false.
+func (in *Inbox) SendAndWaitCtx(ctx context.Context, name, prompt string, timeout time.Duration) (TurnOutcome, bool) {
 	wait := timeout
 	if wait <= 0 {
 		wait = configTurnTimeout(in)
@@ -402,7 +638,7 @@ func (in *Inbox) SendAndWait(name, prompt string, timeout time.Duration) (TurnOu
 	}
 	// The resolve closure runs under the inbox mutex inside startSend, so it
 	// must not take the lock itself; projectByName is documented caller-holds-mu.
-	handle, err := in.startSendTimed(
+	handle, err := in.startSendTimedCtx(ctx,
 		func() (*Project, error) { return in.projectByName(name) },
 		prompt, prompt, true, timeout,
 	)
@@ -414,6 +650,37 @@ func (in *Inbox) SendAndWait(name, prompt string, timeout time.Duration) (TurnOu
 	select {
 	case out := <-handle.Done:
 		return out, true
+	case <-ctx.Done():
+		// Cancel the specific turn. The cancels entry may already belong to
+		// a successor that started between our turn ending and this firing,
+		// so only cancel when the active turn is still ours — cancelling by
+		// project name alone could kill a turn this request never started.
+		in.mu.Lock()
+		cancel, ok := in.cancels[name]
+		if cur, live := in.active[name]; !live || cur.ID() != handle.ID {
+			ok = false
+		} else {
+			delete(in.cancels, name)
+		}
+		in.mu.Unlock()
+		if ok {
+			cancel()
+		}
+		// Wait out the owned-process cleanup so the child is reaped before
+		// returning, but never past the caller's own deadline.
+		select {
+		case out := <-handle.Done:
+			out.Project = name
+			out.Cancelled = true
+			if out.Err == nil {
+				out.Err = ctx.Err()
+			}
+			return out, false
+		case <-t.C:
+			return TurnOutcome{Project: name, Err: fmt.Errorf("turn did not finish within %s", wait), Cancelled: true}, false
+		case <-in.done:
+			return TurnOutcome{Project: name, Err: errors.New("shutting down"), Cancelled: true}, false
+		}
 	case <-t.C:
 		return TurnOutcome{Project: name, Err: fmt.Errorf("turn did not finish within %s", wait)}, false
 	case <-in.done:

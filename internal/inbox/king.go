@@ -2,6 +2,7 @@ package inbox
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -630,11 +631,17 @@ func (in *Inbox) kingRoundWatcher(kingName string, items []pending, budget int, 
 // Entries that were answered locally pass straight through. They are still
 // returned in dispatch order, so the summary reads in the order the supervisor
 // asked rather than in the order the answers happened to be cheap.
+//
+// The bound is a context, not a Timer: a Timer.C delivers one value, so with
+// two unfinished targets one goroutine timed out and every other waited on
+// its handle — for a turn configured without a deadline, forever, past a
+// round that had supposedly ended (F01). A closed Done channel broadcasts to
+// every waiter alike.
 func (in *Inbox) collectReplies(items []pending, timeout time.Duration) []fleetReply {
 	replies := make([]fleetReply, len(items))
 	var wg sync.WaitGroup
-	t := time.NewTimer(timeout)
-	defer t.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
 	for i, it := range items {
 		if it.handle == nil {
@@ -647,8 +654,15 @@ func (in *Inbox) collectReplies(items []pending, timeout time.Duration) []fleetR
 			select {
 			case out := <-h.Done:
 				replies[i] = replyFrom(h.Project, out)
-			case <-t.C:
-				replies[i] = fleetReply{name: h.Project, content: "(no reply within the round timeout)"}
+			case <-ctx.Done():
+				// The deadline and the last outcome race; a result that is
+				// already on the channel wins over the timeout.
+				select {
+				case out := <-h.Done:
+					replies[i] = replyFrom(h.Project, out)
+				default:
+					replies[i] = fleetReply{name: h.Project, content: "(no reply within the round timeout)"}
+				}
 			case <-in.done:
 				replies[i] = fleetReply{name: h.Project, content: "(shutting down)"}
 			}

@@ -72,7 +72,7 @@ func TestDetailOutOfRangeFails(t *testing.T) {
 
 func TestAttachArgsRequiresSession(t *testing.T) {
 	in, _ := testInbox(t, 1)
-	if _, _, err := in.AttachArgs(1); err == nil {
+	if _, _, _, err := in.BeginAttach(1); err == nil {
 		t.Error("AttachArgs should fail when project has no session")
 	}
 
@@ -81,7 +81,7 @@ func TestAttachArgsRequiresSession(t *testing.T) {
 	in.mu.Unlock()
 
 	// No driver registered for "mock" tool in this test — should still fail.
-	if _, _, err := in.AttachArgs(1); err == nil {
+	if _, _, _, err := in.BeginAttach(1); err == nil {
 		t.Error("AttachArgs should fail when no driver registered")
 	}
 }

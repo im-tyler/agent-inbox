@@ -108,8 +108,16 @@ func WriteEvent(eventsDir string, ev Event) error {
 	return fsutil.WriteFileAtomic(filepath.Join(eventsDir, name), b, fsutil.FileMode)
 }
 
-// Ingest applies and removes pending event files, returning the names of
-// projects newly flipped to waiting.
+// Ingest applies pending event files and returns the names of projects newly
+// flipped to waiting.
+//
+// Commit, then acknowledge. The event file is removed only after its effect —
+// including the seen-marker that dedups it — is durable in state.json. A
+// crash between the two leaves the file behind to be re-read and skipped by
+// its marker; a failed save leaves it behind to be re-applied, because the
+// state it would have updated never happened. Supervision notices fire only
+// after the commit: an autonomous wake is real work, and "the event was
+// applied" must be true before spending money on it (F13).
 func (in *Inbox) Ingest(eventsDir string) []string {
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
@@ -138,24 +146,30 @@ func (in *Inbox) Ingest(eventsDir string) []string {
 			_ = os.Rename(full, full+".bad")
 			continue
 		}
-		if name, ok := in.applyEvent(ev); ok {
+		name, changed := in.applyEvent(ev, fn)
+		if changed {
 			updated = append(updated, name)
+		}
+		// The commit carries both the event's effect and its seen-marker.
+		// Until it succeeds the file stays, whatever this process's memory
+		// already believes.
+		if err := in.save(); err != nil {
+			continue
+		}
+		if changed {
 			// The supervisor, if it is allowed to notice things. Told the
-			// reason as well as the name: "finished" and "stuck on a permission
-			// prompt" are the two cases, and they are what it has to choose
-			// between.
+			// reason as well as the name: "finished" and "stuck on a
+			// permission prompt" are the two cases, and they are what it has
+			// to choose between.
 			in.oversight().Notice(name, string(ParseReason(string(ev.Reason))))
 		}
 		os.Remove(full)
-	}
-	if len(updated) > 0 {
-		in.save()
 	}
 	return updated
 }
 
 // applyEvent files a Stop-hook event against the project that owns the session
-// it came from.
+// it came from, deduplicated by spool filename.
 //
 // The match is on tool and session id, not just directory. Matching on
 // directory alone meant any session that happened to stop in a project's
@@ -168,7 +182,7 @@ func (in *Inbox) Ingest(eventsDir string) []string {
 // An external session that matches nothing is not an error. It belongs in the
 // session inbox, which is where unmanaged sessions are meant to appear;
 // adopting it here by overwriting a managed session is not the same thing.
-func (in *Inbox) applyEvent(ev Event) (string, bool) {
+func (in *Inbox) applyEvent(ev Event, spoolName string) (string, bool) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	for _, p := range in.projects {
@@ -181,6 +195,11 @@ func (in *Inbox) applyEvent(ev Event) (string, bool) {
 		// Only a session this project already owns may speak for it.
 		if p.SessionID == "" || ev.SessionID != p.SessionID {
 			continue
+		}
+		// Dedup by spool filename: a file whose event is already applied —
+		// the crash window between commit and removal — must not apply twice.
+		if p.hasSeenEvent(spoolName) {
+			return "", false
 		}
 		ts := time.Unix(0, ev.TS)
 		// A turn the inbox is running owns this project's state. An event
@@ -199,6 +218,7 @@ func (in *Inbox) applyEvent(ev Event) (string, bool) {
 				p.WaitDetail = ev.Detail
 				p.Activity = "blocked"
 				p.UpdatedAt = ts
+				p.seenEvent(spoolName)
 				return p.Name, true
 			}
 			continue
@@ -231,6 +251,8 @@ func (in *Inbox) applyEvent(ev Event) (string, bool) {
 			p.appendHistory(Message{Role: "system", Content: blockedLine(reason, ev.Detail), Timestamp: ts})
 		}
 		p.UpdatedAt = ts
+		p.seenEvent(spoolName)
+		p.bumpRevision()
 		return p.Name, true
 	}
 	return "", false
