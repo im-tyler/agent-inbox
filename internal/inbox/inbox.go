@@ -849,6 +849,13 @@ func (in *Inbox) startSendTimedCtx(parent context.Context, resolve func() (*Proj
 		return TurnHandle{}, fmt.Errorf("%s: no driver for tool %q", p.Name, p.Tool)
 	}
 	claimName, claimTool := ident.Name(p.Name), p.Tool
+	// Pin the target's identity, not its slot: the second pass re-resolves
+	// by name and verifies it is still the same project object with the same
+	// tool and directory. The numeric resolver used to be called twice, so a
+	// removal between the passes shifted the index and delivered the prompt
+	// to a different project while holding the original's claim.
+	target, targetName, targetDir := p, p.Name, p.Dir
+	targetDefinition := *p
 	in.mu.Unlock()
 
 	turnKey := newTurnKey()
@@ -861,17 +868,26 @@ func (in *Inbox) startSendTimedCtx(parent context.Context, resolve func() (*Proj
 	// otherwise send with a stale session id, fork source and history, and
 	// its local turn would make the merge prefer that stale snapshot.
 	in.refreshOwnedProject(claimName)
+	// Ownership serializes sends; it does not make this process's cached
+	// configuration correct. A frontend that loaded the project before
+	// another changed its tool or directory must refuse rather than drive
+	// the old identity against the user's current config.
+	if err := in.requireCurrentDefinitions([]Project{targetDefinition}); err != nil {
+		return TurnHandle{}, errors.Join(err, in.claims.Release(claimName, turnKey))
+	}
 
 	// Second pass: everything may have moved while the lock was down — the
-	// project removed, its tool changed, another send started. Re-resolve and
-	// re-check; the claim is already ours, so a competing send lost at the
-	// filesystem instead of here.
+	// project removed, its tool changed, another send started. Re-resolve by
+	// the pinned name and verify identity; the claim is already ours, so a
+	// competing send lost at the filesystem instead of here.
 	in.mu.Lock()
-	p, err = resolve()
+	p, err = in.projectByName(targetName)
+	if err == nil && (p != target || p.Tool != claimTool || !ident.SameDir(p.Dir, targetDir)) {
+		err = fmt.Errorf("project %q changed while acquiring ownership; retry", targetName)
+	}
 	if err != nil {
 		in.mu.Unlock()
-		in.claims.Release(claimName, turnKey)
-		return TurnHandle{}, err
+		return TurnHandle{}, errors.Join(err, in.claims.Release(claimName, turnKey))
 	}
 	d, ok := in.drivers[p.Tool]
 	if !ok {
@@ -981,7 +997,15 @@ func (in *Inbox) startSendTimedCtx(parent context.Context, resolve func() (*Proj
 		// The claim is released only now, with the turn fully filed: the
 		// filesystem guard must not come off while our own write is still in
 		// flight. A superseding turn holds a different key and is unaffected.
-		in.claims.Release(ident.Name(name), turnKey)
+		// Release exactly the resource acquired — the captured claim name,
+		// not a name re-resolved after the fact — and carry the failure into
+		// the outcome: a turn whose ownership may still be held is not a
+		// clean completion, and later sends would stay blocked with nobody
+		// told why.
+		releaseErr := in.claims.Release(claimName, turnKey)
+		if releaseErr != nil {
+			fmt.Fprintf(os.Stderr, "agent-inbox: claim release/cleanup failed: %v\n", releaseErr)
+		}
 		// Resolve last, after the save and the release: a caller woken by the
 		// handle can treat the turn as durable — on disk, claim off — rather
 		// than racing this goroutine's bookkeeping. A turn that was
@@ -990,14 +1014,22 @@ func (in *Inbox) startSendTimedCtx(parent context.Context, resolve func() (*Proj
 		// error so no waiter is left holding a handle that never fires.
 		in.mu.Lock()
 		if in.isCurrentTurn(name, turn) {
-			if turn.outcome != nil {
-				in.resolveTurn(name, turn, *turn.outcome)
-			} else {
-				in.resolveTurn(name, turn, TurnOutcome{
-					Status: driver.StatusError,
-					Err:    fmt.Errorf("turn ended without filing an outcome"),
-				})
+			outcome := TurnOutcome{
+				Status: driver.StatusError,
+				Err:    fmt.Errorf("turn ended without filing an outcome"),
 			}
+			if turn.outcome != nil {
+				outcome = *turn.outcome
+			}
+			if releaseErr != nil {
+				cleanupErr := fmt.Errorf("claim release/cleanup failed: %w", releaseErr)
+				outcome.Err = errors.Join(outcome.Err, cleanupErr)
+				in.saveErr = errors.Join(in.saveErr, cleanupErr)
+				if current, cerr := in.projectByName(name); cerr == nil {
+					current.LastErr = outcome.Err.Error()
+				}
+			}
+			in.resolveTurn(name, turn, outcome)
 		}
 		in.mu.Unlock()
 	})
@@ -1010,7 +1042,9 @@ func (in *Inbox) startSendTimedCtx(parent context.Context, resolve func() (*Proj
 		p.Status = driver.StatusIdle
 		in.mu.Unlock()
 		cancel()
-		in.claims.Release(ident.Name(name), turnKey)
+		if rerr := in.claims.Release(claimName, turnKey); rerr != nil {
+			fmt.Fprintf(os.Stderr, "agent-inbox: claim release/cleanup failed: %v\n", rerr)
+		}
 		return TurnHandle{}, fmt.Errorf("shutting down")
 	}
 	return handle, nil
@@ -1084,6 +1118,13 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 			for range ch {
 			}
 			return
+		}
+		// A terminal event has already been filed for this turn: a late
+		// progress event must not flip the project back to working and
+		// block the next send. Keep draining, but freeze the outcome.
+		if turn.outcome != nil {
+			in.mu.Unlock()
+			continue
 		}
 		if ev.SessionID != "" {
 			p.SessionID = ev.SessionID
@@ -1495,14 +1536,15 @@ type AttachLease struct {
 	key  string
 }
 
-// Release drops the attach claim. Call it when the interactive child exits
-// (and on any failure to start it): a lease left held blocks managed sends
-// until the holder's process dies. Safe on a nil lease.
-func (l *AttachLease) Release() {
+// Release drops the attach claim, reporting failure. Call it when the
+// interactive child exits (and on any failure to start it): a lease left
+// held blocks managed sends until the holder's process dies, so a release
+// that failed must be said rather than swallowed. Safe on a nil lease.
+func (l *AttachLease) Release() error {
 	if l == nil {
-		return
+		return nil
 	}
-	l.set.Release(l.name, l.key)
+	return l.set.Release(l.name, l.key)
 }
 
 // BeginAttach validates attachment and takes the project claim for the
@@ -1523,6 +1565,7 @@ func (in *Inbox) BeginAttach(idx int) ([]string, string, *AttachLease, error) {
 		return nil, "", nil, fmt.Errorf("%s: no driver for tool %q", p.Name, p.Tool)
 	}
 	name := p.Name
+	targetDefinition := *p
 	in.mu.Unlock()
 
 	claimName := ident.Name(name)
@@ -1535,7 +1578,15 @@ func (in *Inbox) BeginAttach(idx int) ([]string, string, *AttachLease, error) {
 		return nil, "", nil, err
 	}
 	lease := &AttachLease{set: in.claims, name: claimName, key: turnKey}
-	release := func() { lease.Release() }
+	release := func() {
+		if err := lease.Release(); err != nil {
+			fmt.Fprintf(os.Stderr, "agent-inbox: attach claim cleanup failed: %v\n", err)
+		}
+	}
+	if err := in.requireCurrentDefinitions([]Project{targetDefinition}); err != nil {
+		release()
+		return nil, "", nil, err
+	}
 
 	in.refreshOwnedProject(claimName)
 
@@ -1651,6 +1702,12 @@ func LoadState(path string, projects []*Project) {
 		p.UpdatedAt = s.UpdatedAt
 		p.History = s.History
 		p.Trace = s.Trace
+		// The change counter and the event-dedup markers are durable state:
+		// dropping them at startup reset follow's baseline to zero (an
+		// artificial wake from the first refresh), restarted the revision
+		// sequence, and forgot which spool files were already applied.
+		p.Revision = s.Revision
+		p.SeenEvents = append([]string(nil), s.SeenEvents...)
 		if p.Status == driver.StatusWorking {
 			// A persisted Working status belongs to whichever process was
 			// mid-turn when it was written. Loading it here is not

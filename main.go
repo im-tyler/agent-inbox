@@ -132,8 +132,11 @@ func run() error {
 		}
 		// The lease held the project's claim for the interactive run's
 		// lifetime, refusing managed sends on the same session. It comes off
-		// only now that the child is reaped.
-		req.Lease.Release()
+		// only now that the child is reaped — and a failed release is said,
+		// because a lease left held blocks every later managed send.
+		if err := req.Lease.Release(); err != nil {
+			fmt.Fprintf(os.Stderr, "agent-inbox: attach claim cleanup failed: %v\n", err)
+		}
 		// An interactive attach advances the real session without telling the
 		// dashboard, so the history shown here is no longer the whole
 		// conversation. Say so rather than implying completeness.

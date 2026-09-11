@@ -465,26 +465,40 @@ func (in *Inbox) ClearNotes() {
 // session, which is still useful and never fatal.
 func (in *Inbox) WithNotesPath(p string) *Inbox {
 	in.notesPath = p
-	in.loadNotes()
+	if err := in.loadNotes(); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-inbox: notes not loaded: %v\n", err)
+	} else {
+		in.rememberNotesMtime()
+	}
 	in.rememberNotesMtime()
 	return in
 }
 
-func (in *Inbox) loadNotes() {
+// loadNotes re-reads the store, reporting failure. A read that cannot
+// establish the current state must not be followed by a save: the mutation
+// would serialize against data it failed to read and replace a damaged file
+// with a stale in-memory snapshot — the exact loss the lock exists to
+// prevent. An absent store is empty, not the old snapshot in memory.
+func (in *Inbox) loadNotes() error {
 	if in.notesPath == "" {
-		return
+		return nil
 	}
 	b, err := os.ReadFile(in.notesPath)
-	if err != nil {
-		return
-	}
 	var saved []Note
-	if json.Unmarshal(b, &saved) != nil {
-		return
+	switch {
+	case os.IsNotExist(err):
+		// missing means empty
+	case err != nil:
+		return fmt.Errorf("read notes: %w", err)
+	default:
+		if err := json.Unmarshal(b, &saved); err != nil {
+			return fmt.Errorf("parse notes (original preserved): %w", err)
+		}
 	}
 	in.mu.Lock()
 	in.notes = saved
 	in.mu.Unlock()
+	return nil
 }
 
 // saveNotes writes atomically, same as state: a crash mid-write must not cost
