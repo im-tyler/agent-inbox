@@ -53,6 +53,12 @@ type activeTurn struct {
 	// resolved guards against double-send on done. Cancel and natural
 	// completion race, and both want to be the one to report.
 	resolved bool
+	// outcome is what the send filed, waiting for the turn goroutine to
+	// persist it. Resolution happens after the save, not at filing: a caller
+	// that proceeds on the handle — a headless send printing and exiting,
+	// another process adopting the result — must find the turn on disk, not
+	// only in memory that outlives the handle by microseconds.
+	outcome *TurnOutcome
 }
 
 // beginTurn registers a new turn for a project and returns its handle.

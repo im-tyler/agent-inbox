@@ -137,10 +137,12 @@ lines in its replies are dispatched; `[note]`/`[git:]` give it durable facts and
 free questions. It can propose rules, but only you ratify one.
 
 **[Any harness as the king](docs/HARNESS_KING.md)** — every operation is also a CLI
-verb (`agent-inbox status|send|git|log|note|add`) and an MCP tool
+verb (`agent-inbox status|send|follow|git|log|note|logbook|add`) and an MCP tool
 (`agent-inbox mcp`). Claude Code, OpenCode, or any MCP-speaking agent you already
 trust can supervise the fleet instead. No daemon: every front-end coordinates
-through the same state files.
+through the same state files. `follow` blocks until the fleet changes — a
+harness re-invoking it is event-driven — and the logbook carries the king's
+thread across sessions.
 
 **[Trust](docs/TRUST.md)** — everything the supervisor writes is untrusted-derived.
 Actions are allowlisted in code, git runs as argv never a shell, beliefs and policy

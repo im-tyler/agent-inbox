@@ -179,6 +179,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = fmt.Sprintf("waiting: %s", strings.Join(upd, ", "))
 			m.toastAt = time.Now()
 		}
+		// Other front-ends — a harness-driven send, an MCP tool call — write
+		// the same state files this dashboard does. Adopt their changes, so a
+		// turn somebody else started shows up here while it runs instead of
+		// at next restart. One stat call per tick when nothing changed.
+		m.inbox.RefreshExternal()
 		// A stateful session manager that cannot write its state must say so.
 		// This went to stderr, which is behind the alternate screen and so is
 		// seen by nobody until the program exits.

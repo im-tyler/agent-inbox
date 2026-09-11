@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/im-tyler/agent-inbox/internal/claim"
 	"github.com/im-tyler/agent-inbox/internal/config"
 	"github.com/im-tyler/agent-inbox/internal/driver"
 	"github.com/im-tyler/agent-inbox/internal/fsutil"
@@ -63,6 +64,36 @@ type Project struct {
 	// would be presented as current when it describes whenever we last
 	// happened to look.
 	Git git.State `json:"-"`
+
+	// Trace is what the current or most recent turn did: its tool calls, in
+	// order. Unlike Activity it is persisted, because the question it answers
+	// — what was this agent doing all that time — is asked most often by
+	// somebody who was not watching while it happened: a harness that sent
+	// the turn headless, or one that adopted the fleet mid-flight. Cleared
+	// when the next turn starts, so it describes one turn, not a history.
+	Trace []TraceEntry `json:"trace,omitempty"`
+}
+
+// TraceEntry is one thing the agent did during a turn.
+type TraceEntry struct {
+	T   time.Time `json:"t"`
+	Act string    `json:"act"`
+}
+
+// maxTrace bounds one turn's trace. It is a progress indicator, not a
+// transcript; a turn needing more entries than this reports the most recent
+// ones, which is the half that says what it is doing now.
+const maxTrace = 100
+
+// appendTrace records one activity. Caller holds mu.
+func (p *Project) appendTrace(act string) {
+	if act == "" {
+		return
+	}
+	p.Trace = append(p.Trace, TraceEntry{T: time.Now(), Act: act})
+	if len(p.Trace) > maxTrace {
+		p.Trace = p.Trace[len(p.Trace)-maxTrace:]
+	}
 }
 
 // Message is a single turn in a project's conversation history.
@@ -151,6 +182,16 @@ type Inbox struct {
 	usageSnap usage.Snapshot
 	usageErr  error
 
+	// claims guards sends across processes: the Working check above only
+	// sees this process's memory, and a harness-driven send in another one
+	// is invisible to it. See multi.go and internal/claim.
+	claims *claim.Set
+	// lastStateMtime and lastNotesMtime are the mtimes of the files this
+	// process last wrote, so RefreshExternal can tell its own writes from
+	// everybody else's.
+	lastStateMtime time.Time
+	lastNotesMtime time.Time
+
 	// overseer wakes a supervisor when its fleet changes, or nil when autonomy
 	// is off — which is the default, because it is the one thing here that
 	// spends money while nobody is watching.
@@ -194,6 +235,7 @@ func New(projects []*Project, drivers map[string]driver.Driver, statePath string
 		projects:    projects,
 		drivers:     drivers,
 		statePath:   statePath,
+		claims:      claimsOf(statePath),
 		cancels:     make(map[string]context.CancelFunc),
 		active:      make(map[string]*activeTurn),
 		done:        make(chan struct{}),
@@ -599,17 +641,27 @@ func (in *Inbox) addProject(name, tool, dir, sessionID, forkFrom string) error {
 // updateConfig applies fn to the on-disk config and saves it, serialised
 // against other config mutations. Returns the error rather than logging it:
 // the caller has in-memory state to keep consistent with the result.
+//
+// The serialisation is cross-process as well as in-process: a harness adding
+// a project and the dashboard doing anything config-touching are two programs
+// doing load-edit-save on one file, and the second save would silently drop
+// the first one's edit.
 func (in *Inbox) updateConfig(fn func(*config.Settings) error) error {
 	in.configMu.Lock()
 	defer in.configMu.Unlock()
-	settings, err := config.Load(in.configPath)
-	if err != nil {
-		return fmt.Errorf("cannot safely write config: load failed: %w", err)
+	if in.configPath == "" {
+		return fmt.Errorf("no config path")
 	}
-	if err := fn(settings); err != nil {
-		return err
-	}
-	return config.Save(in.configPath, settings)
+	return fsutil.WithFileLock(in.configPath+".lock", lockWait, func() error {
+		settings, err := config.Load(in.configPath)
+		if err != nil {
+			return fmt.Errorf("cannot safely write config: load failed: %w", err)
+		}
+		if err := fn(settings); err != nil {
+			return err
+		}
+		return config.Save(in.configPath, settings)
+	})
 }
 
 // Snapshot returns a copy of the current project states for display.
@@ -693,6 +745,18 @@ func (in *Inbox) sendResolved(resolve func() (*Project, error), displayText, dri
 // supervisor keeps it, because "the turn I started" and "the next time this
 // project is idle" are not the same event.
 func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driverText string, record bool) (TurnHandle, error) {
+	return in.startSendTimed(resolve, displayText, driverText, record, 0)
+}
+
+// startSendTimed is startSend with a per-turn timeout override. Zero keeps the
+// inbox's configured bound; the headless front-end passes its own so a
+// caller that stops waiting also stops paying.
+func (in *Inbox) startSendTimed(resolve func() (*Project, error), displayText, driverText string, record bool, timeout time.Duration) (TurnHandle, error) {
+	// First pass under the lock: validate the target and capture what the
+	// claim needs. The claim itself is taken with no lock held, because a
+	// claim held by this same process is released by a goroutine that may be
+	// milliseconds away, and waiting for it under the inbox mutex would stall
+	// every snapshot and render in the meantime.
 	in.mu.Lock()
 	p, err := resolve()
 	if err != nil {
@@ -703,10 +767,40 @@ func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driver
 		in.mu.Unlock()
 		return TurnHandle{}, fmt.Errorf("%s is already working", p.Name)
 	}
+	if _, ok := in.drivers[p.Tool]; !ok {
+		in.mu.Unlock()
+		return TurnHandle{}, fmt.Errorf("%s: no driver for tool %q", p.Name, p.Tool)
+	}
+	claimName, claimTool := ident.Name(p.Name), p.Tool
+	in.mu.Unlock()
+
+	turnKey := newTurnKey()
+	if err := in.acquireClaim(claimName, claimTool, turnKey); err != nil {
+		return TurnHandle{}, err
+	}
+
+	// Second pass: everything may have moved while the lock was down — the
+	// project removed, its tool changed, another send started. Re-resolve and
+	// re-check; the claim is already ours, so a competing send lost at the
+	// filesystem instead of here.
+	in.mu.Lock()
+	p, err = resolve()
+	if err != nil {
+		in.mu.Unlock()
+		in.claims.Release(claimName, turnKey)
+		return TurnHandle{}, err
+	}
 	d, ok := in.drivers[p.Tool]
 	if !ok {
 		in.mu.Unlock()
+		in.claims.Release(claimName, turnKey)
 		return TurnHandle{}, fmt.Errorf("%s: no driver for tool %q", p.Name, p.Tool)
+	}
+	if p.Status == driver.StatusWorking {
+		// Superseded between the passes by a send that did win the claim.
+		in.mu.Unlock()
+		in.claims.Release(claimName, turnKey)
+		return TurnHandle{}, fmt.Errorf("%s is already working", p.Name)
 	}
 	p.Status = driver.StatusWorking
 	p.LastErr = ""
@@ -714,6 +808,9 @@ func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driver
 	// supersedes it. A reason left behind would keep the badge up through the
 	// next turn and the one after.
 	p.WaitReason, p.WaitDetail = "", ""
+	// The new turn's trace starts clean; the previous one's is only worth
+	// keeping until something newer begins.
+	p.Trace = nil
 	p.UpdatedAt = time.Now()
 	// Append the DISPLAY text (user's original message) to history —
 	// NOT the driverText which may include injected state context.
@@ -725,10 +822,15 @@ func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driver
 	// A deadline bounds a CLI that has stopped making progress. It is
 	// configurable because a coding agent running a build legitimately takes
 	// longer than any fixed guess, and the old five minutes killed real work
-	// and reported it as failure.
+	// and reported it as failure. An explicit timeout (the headless
+	// front-end's) overrides the configured one.
 	ctx, cancel := context.WithCancel(context.Background())
-	if in.turnTimeout > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), in.turnTimeout)
+	bound := timeout
+	if bound <= 0 {
+		bound = in.turnTimeout
+	}
+	if bound > 0 {
+		ctx, cancel = context.WithTimeout(ctx, bound)
 	}
 	in.cancels[name] = cancel
 	turn, handle := in.beginTurn(name, cancel)
@@ -775,6 +877,28 @@ func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driver
 		// project's tree, so it is the moment the branch and dirty state on
 		// screen are most likely to be stale.
 		in.nudgeGit()
+		// The claim is released only now, with the turn fully filed: the
+		// filesystem guard must not come off while our own write is still in
+		// flight. A superseding turn holds a different key and is unaffected.
+		in.claims.Release(ident.Name(name), turnKey)
+		// Resolve last, after the save and the release: a caller woken by the
+		// handle can treat the turn as durable — on disk, claim off — rather
+		// than racing this goroutine's bookkeeping. A turn that was
+		// superseded was resolved by whatever superseded it, and a turn with
+		// no outcome (the subprocess never returned one) resolves as an
+		// error so no waiter is left holding a handle that never fires.
+		in.mu.Lock()
+		if in.isCurrentTurn(name, turn) {
+			if turn.outcome != nil {
+				in.resolveTurn(name, turn, *turn.outcome)
+			} else {
+				in.resolveTurn(name, turn, TurnOutcome{
+					Status: driver.StatusError,
+					Err:    fmt.Errorf("turn ended without filing an outcome"),
+				})
+			}
+		}
+		in.mu.Unlock()
 	})
 	if !started {
 		// Shutting down. Resolve the handle so nobody waits on a turn that
@@ -785,6 +909,7 @@ func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driver
 		p.Status = driver.StatusIdle
 		in.mu.Unlock()
 		cancel()
+		in.claims.Release(ident.Name(name), turnKey)
 		return TurnHandle{}, fmt.Errorf("shutting down")
 	}
 	return handle, nil
@@ -793,6 +918,10 @@ func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driver
 // blockingSend runs a non-streaming turn and files its outcome. run is what
 // actually talks to the CLI — an ordinary send, or a fork of somebody else's
 // session — so the three ways to start a turn share one way to end it.
+//
+// It files into memory and records the outcome; it does not resolve the
+// handle. Resolution belongs to the turn goroutine, after the save, so that
+// anybody woken by the handle can read the result from disk.
 func (in *Inbox) blockingSend(p *Project, turn *activeTurn, run func() driver.Result) {
 	res := run()
 	in.mu.Lock()
@@ -830,7 +959,7 @@ func (in *Inbox) blockingSend(p *Project, turn *activeTurn, run func() driver.Re
 		out.Final = res.Final
 	}
 	p.UpdatedAt = time.Now()
-	in.resolveTurn(p.Name, turn, out)
+	turn.outcome = &out
 }
 
 // streamSend consumes a StreamingDriver's event channel and updates the
@@ -877,9 +1006,15 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 		case driver.StreamToolCall:
 			p.Status = driver.StatusWorking
 			p.Activity = ev.Activity
-			// Skip save — Activity is transient.
+			// Saved, unlike a plain Activity update: the trace is persisted
+			// state, and saving per tool call is what makes a mid-turn
+			// `status` show progress — the difference between "working" and
+			// "working, twelve tools in, last one Edit". Tool calls are
+			// seconds apart, not a stream of their own.
+			p.appendTrace(ev.Activity)
 			p.UpdatedAt = time.Now()
 			in.mu.Unlock()
+			in.save()
 			continue
 		case driver.StreamDone:
 			p.Status = driver.StatusWaiting
@@ -889,11 +1024,11 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 			p.LastMessage = ev.Content
 			p.appendHistory(Message{Role: "assistant", Content: ev.Content, Timestamp: time.Now()})
 			p.UpdatedAt = time.Now()
-			in.resolveTurn(p.Name, turn, TurnOutcome{
+			turn.outcome = &TurnOutcome{
 				SessionID: p.SessionID,
 				Final:     ev.Content,
 				Status:    driver.StatusWaiting,
-			})
+			}
 			in.mu.Unlock()
 			in.save()
 			continue
@@ -917,8 +1052,12 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 	// set the status and stopped, leaving StreamingText populated but no
 	// longer rendered, LastMessage still showing the *previous* turn, and
 	// nothing at all in history to say what happened.
+	//
+	// Resolution is the turn goroutine's now, so "the handle has not
+	// resolved" is no longer evidence of a missing terminal event — the
+	// outcome being nil is.
 	in.mu.Lock()
-	if in.isCurrentTurn(p.Name, turn) {
+	if in.isCurrentTurn(p.Name, turn) && turn.outcome == nil {
 		in.finishStreamErrorLocked(p, turn, "stream ended without completion event", "")
 		in.mu.Unlock()
 		in.save()
@@ -949,12 +1088,12 @@ func (in *Inbox) finishStreamErrorLocked(p *Project, turn *activeTurn, msg, evCo
 	}
 	p.StreamingText = ""
 	p.UpdatedAt = time.Now()
-	in.resolveTurn(p.Name, turn, TurnOutcome{
+	turn.outcome = &TurnOutcome{
 		SessionID: p.SessionID,
 		Partial:   partial,
 		Status:    driver.StatusError,
 		Err:       errors.New(msg),
-	})
+	}
 }
 
 // Cancel handles the user's "I'm done with this state" intent, with
@@ -1092,6 +1231,10 @@ func (in *Inbox) RemoveProject(idx int) error {
 	}
 	in.mu.Unlock()
 	in.save()
+	// The merge in save() never deletes a disk entry it does not know —
+	// "absent from our memory" cannot mean "removed", or a process that had
+	// not re-read yet would delete on every save. So removal is explicit.
+	in.deleteStateEntry(name)
 	in.forgetProject(name)
 	return nil
 }
@@ -1248,7 +1391,9 @@ func (in *Inbox) AttachArgs(idx int) ([]string, string, error) {
 	return d.AttachArgs(p.Dir, p.SessionID), p.Dir, nil
 }
 
-// save writes state.json atomically.
+// save writes state.json atomically, merging with whatever other processes
+// have written rather than overwriting it — see multi.go for why a wholesale
+// snapshot is no longer sound.
 //
 // The persist lock is taken before the snapshot, not just around the write.
 // Atomic rename alone does not order two savers: one can snapshot old state,
@@ -1258,17 +1403,11 @@ func (in *Inbox) AttachArgs(idx int) ([]string, string, error) {
 func (in *Inbox) save() {
 	in.statePersistMu.Lock()
 	defer in.statePersistMu.Unlock()
-	if in.closed() {
+	if in.closed() || in.statePath == "" {
 		return
 	}
-	in.mu.Lock()
-	b, err := json.MarshalIndent(in.projects, "", "  ")
-	in.mu.Unlock()
-	if err != nil {
-		in.recordSaveErr(err)
-		return
-	}
-	in.recordSaveErr(fsutil.WriteFileAtomic(in.statePath, b, fsutil.FileMode))
+	err := fsutil.WithFileLock(in.statePath+".lock", lockWait, in.mergeState)
+	in.recordSaveErr(err)
 }
 
 func (in *Inbox) recordSaveErr(err error) {
@@ -1321,6 +1460,7 @@ func LoadState(path string, projects []*Project) {
 		p.WaitDetail = s.WaitDetail
 		p.UpdatedAt = s.UpdatedAt
 		p.History = s.History
+		p.Trace = s.Trace
 		if p.Status == driver.StatusWorking {
 			p.Status = driver.StatusIdle // a send can't survive a restart
 			// The reason belonged to that turn, not to the idle project left
