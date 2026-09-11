@@ -505,7 +505,7 @@ func (in *Inbox) KingIndexOf(g int) int {
 		return 0
 	}
 	for i, p := range in.projects {
-		if strings.EqualFold(p.Name, gs[g].King) {
+		if ident.SameName(p.Name, gs[g].King) {
 			return i + 1
 		}
 	}
@@ -766,8 +766,11 @@ func (in *Inbox) project(idx int) (*Project, error) {
 // projectByName is the stable lookup. Names are unique (addProject enforces
 // it) and never move; indices shift on every removal. Callers must hold mu.
 func (in *Inbox) projectByName(name string) (*Project, error) {
+	// The canonical identity predicate, not strings.EqualFold: the two
+	// disagree for Unicode fold pairs (s and ſ), which let a name that
+	// uniqueness-validated as distinct resolve to the wrong project.
 	for _, p := range in.projects {
-		if strings.EqualFold(p.Name, name) {
+		if ident.SameName(p.Name, name) {
 			return p, nil
 		}
 	}
@@ -1159,15 +1162,15 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 			in.mu.Unlock()
 			in.save()
 			continue
-	case driver.StreamDone:
-		p.Status = driver.StatusWaiting
-		p.Activity = ""
-		p.StreamingText = ""
-		p.LastErr = ""
-		p.LastMessage = ev.Content
-		p.appendHistory(Message{Role: "assistant", Content: ev.Content, Timestamp: time.Now()})
-		p.UpdatedAt = time.Now()
-		p.bumpRevision()
+		case driver.StreamDone:
+			p.Status = driver.StatusWaiting
+			p.Activity = ""
+			p.StreamingText = ""
+			p.LastErr = ""
+			p.LastMessage = ev.Content
+			p.appendHistory(Message{Role: "assistant", Content: ev.Content, Timestamp: time.Now()})
+			p.UpdatedAt = time.Now()
+			p.bumpRevision()
 			turn.outcome = &TurnOutcome{
 				SessionID: p.SessionID,
 				Final:     ev.Content,
@@ -1268,8 +1271,18 @@ func (in *Inbox) Cancel(idx int) error {
 		// Kill the in-flight subprocess.
 		cancel, ok := in.cancels[p.Name]
 		if !ok {
-			// Defensive: status says working but no cancel func. Treat as
-			// a stuck state and reset to idle without killing anything.
+			// No local turn: if a live claim exists, another frontend owns
+			// this work and reporting success here would falsely dismiss
+			// it while it keeps running.
+			if info, held := in.claims.Peek(ident.Name(p.Name)); held {
+				name := p.Name
+				in.mu.Unlock()
+				return fmt.Errorf(
+					"%s is being driven by agent-inbox pid %d; cancel it from its owning frontend",
+					name, info.Pid)
+			}
+			// Defensive: status says working but no cancel func and no
+			// owner. Treat as a stuck state and reset to idle.
 			p.Status = driver.StatusIdle
 			p.Activity = ""
 			p.LastErr = "stuck (no cancel func); reset to idle"
@@ -1424,27 +1437,29 @@ func (in *Inbox) SetProjectTool(idx int, tool string) error {
 	}
 	defer in.claims.Release(claimName, turnKey)
 
-	if in.configPath != "" {
-		if err := in.updateConfig(func(s *config.Settings) error {
-			s.SetProjectTool(name, tool)
-			return nil
-		}); err != nil {
-			return fmt.Errorf("cannot change %s to %s: %w", name, tool, err)
-		}
-	}
-
+	// Validate the in-memory state BEFORE any durable mutation, and hold the
+	// mutex across both the check and the config write: writing config first
+	// and refusing afterwards left disk and memory inconsistent, with later
+	// sends blocked by the definition guard over a change the caller was
+	// told had failed.
 	in.mu.Lock()
 	p, err = in.projectByName(name)
 	if err != nil {
 		in.mu.Unlock()
 		return err
 	}
-	// Nobody can be mid-turn while we hold the claim, but a send that raced
-	// us to the claim and lost may have filed nothing yet; if status says
-	// working anyway, something is wrong and the change must not proceed.
 	if p.Status == driver.StatusWorking {
 		in.mu.Unlock()
 		return fmt.Errorf("%s is currently working — cancel before changing tool", name)
+	}
+	if in.configPath != "" {
+		if err := in.updateConfig(func(s *config.Settings) error {
+			s.SetProjectTool(name, tool)
+			return nil
+		}); err != nil {
+			in.mu.Unlock()
+			return fmt.Errorf("cannot change %s to %s: %w", name, tool, err)
+		}
 	}
 	p.Tool = tool
 	p.SessionID = "" // previous session is meaningless to the new tool
@@ -1686,8 +1701,8 @@ func LoadState(path string, projects []*Project) {
 		if !ok {
 			continue
 		}
-		if s.Tool != p.Tool || !ident.SameDir(s.Dir, p.Dir) {
-			continue // same name, different project — start fresh
+		if !sameProject(s, *p) {
+			continue // different or ambiguous identity — start fresh
 		}
 		p.SessionID = s.SessionID
 		// Without this an adoption that was never sent to before a restart

@@ -100,8 +100,8 @@ func (c Claude) send(ctx context.Context, dir, sessionID, prompt string, sessArg
 	if r.SessionID != "" {
 		sessionID = r.SessionID
 	}
-	if r.IsError {
-		return Result{SessionID: sessionID, Status: StatusError, Final: r.Result, Err: fmt.Errorf("claude error: %s", r.Subtype)}
+	if err := validateClaudeResult(r); err != nil {
+		return Result{SessionID: sessionID, Status: StatusError, Final: r.Result, Err: err}
 	}
 
 	final := strings.TrimSpace(r.Result)
@@ -280,10 +280,10 @@ func classifyClaudeStreamLine(line string, ch chan<- StreamEvent, finalText *str
 		if res.SessionID != "" {
 			*sessionID = res.SessionID
 		}
-		if res.IsError {
+		if err := validateClaudeResult(res); err != nil {
 			ch <- StreamEvent{
 				Kind:      StreamError,
-				Err:       fmt.Errorf("claude: %s", res.Subtype),
+				Err:       err,
 				Content:   res.Result,
 				SessionID: *sessionID,
 			}

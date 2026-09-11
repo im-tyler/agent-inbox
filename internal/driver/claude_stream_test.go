@@ -92,7 +92,7 @@ func TestClaudeStreamTimeoutSaysSo(t *testing.T) {
 func TestClaudeForkArgs(t *testing.T) {
 	argvPath := filepath.Join(t.TempDir(), "argv")
 	fakeBin(t, "claude", `printf '%s' "$*" > `+shellQuote(argvPath)+`
-echo '{"result":"ok","session_id":"new-1"}'`)
+echo '{"result":"ok","subtype":"success","session_id":"new-1"}'`)
 
 	res := Claude{}.SendForked(context.Background(), t.TempDir(), "live-7", "status?")
 	if res.Err != nil {

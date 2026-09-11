@@ -248,7 +248,7 @@ func run(ctx context.Context, dir string, cap int, args ...string) (string, erro
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := gitCommand(ctx, args...)
 	cmd.Dir = dir
 	// Capped while capturing: an ordinary buffer held the whole output in
 	// memory and only the returned answer was bounded afterwards, so a large

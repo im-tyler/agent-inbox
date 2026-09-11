@@ -14,6 +14,7 @@ import (
 	"github.com/im-tyler/agent-inbox/internal/config"
 	"github.com/im-tyler/agent-inbox/internal/driver"
 	"github.com/im-tyler/agent-inbox/internal/git"
+	"github.com/im-tyler/agent-inbox/internal/ident"
 	"github.com/im-tyler/agent-inbox/internal/inbox"
 	"github.com/im-tyler/agent-inbox/internal/logbook"
 	"github.com/im-tyler/agent-inbox/internal/usage"
@@ -230,7 +231,7 @@ func fleetSend(argv []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	timeout := fs.Duration("timeout", 0, "bound the turn, e.g. 45s, 10m (default: the config's turn timeout)")
 	asJSON := fs.Bool("json", false, "machine-readable result on stdout")
-	if err := fs.Parse(argv); err != nil {
+	if err := parseInterspersed(fs, argv); err != nil {
 		return err
 	}
 	args := fs.Args()
@@ -308,7 +309,7 @@ func fleetLog(argv []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("log", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	lines := fs.Int("lines", 20, "how many messages to show")
-	if err := fs.Parse(argv); err != nil {
+	if err := parseInterspersed(fs, argv); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -561,11 +562,24 @@ func diffFleet(base, now map[string]fleetPin, in *inbox.Inbox, watch map[string]
 			row.From = old.Status
 		}
 		for _, p := range in.Snapshot() {
-			if strings.EqualFold(p.Name, name) {
+			if ident.SameName(p.Name, name) {
 				row.LastMessage = oneline(p.LastMessage, 400)
 			}
 		}
 		out = append(out, row)
+	}
+	// Removals: a project in the baseline with no current key was never
+	// examined — a follower watching it would wait out its timeout over a
+	// disappearance it should have been told about.
+	for name, old := range base {
+		if _, exists := now[name]; exists || (watch != nil && !watch[name]) {
+			continue
+		}
+		out = append(out, fleetChangeRow{
+			Project: name,
+			From:    old.Status,
+			To:      "removed",
+		})
 	}
 	return out
 }
