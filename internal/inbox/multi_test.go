@@ -74,7 +74,7 @@ func TestSaveDoesNotRevertAnotherInboxTurn(t *testing.T) {
 	b.mu.Unlock()
 	b.save()
 
-	saved := readStateFile(env.state)
+	saved := readStateFileOrFatal(t, env.state)
 	var alpha Project
 	for _, p := range saved {
 		if p.Name == "alpha" {
@@ -281,4 +281,15 @@ func writeClaim(t *testing.T, dir string, pid int, turn string) {
 	if err := os.WriteFile(filepath.Join(dir, "claim.json"), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// readStateFileOrFatal adapts the error-returning state read for tests that
+// only want the slice.
+func readStateFileOrFatal(t *testing.T, path string) []Project {
+	t.Helper()
+	disk, err := readStateFile(path)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	return disk
 }

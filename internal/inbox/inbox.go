@@ -72,6 +72,52 @@ type Project struct {
 	// the turn headless, or one that adopted the fleet mid-flight. Cleared
 	// when the next turn starts, so it describes one turn, not a history.
 	Trace []TraceEntry `json:"trace,omitempty"`
+
+	// SeenEvents names the spool files already applied to this project,
+	// newest last, bounded. Persisted with the rest of the entry so a crash
+	// between the state commit and the spool removal cannot double-apply an
+	// event — its history line, its supervision notice — on restart.
+	SeenEvents []string `json:"seen_events,omitempty"`
+
+	// Revision counts semantic changes to this project: completed turns and
+	// applied hook events. Status alone cannot express a full round trip —
+	// waiting → working → waiting looks like no change at all — and text
+	// comparison cannot tell two identical replies apart (F21). Persisted,
+	// monotonic, and compared by fleet follow as part of its fingerprint.
+	Revision uint64 `json:"revision,omitempty"`
+}
+
+// bumpRevision records one semantic change. Caller holds mu.
+func (p *Project) bumpRevision() {
+	p.Revision++
+}
+
+// maxSeenEvents bounds the dedup set. Events arrive on a tick and are removed
+// once committed; the set only has to cover a crash window, not history.
+const maxSeenEvents = 32
+
+// seenEvent records a spool file as applied. Caller holds mu (via
+// applyEvent).
+func (p *Project) seenEvent(name string) {
+	for _, s := range p.SeenEvents {
+		if s == name {
+			return
+		}
+	}
+	p.SeenEvents = append(p.SeenEvents, name)
+	if len(p.SeenEvents) > maxSeenEvents {
+		p.SeenEvents = p.SeenEvents[len(p.SeenEvents)-maxSeenEvents:]
+	}
+}
+
+// hasSeenEvent reports whether a spool file was already applied.
+func (p *Project) hasSeenEvent(name string) bool {
+	for _, s := range p.SeenEvents {
+		if s == name {
+			return true
+		}
+	}
+	return false
 }
 
 // TraceEntry is one thing the agent did during a turn.
@@ -592,6 +638,17 @@ func (in *Inbox) addProject(name, tool, dir, sessionID, forkFrom string) error {
 	if err := ident.ValidateName(name); err != nil {
 		return err
 	}
+	// The stored dir is the project's identity, so it is resolved to an
+	// absolute path at creation. Persisting the string as typed meant a
+	// relative dir like "." changed meaning with the caller's working
+	// directory: a later one-shot command run from elsewhere could drive a
+	// different repository while retaining the original project's session
+	// identity (F15).
+	resolved := ident.Dir(dir)
+	if resolved == "" {
+		return fmt.Errorf("project directory %q could not be resolved", dir)
+	}
+	dir = resolved
 	in.mu.Lock()
 	for _, p := range in.projects {
 		if ident.SameName(p.Name, name) {
@@ -634,6 +691,10 @@ func (in *Inbox) addProject(name, tool, dir, sessionID, forkFrom string) error {
 		Status:    driver.StatusIdle,
 	})
 	in.mu.Unlock()
+	// An explicit add outranks an old deletion: without this, re-adding a
+	// removed project would leave its tombstone in place and every
+	// subsequent merge would drop its state again.
+	untombstoneProject(in.statePath, name)
 	in.save()
 	return nil
 }
@@ -659,6 +720,14 @@ func (in *Inbox) updateConfig(fn func(*config.Settings) error) error {
 		}
 		if err := fn(settings); err != nil {
 			return err
+		}
+		// Validate before saving: a mutation that leaves an inconsistent
+		// structure (a group naming a project that no longer exists, for
+		// instance) must not reach disk, because the next startup validates
+		// and refuses to run — a UI action would have bricked the config
+		// (F16). Failing here keeps the original file intact.
+		if err := config.Validate(settings); err != nil {
+			return fmt.Errorf("config change rejected (original kept): %w", err)
 		}
 		return config.Save(in.configPath, settings)
 	})
@@ -752,6 +821,14 @@ func (in *Inbox) startSend(resolve func() (*Project, error), displayText, driver
 // inbox's configured bound; the headless front-end passes its own so a
 // caller that stops waiting also stops paying.
 func (in *Inbox) startSendTimed(resolve func() (*Project, error), displayText, driverText string, record bool, timeout time.Duration) (TurnHandle, error) {
+	return in.startSendTimedCtx(context.Background(), resolve, displayText, driverText, record, timeout)
+}
+
+// startSendTimedCtx is startSendTimed with the turn's context derived from a
+// caller's: cancelling the request cancels the subprocess, so a disconnected
+// MCP client or an abandoned CLI pipe does not leave the agent spending in
+// the background (F11).
+func (in *Inbox) startSendTimedCtx(parent context.Context, resolve func() (*Project, error), displayText, driverText string, record bool, timeout time.Duration) (TurnHandle, error) {
 	// First pass under the lock: validate the target and capture what the
 	// claim needs. The claim itself is taken with no lock held, because a
 	// claim held by this same process is released by a goroutine that may be
@@ -778,6 +855,12 @@ func (in *Inbox) startSendTimed(resolve func() (*Project, error), displayText, d
 	if err := in.acquireClaim(claimName, claimTool, turnKey); err != nil {
 		return TurnHandle{}, err
 	}
+	// We own the project now, so the session to resume is whatever the last
+	// turn left on disk — not the snapshot this process loaded. A long-lived
+	// inbox that acquires a project another process just finished would
+	// otherwise send with a stale session id, fork source and history, and
+	// its local turn would make the merge prefer that stale snapshot.
+	in.refreshOwnedProject(claimName)
 
 	// Second pass: everything may have moved while the lock was down — the
 	// project removed, its tool changed, another send started. Re-resolve and
@@ -823,8 +906,9 @@ func (in *Inbox) startSendTimed(resolve func() (*Project, error), displayText, d
 	// configurable because a coding agent running a build legitimately takes
 	// longer than any fixed guess, and the old five minutes killed real work
 	// and reported it as failure. An explicit timeout (the headless
-	// front-end's) overrides the configured one.
-	ctx, cancel := context.WithCancel(context.Background())
+	// front-end's) overrides the configured one. The context derives from
+	// the caller's, so cancelling the request cancels the work underneath.
+	ctx, cancel := context.WithCancel(parent)
 	bound := timeout
 	if bound <= 0 {
 		bound = in.turnTimeout
@@ -872,7 +956,24 @@ func (in *Inbox) startSendTimed(resolve func() (*Project, error), displayText, d
 		// blockingSend — every non-streaming driver, which is opencode, codex
 		// and mock — only mutated memory. Its reply reached the screen and
 		// then vanished on the next restart.
-		in.save()
+		//
+		// A successful turn whose result could not be committed is not a
+		// success the caller may treat as durable: the handle resolving must
+		// say so (F19). The result stays in memory and the next successful
+		// save commits it, but a headless caller told "done" would exit and
+		// drop it on the floor.
+		if err := in.save(); err != nil {
+			in.mu.Lock()
+			if in.isCurrentTurn(name, turn) && turn.outcome != nil && turn.outcome.Err == nil {
+				o := *turn.outcome
+				o.Err = fmt.Errorf("reply not persisted: %w", err)
+				turn.outcome = &o
+				if p, perr := in.projectByName(name); perr == nil {
+					p.LastErr = o.Err.Error()
+				}
+			}
+			in.mu.Unlock()
+		}
 		// An agent turn is the one thing this program does that moves a
 		// project's tree, so it is the moment the branch and dirty state on
 		// screen are most likely to be stale.
@@ -959,6 +1060,7 @@ func (in *Inbox) blockingSend(p *Project, turn *activeTurn, run func() driver.Re
 		out.Final = res.Final
 	}
 	p.UpdatedAt = time.Now()
+	p.bumpRevision()
 	turn.outcome = &out
 }
 
@@ -1016,14 +1118,15 @@ func (in *Inbox) streamSend(ctx context.Context, sd driver.StreamingDriver, p *P
 			in.mu.Unlock()
 			in.save()
 			continue
-		case driver.StreamDone:
-			p.Status = driver.StatusWaiting
-			p.Activity = ""
-			p.StreamingText = ""
-			p.LastErr = ""
-			p.LastMessage = ev.Content
-			p.appendHistory(Message{Role: "assistant", Content: ev.Content, Timestamp: time.Now()})
-			p.UpdatedAt = time.Now()
+	case driver.StreamDone:
+		p.Status = driver.StatusWaiting
+		p.Activity = ""
+		p.StreamingText = ""
+		p.LastErr = ""
+		p.LastMessage = ev.Content
+		p.appendHistory(Message{Role: "assistant", Content: ev.Content, Timestamp: time.Now()})
+		p.UpdatedAt = time.Now()
+		p.bumpRevision()
 			turn.outcome = &TurnOutcome{
 				SessionID: p.SessionID,
 				Final:     ev.Content,
@@ -1088,6 +1191,7 @@ func (in *Inbox) finishStreamErrorLocked(p *Project, turn *activeTurn, msg, evCo
 	}
 	p.StreamingText = ""
 	p.UpdatedAt = time.Now()
+	p.bumpRevision()
 	turn.outcome = &TurnOutcome{
 		SessionID: p.SessionID,
 		Partial:   partial,
@@ -1231,17 +1335,22 @@ func (in *Inbox) RemoveProject(idx int) error {
 	}
 	in.mu.Unlock()
 	in.save()
-	// The merge in save() never deletes a disk entry it does not know —
-	// "absent from our memory" cannot mean "removed", or a process that had
-	// not re-read yet would delete on every save. So removal is explicit.
+	// Durable, explicit removal: the state entry goes first, then the
+	// tombstone that keeps a stale writer's next merge from resurrecting it.
 	in.deleteStateEntry(name)
+	tombstoneProject(in.statePath, name)
 	in.forgetProject(name)
 	return nil
 }
 
 // SetProjectTool changes the driver for project idx (1-based). Clears the
-// session id (a Claude session can't be resumed by OpenCode, etc.) and
-// blocks if a send is currently in-flight.
+// session id (a Claude session can't be resumed by OpenCode, etc.).
+//
+// A tool change is a project mutation like a send and is serialised against
+// sends the same way: through the filesystem claim. The old in-process check
+// released the inbox lock while rewriting config, so a king-dispatched send
+// could start in that gap, run on the old driver, and file an old-tool
+// session id into the project after the switch cleared it.
 func (in *Inbox) SetProjectTool(idx int, tool string) error {
 	in.mu.Lock()
 	p, err := in.project(idx)
@@ -1260,12 +1369,19 @@ func (in *Inbox) SetProjectTool(idx int, tool string) error {
 		in.mu.Unlock()
 		return nil
 	}
-	if _, working := in.cancels[p.Name]; working {
-		in.mu.Unlock()
-		return fmt.Errorf("%s is currently working — cancel before changing tool", p.Name)
-	}
 	name, from := p.Name, p.Tool
 	in.mu.Unlock()
+
+	claimName := ident.Name(name)
+	turnKey := newTurnKey()
+	if err := in.claims.Acquire(claimName, turnKey, tool); err != nil {
+		var held *claim.HeldError
+		if errors.As(err, &held) {
+			return fmt.Errorf("%s is currently working — cancel before changing tool", name)
+		}
+		return err
+	}
+	defer in.claims.Release(claimName, turnKey)
 
 	if in.configPath != "" {
 		if err := in.updateConfig(func(s *config.Settings) error {
@@ -1281,6 +1397,13 @@ func (in *Inbox) SetProjectTool(idx int, tool string) error {
 	if err != nil {
 		in.mu.Unlock()
 		return err
+	}
+	// Nobody can be mid-turn while we hold the claim, but a send that raced
+	// us to the claim and lost may have filed nothing yet; if status says
+	// working anyway, something is wrong and the change must not proceed.
+	if p.Status == driver.StatusWorking {
+		in.mu.Unlock()
+		return fmt.Errorf("%s is currently working — cancel before changing tool", name)
 	}
 	p.Tool = tool
 	p.SessionID = "" // previous session is meaningless to the new tool
@@ -1361,34 +1484,92 @@ func (in *Inbox) Detail(idx int) (Project, error) {
 	return *p, nil
 }
 
-// AttachArgs returns the interactive argv and working dir for project idx.
-func (in *Inbox) AttachArgs(idx int) ([]string, string, error) {
+// AttachLease is a project's ownership held for one interactive attach. The
+// claim refuses managed sends from every other process while the user is in
+// the session — without it, a managed send could start against the same
+// session mid-attach and interleave a subprocess's transcript with the user's
+// own typing.
+type AttachLease struct {
+	set  *claim.Set
+	name string
+	key  string
+}
+
+// Release drops the attach claim. Call it when the interactive child exits
+// (and on any failure to start it): a lease left held blocks managed sends
+// until the holder's process dies. Safe on a nil lease.
+func (l *AttachLease) Release() {
+	if l == nil {
+		return
+	}
+	l.set.Release(l.name, l.key)
+}
+
+// BeginAttach validates attachment and takes the project claim for the
+// interactive run's lifetime, returning the argv, the working dir, and the
+// lease. The caller must hold the lease until the foreground child is reaped
+// and Release it then (and on any failure to start). The claim also refreshes
+// the session under ownership, like a send does — the attach runs against
+// the session on disk, not a stale snapshot.
+func (in *Inbox) BeginAttach(idx int) ([]string, string, *AttachLease, error) {
 	in.mu.Lock()
-	defer in.mu.Unlock()
 	p, err := in.project(idx)
 	if err != nil {
-		return nil, "", err
+		in.mu.Unlock()
+		return nil, "", nil, err
+	}
+	if _, ok := in.drivers[p.Tool]; !ok {
+		in.mu.Unlock()
+		return nil, "", nil, fmt.Errorf("%s: no driver for tool %q", p.Name, p.Tool)
+	}
+	name := p.Name
+	in.mu.Unlock()
+
+	claimName := ident.Name(name)
+	turnKey := newTurnKey()
+	if err := in.acquireClaim(claimName, "", turnKey); err != nil {
+		var held *claim.HeldError
+		if errors.As(err, &held) {
+			return nil, "", nil, fmt.Errorf("%s is working — cancel or wait before attaching", name)
+		}
+		return nil, "", nil, err
+	}
+	lease := &AttachLease{set: in.claims, name: claimName, key: turnKey}
+	release := func() { lease.Release() }
+
+	in.refreshOwnedProject(claimName)
+
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	p, err = in.projectByName(name)
+	if err != nil {
+		release()
+		return nil, "", nil, err
 	}
 	// Attaching to a session the inbox is mid-turn on puts two writers on one
 	// conversation. Delete and tool-change already refuse this; attach did
 	// not, and it is the one that hands the user an interactive prompt into a
 	// session a subprocess is still writing to.
 	if p.Status == driver.StatusWorking {
-		return nil, "", fmt.Errorf("%s is working — cancel or wait before attaching", p.Name)
+		release()
+		return nil, "", nil, fmt.Errorf("%s is working — cancel or wait before attaching", p.Name)
 	}
 	// A pending fork source belongs to somebody else's live agent. Attaching
 	// to it would drop the user into that agent's session, not this project's.
 	if p.ForkFrom != "" {
-		return nil, "", fmt.Errorf("%s has not forked its adopted session yet — send it a message first", p.Name)
+		release()
+		return nil, "", nil, fmt.Errorf("%s has not forked its adopted session yet — send it a message first", p.Name)
 	}
 	if p.SessionID == "" {
-		return nil, "", fmt.Errorf("%s has no session yet — send it a message first", p.Name)
+		release()
+		return nil, "", nil, fmt.Errorf("%s has no session yet — send it a message first", p.Name)
 	}
 	d, ok := in.drivers[p.Tool]
 	if !ok {
-		return nil, "", fmt.Errorf("%s: no driver for tool %q", p.Name, p.Tool)
+		release()
+		return nil, "", nil, fmt.Errorf("%s: no driver for tool %q", p.Name, p.Tool)
 	}
-	return d.AttachArgs(p.Dir, p.SessionID), p.Dir, nil
+	return d.AttachArgs(p.Dir, p.SessionID), p.Dir, lease, nil
 }
 
 // save writes state.json atomically, merging with whatever other processes
@@ -1400,14 +1581,19 @@ func (in *Inbox) AttachArgs(idx int) ([]string, string, error) {
 // be descheduled while a second snapshots and writes newer state, then wake up
 // and rename its stale copy over the top. The file stays valid JSON and the
 // state goes backwards.
-func (in *Inbox) save() {
+//
+// It returns the persistence error rather than only recording it: a caller
+// that is about to report a successful turn must be able to tell "committed"
+// from "ran but not committed" (F19).
+func (in *Inbox) save() error {
 	in.statePersistMu.Lock()
 	defer in.statePersistMu.Unlock()
 	if in.closed() || in.statePath == "" {
-		return
+		return nil
 	}
 	err := fsutil.WithFileLock(in.statePath+".lock", lockWait, in.mergeState)
 	in.recordSaveErr(err)
+	return err
 }
 
 func (in *Inbox) recordSaveErr(err error) {
@@ -1434,8 +1620,12 @@ func LoadState(path string, projects []*Project) {
 	}
 	var saved []Project
 	if json.Unmarshal(b, &saved) != nil {
+		// Damaged, not absent: the sessions on disk were not loaded, and
+		// starting blank without a word would present that as normal.
+		fmt.Fprintf(os.Stderr, "agent-inbox: state file %s is damaged; sessions were not restored\n", path)
 		return
 	}
+	claims := claimsOf(path)
 	byName := make(map[string]Project, len(saved))
 	for _, s := range saved {
 		byName[ident.Name(s.Name)] = s
@@ -1462,10 +1652,21 @@ func LoadState(path string, projects []*Project) {
 		p.History = s.History
 		p.Trace = s.Trace
 		if p.Status == driver.StatusWorking {
-			p.Status = driver.StatusIdle // a send can't survive a restart
-			// The reason belonged to that turn, not to the idle project left
-			// behind.
-			p.WaitReason, p.WaitDetail = "", ""
+			// A persisted Working status belongs to whichever process was
+			// mid-turn when it was written. Loading it here is not
+			// necessarily that process restarting — a one-shot status or
+			// follow reader is usually an observer — so the claim decides:
+			// held by a live pid, somebody is genuinely mid-turn and the
+			// status stands; held by nobody, the owner died mid-turn and the
+			// project is idle again, with a note saying the turn was
+			// interrupted rather than cleanly finished (F20).
+			if _, held := claims.Peek(ident.Name(p.Name)); !held {
+				p.Status = driver.StatusIdle
+				p.LastErr = "turn interrupted: the process driving it is gone"
+				// The reason belonged to that turn, not to the idle project
+				// left behind.
+				p.WaitReason, p.WaitDetail = "", ""
+			}
 		}
 	}
 }

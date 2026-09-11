@@ -9,10 +9,17 @@
 // transcript interleaved by two subprocesses resumes as garbage.
 //
 // So a send claims the project in the filesystem, where every process can
-// see it. The claim is a directory — mkdir is atomic, existence is the lock —
-// holding a small file naming the pid that took it and the turn it was taken
-// for. A pid that dies releases nothing, but a dead pid can be detected, and
-// a claim whose pid is gone is reclaimed rather than obeyed.
+// see it. The claim is a directory — mkdir is atomic — holding a small file
+// naming the pid that took it and the turn it was taken for.
+//
+// Directory existence alone cannot decide the two hard cases safely, so every
+// mutation of a project's claim (acquire, reclaim, release) runs under an
+// advisory exclusive flock on a per-project lock file. The flock is held by
+// the kernel for an open file description, so it dies with its holder — it
+// cannot go stale the way a directory can. Contenders therefore re-read the
+// claim under the lock: whoever reclaims a dead holder's claim cannot have it
+// torn out from under them by the next contender, and a release cannot race
+// an acquire.
 package claim
 
 import (
@@ -21,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -34,6 +42,15 @@ import (
 // wait.
 const staleAfter = 2 * time.Minute
 
+// lockDirName holds the per-project flock files. It lives inside the claims
+// directory, so it must be a name no project can bear.
+const lockDirName = ".locks"
+
+// lockWait bounds how long a claim mutation waits for the per-project flock.
+// The lock is only ever held for a handful of filesystem operations, so
+// waiting longer than this means something is wrong, not busy.
+const lockWait = 10 * time.Second
+
 // Info is what a claim says about itself.
 type Info struct {
 	Pid   int       `json:"pid"`
@@ -43,17 +60,69 @@ type Info struct {
 }
 
 // Set is the claim set for one data directory. Methods are safe for
-// concurrent use; the atomicity comes from the filesystem, not a mutex,
-// because the processes competing for a claim are separate programs.
+// concurrent use; the atomicity comes from the filesystem and a per-project
+// flock, not a mutex, because the processes competing for a claim are
+// separate programs.
 type Set struct{ dir string }
 
 // New returns the claim set rooted at dir (typically <dataDir>/claims).
 func New(dir string) *Set { return &Set{dir: dir} }
 
-func (s *Set) projectDir(name string) string {
-	// Project names are validated to letters, digits, dot, underscore and
-	// hyphen (ident.ValidateName), so a name cannot escape the claims dir.
-	return filepath.Join(s.dir, name)
+// projectDir returns the claim directory for name, refusing any name that
+// could escape the claims directory. This is the boundary guard for the
+// filesystem: ".", ".." and separator-bearing names must never become paths,
+// because Join(dir, "..") is the parent of the claims directory and a stale
+// reclaim of it would recursively delete the data directory.
+func (s *Set) projectDir(name string) (string, error) {
+	if name == "" || name == "." || name == ".." {
+		return "", fmt.Errorf("claim: %q is not a valid project name", name)
+	}
+	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) || strings.ContainsRune(name, '\\') {
+		return "", fmt.Errorf("claim: project name %q contains a path separator", name)
+	}
+	if name == lockDirName {
+		return "", fmt.Errorf("claim: project name %q is reserved", name)
+	}
+	dir := filepath.Join(s.dir, name)
+	if filepath.Dir(dir) != filepath.Clean(s.dir) {
+		return "", fmt.Errorf("claim: project name %q escapes the claims directory", name)
+	}
+	return dir, nil
+}
+
+// contained reports whether path is a direct child of the claims directory —
+// the last check before any recursive removal.
+func (s *Set) contained(path string) bool {
+	return path != "" && filepath.Dir(path) == filepath.Clean(s.dir)
+}
+
+// withProjectLock runs fn while holding an exclusive advisory lock on name's
+// lock file. The lock is per open file description, so it serializes
+// contenders across processes and goroutines alike, and the kernel drops it
+// if the holder dies.
+func (s *Set) withProjectLock(name string, fn func() error) error {
+	lockDir := filepath.Join(s.dir, lockDirName)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		return fmt.Errorf("claim lock dir: %w", err)
+	}
+	f, err := os.OpenFile(filepath.Join(lockDir, name+".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("claim lock file: %w", err)
+	}
+	defer f.Close()
+	deadline := time.Now().Add(lockWait)
+	for {
+		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("claim lock for %q stayed busy for %s", name, lockWait)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	return fn()
 }
 
 // Acquire claims name for one turn, reporting an error if somebody else
@@ -67,19 +136,38 @@ func (s *Set) Acquire(name, turn, tool string) error {
 	if s == nil {
 		return nil
 	}
+	dir, err := s.projectDir(name)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return fmt.Errorf("claims dir: %w", err)
 	}
-	dir := s.projectDir(name)
-	err := os.Mkdir(dir, 0o700)
+	return s.withProjectLock(name, func() error {
+		return s.acquireLocked(dir, turn, tool)
+	})
+}
+
+// mkdirClaim creates the claim directory and writes its info file.
+func (s *Set) mkdirClaim(dir, turn, tool string) error {
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "claim.json"),
+		mustJSON(Info{Pid: os.Getpid(), Turn: turn, Tool: tool, Taken: time.Now()}), 0o600)
+}
+
+// acquireLocked is the lock-held acquire: mkdir fast path, stale-reclaim slow
+// path.
+func (s *Set) acquireLocked(dir, turn, tool string) error {
+	err := s.mkdirClaim(dir, turn, tool)
 	if err == nil {
-		return os.WriteFile(filepath.Join(dir, "claim.json"),
-			mustJSON(Info{Pid: os.Getpid(), Turn: turn, Tool: tool, Taken: time.Now()}), 0o600)
+		return nil
 	}
 	if !os.IsExist(err) {
 		return err
 	}
-	return s.takeHeld(name, dir, turn, tool)
+	return s.takeHeld(dir, turn, tool)
 }
 
 // HeldError reports a claim held by a live process. It is a distinct type so
@@ -97,22 +185,29 @@ func (e *HeldError) Error() string {
 }
 
 // takeHeld decides what to do about an existing claim: obey it, or reclaim it
-// if its holder is provably gone.
-func (s *Set) takeHeld(name, dir, turn, tool string) error {
+// if its holder is provably gone. The caller holds the per-project lock, so
+// the read-remove-recreate sequence cannot interleave with another contender
+// doing the same: whoever reclaims first installs a live claim, and the next
+// contender reads that one and obeys it.
+func (s *Set) takeHeld(dir, turn, tool string) error {
 	info, rerr := s.read(dir)
 	switch {
 	case rerr != nil && ageOf(dir) > staleAfter:
 		// Unreadable and old: a crash between mkdir and write. Reclaim.
-		os.RemoveAll(dir)
-		return s.Acquire(name, turn, tool)
+		if s.contained(dir) {
+			os.RemoveAll(dir)
+		}
+		return s.mkdirClaim(dir, turn, tool)
 	case rerr != nil:
-		return fmt.Errorf("project %s has an unreadable claim (held %.0fs) — retry shortly or remove %s",
-			name, ageOf(dir).Seconds(), dir)
+		return fmt.Errorf("project claim is unreadable (held %.0fs) — retry shortly or remove %s",
+			ageOf(dir).Seconds(), dir)
 	case !pidAlive(info.Pid):
-		os.RemoveAll(dir)
-		return s.Acquire(name, turn, tool)
+		if s.contained(dir) {
+			os.RemoveAll(dir)
+		}
+		return s.mkdirClaim(dir, turn, tool)
 	default:
-		return &HeldError{Name: name, Info: info}
+		return &HeldError{Name: filepath.Base(dir), Info: info}
 	}
 }
 
@@ -126,21 +221,32 @@ func (s *Set) takeHeld(name, dir, turn, tool string) error {
 // that instant sees a directory with no claim.json — "unreadable, held 0s" —
 // and refuses, correctly by its own rules, over a release that was already
 // happening. Rename is atomic: an acquire either sees the claim intact or
-// sees no directory at all.
-func (s *Set) Release(name, turn string) {
+// sees no directory at all. The rename target carries the releasing pid and
+// a timestamp, so it can never collide with another project's live claim —
+// including a project literally named "alpha.releasing" — and a failed rename
+// aborts the release instead of deleting whatever sits at the target.
+func (s *Set) Release(name, turn string) error {
 	if s == nil {
-		return
+		return nil
 	}
-	dir := s.projectDir(name)
-	info, err := s.read(dir)
-	if err != nil || info.Turn != turn {
-		return
+	dir, err := s.projectDir(name)
+	if err != nil {
+		return err
 	}
-	// A name no project can have (ValidateName rejects ':' and '/'), so a
-	// rename can never collide with a live claim directory.
-	doomed := dir + ".releasing"
-	os.Rename(dir, doomed)
-	os.RemoveAll(doomed)
+	return s.withProjectLock(name, func() error {
+		info, err := s.read(dir)
+		if err != nil || info.Turn != turn {
+			return nil
+		}
+		doomed := fmt.Sprintf("%s.releasing.%d.%d", dir, os.Getpid(), time.Now().UnixNano())
+		if err := os.Rename(dir, doomed); err != nil {
+			return fmt.Errorf("claim release rename %s: %w", name, err)
+		}
+		if s.contained(doomed) {
+			os.RemoveAll(doomed)
+		}
+		return nil
+	})
 }
 
 // Peek reports the current claim on a project without taking it: who holds
@@ -150,7 +256,11 @@ func (s *Set) Peek(name string) (Info, bool) {
 	if s == nil {
 		return Info{}, false
 	}
-	info, err := s.read(s.projectDir(name))
+	dir, err := s.projectDir(name)
+	if err != nil {
+		return Info{}, false
+	}
+	info, err := s.read(dir)
 	if err != nil {
 		return Info{}, false
 	}

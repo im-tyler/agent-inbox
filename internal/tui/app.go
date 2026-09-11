@@ -832,13 +832,13 @@ func (m Model) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "a":
 		// Attach to selected project.
-		args, dir, err := m.inbox.AttachArgs(m.sidebarCursor)
+		args, dir, lease, err := m.inbox.BeginAttach(m.sidebarCursor)
 		if err != nil {
 			m.toast = err.Error()
 			m.toastAt = time.Now()
 			return m, nil
 		}
-		m.attachRequest = &attachArgs{Argv: args, Dir: dir, Project: projectNameAt(m.inbox.Snapshot(), m.sidebarCursor)}
+		m.attachRequest = &attachArgs{Argv: args, Dir: dir, Lease: lease, Project: projectNameAt(m.inbox.Snapshot(), m.sidebarCursor)}
 		return m, tea.Quit
 
 	case "x":

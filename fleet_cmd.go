@@ -446,11 +446,12 @@ func fleetFollow(argv []string, stdout, stderr io.Writer) error {
 		}
 	}
 
-	// Baseline after one immediate pass, so an event already sitting in the
-	// spool counts as the change it is rather than being silently absorbed.
+	// Baseline BEFORE ingesting, so an event already sitting in the spool is
+	// counted as the change it is. The old order ingested first and absorbed
+	// the very events follow exists to report (F21).
+	base := fleetFingerprint(in.Snapshot())
 	in.Ingest(eventsDir)
 	in.RefreshExternal()
-	base := fleetFingerprint(in.Snapshot())
 
 	deadline := time.Now().Add(*timeout)
 	for {
@@ -460,10 +461,13 @@ func fleetFollow(argv []string, stdout, stderr io.Writer) error {
 		changes := diffFleet(base, fleetFingerprint(in.Snapshot()), in, watch)
 		if len(changes) > 0 {
 			if *asJSON {
-				return json.NewEncoder(stdout).Encode(struct {
+				if err := json.NewEncoder(stdout).Encode(struct {
 					Changed bool             `json:"changed"`
 					Changes []fleetChangeRow `json:"changes"`
-				}{true, changes})
+				}{true, changes}); err != nil {
+					return err
+				}
+				return nil
 			}
 			for _, c := range changes {
 				fmt.Fprintf(stdout, "%s: %s → %s", c.Project, c.From, c.To)
@@ -482,10 +486,16 @@ func fleetFollow(argv []string, stdout, stderr io.Writer) error {
 		}
 		if time.Now().After(deadline) {
 			if *asJSON {
-				return json.NewEncoder(stdout).Encode(struct {
+				// The representation changes, not the semantics: a timeout
+				// with no change is exit-1 errNoChange in text mode, and
+				// returning the encoder's nil here silently made the JSON
+				// mode a success (F22).
+				if err := json.NewEncoder(stdout).Encode(struct {
 					Changed bool             `json:"changed"`
 					Changes []fleetChangeRow `json:"changes"`
-				}{false, nil})
+				}{false, nil}); err != nil {
+					return err
+				}
 			}
 			return errNoChange
 		}
@@ -497,13 +507,16 @@ func fleetFollow(argv []string, stdout, stderr io.Writer) error {
 var errNoChange = errors.New("no change within the timeout")
 
 // fleetPin is the slice of a project that follow considers a change: status,
-// and why it is waiting. UpdatedAt alone is not one — saves happen for many
-// reasons, and a wake that fires on bookkeeping teaches the harness to ignore
-// wakes.
+// why it is waiting, and the semantic revision. UpdatedAt alone is not one —
+// saves happen for many reasons, and a wake that fires on bookkeeping
+// teaches the harness to ignore wakes. The revision is what sees a full
+// working → waiting round trip between two polls, which leaves status
+// exactly where it started (F21).
 type fleetPin struct {
 	Status     string
 	WaitReason string
 	WaitDetail string
+	Revision   uint64
 }
 
 func fleetFingerprint(snap []inbox.Project) map[string]fleetPin {
@@ -513,6 +526,7 @@ func fleetFingerprint(snap []inbox.Project) map[string]fleetPin {
 			Status:     string(p.Status),
 			WaitReason: string(p.WaitReason),
 			WaitDetail: p.WaitDetail,
+			Revision:   p.Revision,
 		}
 	}
 	return out

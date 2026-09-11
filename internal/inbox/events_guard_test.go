@@ -30,7 +30,7 @@ func TestAnEventFromAnotherToolIsIgnored(t *testing.T) {
 	if _, ok := in.applyEvent(Event{
 		SessionID: "claude-9", Dir: p.Dir, Tool: "claude",
 		Message: "hello", TS: time.Now().UnixNano(),
-	}); ok {
+	}, "test-event"); ok {
 		t.Fatal("a claude event was applied to a codex project")
 	}
 	got, _ := in.Detail(1)
@@ -49,7 +49,7 @@ func TestAnEventFromADifferentSessionInTheSameDirIsIgnored(t *testing.T) {
 	if _, ok := in.applyEvent(Event{
 		SessionID: "someone-elses", Dir: p.Dir, Tool: "claude",
 		Message: "not mine", TS: time.Now().UnixNano(),
-	}); ok {
+	}, "test-event"); ok {
 		t.Fatal("an unrelated session's event was applied")
 	}
 	got, _ := in.Detail(1)
@@ -68,7 +68,7 @@ func TestAnEventCannotInterruptAManagedTurn(t *testing.T) {
 	if _, ok := in.applyEvent(Event{
 		SessionID: "mine", Dir: p.Dir, Tool: "claude",
 		Message: "done", TS: time.Now().UnixNano(),
-	}); ok {
+	}, "test-event"); ok {
 		t.Fatal("an event was applied to a project mid-turn")
 	}
 	got, _ := in.Detail(1)
@@ -86,7 +86,7 @@ func TestAMatchingEventUpdatesTheProject(t *testing.T) {
 	name, ok := in.applyEvent(Event{
 		SessionID: "mine", Dir: p.Dir, Tool: "claude",
 		Message: "finished", TS: time.Now().UnixNano(),
-	})
+	}, "test-event")
 	if !ok || name != "api" {
 		t.Fatalf("a matching event was rejected (ok=%v name=%q)", ok, name)
 	}
@@ -107,7 +107,7 @@ func TestAStaleEventDoesNotRegressNewerState(t *testing.T) {
 	if _, ok := in.applyEvent(Event{
 		SessionID: "mine", Dir: p.Dir, Tool: "claude",
 		Message: "older", TS: now.Add(-time.Hour).UnixNano(),
-	}); ok {
+	}, "test-event"); ok {
 		t.Fatal("a stale event was applied")
 	}
 	got, _ := in.Detail(1)

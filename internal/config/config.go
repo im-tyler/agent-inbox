@@ -364,16 +364,30 @@ func (s *Settings) AddProject(p Project) bool {
 	return true
 }
 
-// RemoveProject removes the project with the given name. Returns true if
-// found and removed, false if no project matched.
+// RemoveProject removes the project with the given name, including its
+// membership in every group. Leaving the name in a group's member list wrote
+// a config that failed the next startup's validation — a project removed from
+// the UI could brick the program's config until somebody edited the file by
+// hand (F16). Returns true if found and removed, false if no project matched.
 func (s *Settings) RemoveProject(name string) bool {
+	found := false
 	for i, existing := range s.Projects {
 		if ident.SameName(existing.Name, name) {
 			s.Projects = append(s.Projects[:i], s.Projects[i+1:]...)
-			return true
+			found = true
+			break
 		}
 	}
-	return false
+	for gi := range s.Groups {
+		kept := s.Groups[gi].Projects[:0]
+		for _, member := range s.Groups[gi].Projects {
+			if !ident.SameName(member, name) {
+				kept = append(kept, member)
+			}
+		}
+		s.Groups[gi].Projects = kept
+	}
+	return found
 }
 
 // SetProjectTool updates the Tool field of the project with the given name.

@@ -106,6 +106,9 @@ type attachArgs struct {
 	// Project names the project being attached to, so the caller can record
 	// that the session advanced outside the dashboard's view of it.
 	Project string
+	// Lease holds the project's claim for the interactive run's lifetime.
+	// The caller releases it when the foreground child exits.
+	Lease *inbox.AttachLease
 }
 
 // New constructs a Model bound to the given inbox.
@@ -296,13 +299,13 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 
 	case "a":
-		args, dir, err := m.inbox.AttachArgs(m.selected)
+		args, dir, lease, err := m.inbox.BeginAttach(m.selected)
 		if err != nil {
 			m.toast = err.Error()
 			m.toastAt = time.Now()
 			return m, nil
 		}
-		m.attachRequest = &attachArgs{Argv: args, Dir: dir, Project: projectNameAt(m.inbox.Snapshot(), m.selected)}
+		m.attachRequest = &attachArgs{Argv: args, Dir: dir, Lease: lease, Project: projectNameAt(m.inbox.Snapshot(), m.selected)}
 		return m, tea.Quit
 
 	case "j", "down":
@@ -712,7 +715,7 @@ func (m Model) kingIndex() int { return m.inbox.KingIndexOf(m.activeGroup) }
 // the snapshot: this group's supervisor first, then its fleet in project order.
 //
 // Indices stay global rather than per-tab. Every inbox call the sidebar makes —
-// Cancel, AttachArgs, Detail, RemoveProject — addresses a project by its
+// Cancel, BeginAttach, Detail, RemoveProject — addresses a project by its
 // position in the whole list, and a second numbering scheme that had to be
 // translated at each of those call sites is exactly how off-by-one bugs get in.
 func (m Model) groupMembers(snap []inbox.Project) []int {

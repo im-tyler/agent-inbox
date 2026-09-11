@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
@@ -101,7 +100,7 @@ func (o *OpenCode) Send(ctx context.Context, dir, sessionID, prompt string) Resu
 	// stdout and stderr are kept apart. They were merged, so opencode's
 	// diagnostics ended up inside the reply on the recovery path below —
 	// stderr belongs in an error message, not in what the agent said.
-	cmd := exec.CommandContext(ctx, "opencode", args...)
+	cmd := startProcess(ctx, "opencode", args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -155,7 +154,7 @@ func (*OpenCode) AttachArgs(dir, sessionID string) []string {
 // identifies a new session.
 func sessionIDs(ctx context.Context, dir string) (map[string]bool, error) {
 	ids := map[string]bool{}
-	cmd := exec.CommandContext(ctx, "opencode", "session", "list")
+	cmd := startProcess(ctx, "opencode", "session", "list")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -301,7 +300,7 @@ func exportWithRetry(ctx context.Context, sessionID string, attempts int, priorM
 // exportSession runs `opencode export` and parses it.
 func exportSession(ctx context.Context, sessionID string) (ocExport, error) {
 	var ex ocExport
-	out, e := exec.CommandContext(ctx, "opencode", "export", sessionID).Output()
+	out, e := startProcess(ctx, "opencode", "export", sessionID).Output()
 	if e != nil {
 		return ex, wrapExec(e)
 	}

@@ -130,6 +130,10 @@ func run() error {
 		if err := runAttach(req.Argv, req.Dir); err != nil {
 			fmt.Fprintf(os.Stderr, "agent-inbox: attach ended: %v\n", err)
 		}
+		// The lease held the project's claim for the interactive run's
+		// lifetime, refusing managed sends on the same session. It comes off
+		// only now that the child is reaped.
+		req.Lease.Release()
 		// An interactive attach advances the real session without telling the
 		// dashboard, so the history shown here is no longer the whole
 		// conversation. Say so rather than implying completeness.
@@ -397,7 +401,7 @@ func doAttach(in *inbox.Inbox, rest string) {
 		fmt.Println("usage: attach <n>")
 		return
 	}
-	argv, dir, err := in.AttachArgs(idx)
+	argv, dir, lease, err := in.BeginAttach(idx)
 	if err != nil {
 		fmt.Printf("attach: %v\n", err)
 		return
@@ -409,6 +413,7 @@ func doAttach(in *inbox.Inbox, rest string) {
 	if err := c.Run(); err != nil {
 		fmt.Printf("attach ended: %v\n", err)
 	}
+	lease.Release()
 }
 
 func short(id string) string {
